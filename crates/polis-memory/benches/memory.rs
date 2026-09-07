@@ -109,19 +109,6 @@ fn bench_all(c: &mut Criterion) {
     let store = lake.store.clone();
     let handle = PolisHandle::new(store.clone(), None, Arc::new(NoHost), Arc::new(NoopSink));
 
-    // ingest: one item per iteration through the API (the hook's path).
-    let mut i = 0u64;
-    c.bench_function(&format!("ingest/{tag}"), |b| {
-        b.iter_batched(
-            || {
-                i += 1;
-                IngestRequest { items: vec![IngestItem { body: format!("bench ingest item {i} keeper ledger tile budget"), ..Default::default() }], ..Default::default() }
-            },
-            |req| handle.ingest(&req).unwrap(),
-            BatchSize::SmallInput,
-        )
-    });
-
     // answer pack, cold: a fresh connection per iteration (no page cache
     // for this process, no prepared statements).
     let path = lake._dir.join("bench.db");
@@ -172,15 +159,27 @@ fn bench_all(c: &mut Criterion) {
     // time the search alone.
     let embedder: Arc<dyn Embedder> = Arc::new(BagOfWords);
     let polis_sem = Polis::new(&store, None, &NoHost, &NoopSink).with_embedder(Some(embedder.clone()));
+    // Bounded: at 100k the backlog query (a correlated NOT EXISTS over the
+    // growing embeddings table) makes full indexing a matter of hours, so
+    // the bench indexes for at most POLIS_BENCH_INDEX_SECS (60) and says how
+    // far it got — the search below runs over that many targets.
+    let index_budget = Duration::from_secs(
+        std::env::var("POLIS_BENCH_INDEX_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60),
+    );
+    let index_started = std::time::Instant::now();
     let mut indexed = 0usize;
     loop {
         let done = polis_memory::index_tick(&polis_sem, 2_000);
         indexed += done;
-        if done == 0 {
+        if done == 0 || index_started.elapsed() > index_budget {
             break;
         }
     }
-    eprintln!("semantic index: {indexed} targets");
+    eprintln!(
+        "semantic index: {indexed} targets in {:.1}s{}",
+        index_started.elapsed().as_secs_f64(),
+        if index_started.elapsed() > index_budget { " (budget hit; partial index)" } else { "" }
+    );
     let mut qi = 0usize;
     c.bench_function(&format!("semantic/{tag}"), |b| {
         b.iter(|| {
@@ -194,6 +193,21 @@ fn bench_all(c: &mut Criterion) {
             qi += 1;
             build_answer_pack(&polis_sem, Some(&lake.queries[qi % lake.queries.len()]), None, 8)
         })
+    });
+
+    // ingest: one item per iteration through the API (the hook's path).
+    // LAST: criterion runs this tens of thousands of times, and every one
+    // is a row in the lake the read benches above must not have seen.
+    let mut i = 0u64;
+    c.bench_function(&format!("ingest/{tag}"), |b| {
+        b.iter_batched(
+            || {
+                i += 1;
+                IngestRequest { items: vec![IngestItem { body: format!("bench ingest item {i} keeper ledger tile budget"), ..Default::default() }], ..Default::default() }
+            },
+            |req| handle.ingest(&req).unwrap(),
+            BatchSize::SmallInput,
+        )
     });
 }
 

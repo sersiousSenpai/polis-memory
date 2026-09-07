@@ -274,7 +274,49 @@
       }
     },
     "benches": {
-      "_pending": "filled in by the criterion run (see docs/bench.md)"
+      "_note": "criterion means (ms) on this machine; corpus in a temp WAL file; ingest bench last. 100k = machine bodies and page text x0.1; semantic at 100k over a partial index (80,000 targets, 60 s budget).",
+      "1k": {
+        "packColdMs": 4.9,
+        "packWarmMs": 4.7,
+        "grepMs": 1.6,
+        "contextMs": 4.7,
+        "semanticMs": 0.21,
+        "semanticTargets": 1074,
+        "packWarmFusedMs": 5.5,
+        "ingestMs": 0.33,
+        "fileMb": 58
+      },
+      "10k": {
+        "packColdMs": 24.8,
+        "packWarmMs": 24.9,
+        "grepMs": 7.5,
+        "contextMs": 25.3,
+        "semanticMs": 2.2,
+        "semanticTargets": 10604,
+        "packWarmFusedMs": 30.3,
+        "ingestMs": 0.39,
+        "fileMb": 183
+      },
+      "100k": {
+        "packColdMs": 101,
+        "packWarmMs": 101,
+        "grepMs": 31,
+        "contextMs": 100,
+        "semanticMs": 18.2,
+        "semanticTargets": 80000,
+        "semanticPartial": true,
+        "packWarmFusedMs": 138,
+        "ingestMs": 0.53,
+        "fileMb": 558,
+        "seedSecs": 168
+      }
+    },
+    "fileVsMemory1k": {
+      "filePackP50Ms": 13.6,
+      "memoryPackP50Ms": 13.0,
+      "fileGrepP50Ms": 3.8,
+      "memoryGrepP50Ms": 2.8,
+      "note": "no file penalty worth a pragma; measured in the debug (test) profile"
     }
   }
 }

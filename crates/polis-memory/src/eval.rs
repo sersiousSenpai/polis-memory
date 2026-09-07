@@ -578,6 +578,51 @@ mod instruments {
         println!("calibration(real): {}", serde_json::to_string_pretty(&cal).unwrap());
     }
 
+    /// Diagnostic: the same lake as a FILE (WAL, as an install has it) and in
+    /// memory, the same queries — how much of the bench's file-backed cost
+    /// is SQLite's page cache. Prints per-op medians for: file as opened,
+    /// file after a WAL checkpoint, file with a 64 MB page cache, memory.
+    #[test]
+    #[ignore]
+    fn eval_file_vs_memory_diagnostic() {
+        use crate::corpus::{seed_corpus, CorpusSpec};
+        let dir = tempdir::TempDirGuard::new("polis-fvm");
+        let path = dir.path().join("lake.db");
+        let file = PolisStore::open(&path).unwrap();
+        seed_corpus(&file, &CorpusSpec::new(GATE_PROMPTS).with_seed(GATE_SEED)).unwrap();
+        let mem = PolisStore::open_in_memory().unwrap();
+        seed_corpus(&mem, &CorpusSpec::new(GATE_PROMPTS).with_seed(GATE_SEED)).unwrap();
+        let queries: Vec<String> = {
+            let polis = Polis::new(&mem, None, &NoHost, &NoopSink);
+            canary::freeze(&polis, 1, &CanaryConfig::default()).probes.iter().filter(|p| p.subject == Subject::PromptSpan).map(|p| p.query.clone()).collect()
+        };
+        let needles = ["ERR_POLIS", "src/keeper", "--redline-limit", "ERR_TILE", "src/voice", "--drafter-mode"];
+        let measure = |store: &PolisStore, label: &str| {
+            let polis = Polis::new(store, None, &NoHost, &NoopSink);
+            let mut pack_ms = Vec::new();
+            for q in queries.iter().take(30) {
+                let t = Instant::now();
+                let _ = crate::retrieval::build_answer_pack(&polis, Some(q), None, 8);
+                pack_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            let mut grep_ms = Vec::new();
+            for n in needles.iter().cycle().take(18) {
+                let t = Instant::now();
+                let _ = store.grep_memory(n, None, false, polis_core::types::GrepScope::All, 20);
+                grep_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            println!("{label:<34} pack p50 {:6.1} ms   grep p50 {:6.1} ms", Dist::of(pack_ms).p50, Dist::of(grep_ms).p50);
+        };
+        measure(&file, "file (as opened, WAL after seeding)");
+        file.conn().execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        measure(&file, "file (after WAL checkpoint)");
+        file.conn().execute_batch("PRAGMA cache_size = -65536").unwrap();
+        measure(&file, "file (64 MB page cache)");
+        file.conn().execute_batch("PRAGMA mmap_size = 268435456").unwrap();
+        measure(&file, "file (64 MB cache + 256 MB mmap)");
+        measure(&mem, "memory");
+    }
+
     mod tempdir {
         use std::path::{Path, PathBuf};
         use std::sync::atomic::{AtomicU64, Ordering};

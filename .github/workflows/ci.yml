@@ -14,6 +14,13 @@
 #               the dependency graph set; see the workspace Cargo.toml).
 #   lean-core — polis-core links serde, serde_json and sha2 and nothing else
 #               (Redline's size_guard pins the same fact from its side).
+#   eval      — the PR gate of the measurement program (docs/bench.md): the
+#               corpus-derived eval on the deterministic 1k synthetic corpus
+#               against bench/results/baseline.json — Recall@10 may not fall
+#               more than 2 points, no budgeted op's p95 may exceed §6.1 —
+#               and the criterion benches must still build. The 10k budget
+#               rows are applied to the 1k corpus as-is (conservative); the
+#               real numbers at 10k/100k are the bench run in docs/bench.md.
 name: ci
 
 on:
@@ -109,3 +116,16 @@ jobs:
           cargo tree -p polis-core --edges normal --depth 1 --locked | tail -n +2 | awk '{print $2}' | sort > got.txt
           printf 'serde\nserde_json\nsha2\n' > want.txt
           diff want.txt got.txt
+
+  eval:
+    name: eval gate (Recall@10, p95 budgets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: the eval gate against bench/results/baseline.json
+        run: cargo test -p polis-memory --features eval --locked -- eval_gate --nocapture
+      - name: the benches build
+        run: cargo bench -p polis-memory --locked --no-run
