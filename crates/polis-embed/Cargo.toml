@@ -1,11 +1,12 @@
 [package]
 name = "polis-embed"
-version = "0.1.0"
+version.workspace = true
 description = "Polis Memory embeddings: the Embedder trait, on-device Apple backends (feature `apple`), the vector cache, brute-force cosine search over the store's int8 index, and the bounded index tick."
-authors = ["Yusuf Al-Bazian"]
-edition = "2021"
-license = "Apache-2.0"
-repository = "https://github.com/sersiousSenpai/polis-memory"
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [features]
 default = []
@@ -14,9 +15,12 @@ default = []
 # build of the store never sees an objc2 crate; Redline turns it on.
 apple = ["dep:objc2", "dep:block2", "dep:objc2-foundation", "dep:objc2-natural-language"]
 
+[lints]
+workspace = true
+
 [dependencies]
-polis-core = { path = "../polis-core" }
-polis-store = { path = "../polis-store" }
+polis-core = { workspace = true }
+polis-store = { workspace = true }
 tracing = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]

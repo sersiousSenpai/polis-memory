@@ -1,15 +1,32 @@
-# polis-memory CI — INERT WHILE STAGED under src-tauri/crates/polis/ (GitHub
-# reads workflows only at the repo root). Becomes live when Session A7
-# extracts the repo. Three OSes because R1 (cross-platform core) is a stated
-# requirement, plus a KEYLESS job because R12 (no-model mode) is a stated
-# guarantee: capture, retrieval and centroid filing must work with no API key
-# and no `claude`/`codex` on PATH.
+# CI — every push to main and every pull request.
+#
+#   test      — build, the whole test suite and clippy (-D warnings), on three
+#               OSes because R1 (a cross-platform core) is a stated requirement.
+#               Twice per OS: default features (what a host links), and every
+#               feature (the HTTP model backends, the standalone daemon, the
+#               Apple embedder — a no-op off macOS by cfg).
+#   keyless   — R12 (the no-model guarantee) proven by an environment that has
+#               nothing: no API key, no `claude` / `codex` / `ollama` on PATH.
+#               Session C1 grows it into the real flow (init → capture → search
+#               → file); until then it asserts the precondition and the core.
+#   licenses  — cargo-deny against deny.toml (identical to Redline's).
+#   msrv      — the workspace checks on the pinned `rust-version` (the floor
+#               the dependency graph set; see the workspace Cargo.toml).
+#   lean-core — polis-core links serde, serde_json and sha2 and nothing else
+#               (Redline's size_guard pins the same fact from its side).
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,6 +36,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -26,17 +44,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --all-features --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   keyless:
-    # R12: the no-model guarantee, proven by an environment that has nothing.
-    # Filled in by Session C1 (`polis init` → capture → search → file with no
-    # model configured); until then it asserts the precondition only.
     name: keyless (no model, no CLI)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       ANTHROPIC_API_KEY: ""
       OPENAI_API_KEY: ""
@@ -55,19 +75,37 @@ jobs:
   licenses:
     name: licenses (cargo-deny)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses
 
-  size:
-    # The lean-library promise: polis-core stays serde + sha2, and the
-    # `polis` binary ships under the ceiling docs/bench.md states. Filled in by
-    # Session G1 once cargo-dist produces the binaries to measure.
-    name: size
+  msrv:
+    name: msrv (rust-version)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: read rust-version from the workspace manifest
+        id: msrv
+        run: echo "version=$(grep -E '^rust-version' Cargo.toml | sed -E 's/.*"([0-9.]+)".*/\1/')" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-features --locked
+
+  lean-core:
+    name: lean-core (serde + sha2 only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo tree -p polis-core --edges normal --depth 1
+      - name: polis-core links serde, serde_json and sha2 and nothing else
+        run: |
+          cargo tree -p polis-core --edges normal --depth 1 --locked | tail -n +2 | awk '{print $2}' | sort > got.txt
+          printf 'serde\nserde_json\nsha2\n' > want.txt
+          diff want.txt got.txt

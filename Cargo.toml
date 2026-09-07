@@ -1,0 +1,50 @@
+# Polis Memory — the workspace.
+#
+# Six crates, one vocabulary. Publish order (each depends only on the ones
+# before it): core → store → embed → llm → server → memory. `polis-mcp` joins
+# between server and memory in Program E1.
+#
+# Shared package metadata lives here and is inherited (`*.workspace = true`)
+# by every crate, so a version bump or an MSRV change is one edit.
+[workspace]
+# Resolver 3 is MSRV-aware: `cargo generate-lockfile` / `cargo update` prefer
+# dependency versions whose own `rust-version` fits the pin below, so the
+# committed Cargo.lock stays buildable on the MSRV without hand-pinning.
+resolver = "3"
+members = [
+    "crates/polis-core",
+    "crates/polis-store",
+    "crates/polis-embed",
+    "crates/polis-llm",
+    "crates/polis-server",
+    "crates/polis-memory",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# MSRV. The floor set by the dependency graph on 2026-09-07: `reqwest` 0.13
+# (behind polis-llm's `anthropic` / `openai-compat` features) and `uuid` 1.23
+# both require 1.85; every other dependency is older. Verified by
+# `cargo +1.85.0 check --workspace --all-features --locked`. Raise it
+# deliberately, in its own commit, when a dependency forces it.
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["Yusuf Al-Bazian"]
+repository = "https://github.com/sersiousSenpai/polis-memory"
+
+# The intra-workspace edges. `version` beside `path` is what lets each crate
+# publish: cargo strips the path and keeps the version requirement.
+[workspace.dependencies]
+polis-core = { version = "0.1.0", path = "crates/polis-core" }
+polis-store = { version = "0.1.0", path = "crates/polis-store" }
+polis-embed = { version = "0.1.0", path = "crates/polis-embed" }
+polis-llm = { version = "0.1.0", path = "crates/polis-llm" }
+polis-server = { version = "0.1.0", path = "crates/polis-server" }
+polis-memory = { version = "0.1.0", path = "crates/polis-memory" }
+
+# Clippy runs with `-D warnings` in CI. The one lint switched off, and why:
+# the store's row readers return the tuple their SQL selects, documented at
+# each function; naming those tuples would add aliases without adding meaning.
+[workspace.lints.clippy]
+type_complexity = "allow"

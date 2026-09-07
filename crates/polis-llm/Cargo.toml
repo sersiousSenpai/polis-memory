@@ -1,11 +1,12 @@
 [package]
 name = "polis-llm"
-version = "0.1.0"
+version.workspace = true
 description = "Polis Memory model backends: the Agent trait the gardener speaks, with Claude Code CLI and Codex CLI backends, and Anthropic / OpenAI-compatible HTTP backends behind features."
-authors = ["Yusuf Al-Bazian"]
-edition = "2021"
-license = "Apache-2.0"
-repository = "https://github.com/sersiousSenpai/polis-memory"
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [features]
 default = []
@@ -15,8 +16,11 @@ default = []
 anthropic = ["dep:reqwest"]
 openai-compat = ["dep:reqwest"]
 
+[lints]
+workspace = true
+
 [dependencies]
-polis-core = { path = "../polis-core" }
+polis-core = { workspace = true }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

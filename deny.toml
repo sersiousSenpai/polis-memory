@@ -1,10 +1,12 @@
-# cargo-deny configuration for the polis-memory repo — the license gate.
-# Kept IDENTICAL to src-tauri/deny.toml while staged (the two allowlists must
-# not drift: Redline links these crates, so anything admitted here enters
-# Redline's graph too). At extraction (Session A7) this file moves to the new
-# repo root and its CI runs `cargo deny check licenses` on every push.
+# cargo-deny configuration for polis-memory — the license gate.
 #
-# ---- copied verbatim from src-tauri/deny.toml below this line ----
+# Run: cargo deny check licenses
+#
+# Kept IDENTICAL to Redline's src-tauri/deny.toml (the two allowlists must not
+# drift: Redline links these crates, so anything admitted here enters
+# Redline's graph too). CI runs it on every push and pull request.
+#
+# ---- identical to Redline's src-tauri/deny.toml below this line ----
 
 # cargo-deny configuration — license compliance gate.
 # Run: cargo deny --manifest-path src-tauri/Cargo.toml check licenses
