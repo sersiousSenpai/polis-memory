@@ -19,8 +19,7 @@ and TypeScript clients).
 ## Crates
 
 Publish order — each crate depends only on the ones above it:
-core → store → embed → llm → server → memory (`polis-mcp` joins between
-server and memory).
+core → store → embed → llm → server → mcp → memory.
 
 | Crate | What it is | Dependencies it is allowed |
 |---|---|---|
@@ -29,8 +28,8 @@ server and memory).
 | [`polis-embed`](crates/polis-embed) | The `Embedder` trait, the on-device Apple backends (feature `apple`, macOS only), the vector cache, brute-force cosine search over the store's int8 index, and the bounded index tick — all taking an explicit embedder (provider SELECTION stays with the host). Portable backends (`model2vec`, `fastembed`, `openai`) come with Program C | `polis-core`, `polis-store`, `tracing`; `apple` → the objc2 family |
 | [`polis-llm`](crates/polis-llm) | The `Agent` trait the gardener speaks, with `Usage` / `UsageSink`; backends `ClaudeCli` (stream-json) and `CodexCli` (`exec --json`) by default, `AnthropicApi` and `OpenAiCompat` behind features; the `StreamLine` classifier | `polis-core`, `async-trait`, `serde`, `tokio` (process); `anthropic` / `openai-compat` → `reqwest` |
 | [`polis-server`](crates/polis-server) | `router<S>()` over `Arc<dyn MemoryApi>` (handlers take `State<PolisState>`; a host provides `FromRef`), the `ROUTES` table (24 rows, `Open \| HookContract \| Write(scope)` — the source of the API doc and the generated clients), the capture route + `IngestObserver` seams, `CaptureHookSpec` (the hook installer); feature `standalone` = bind + token guard | `polis-core`, `axum` 0.7, `serde`, `tokio` (`rt`); `standalone` → tokio `net` |
-| `polis-mcp` | *(Program E1)* rmcp server over `Arc<dyn MemoryApi>` (stdio + streamable HTTP) | `polis-core`, `rmcp` |
-| [`polis-memory`](crates/polis-memory) | THE crate an integrator adds: `Polis` (a borrowed view) + `PolisHandle` (owned; implements `MemoryApi`), retrieval (the answer pack, timeline, map, tree / node views), the organizer and the gardener's `step` (organize, compaction, observations, the semantic index), bundle export, the markdown mirror, and the `classmemory` skill text (`skills/classmemory/SKILL.md`, shipped in the crate) | re-exports the four crates above; `apple` → `polis-embed/apple` |
+| [`polis-mcp`](crates/polis-mcp) | The read tools over the Model Context Protocol (`memory_search` first), the compat aliases, resources and the grounding prompt; stdio and a streamable-HTTP tower service a host nests at `/mcp`; feature `remote` = `RemoteApi`, the `MemoryApi` as an HTTP client over a running daemon | `polis-core`, `rmcp`, `serde`, `tokio` (`rt`); `remote` → `ureq` (plain HTTP) |
+| [`polis-memory`](crates/polis-memory) | THE crate an integrator adds: `Polis` (a borrowed view) + `PolisHandle` (owned; implements `MemoryApi`), retrieval (the answer pack, timeline, map, tree / node views), the organizer and the gardener's `step` (organize, compaction, observations, the semantic index, the backup cadence), `backup` (snapshots, verify, restore), bundle export, the markdown mirror, the `classmemory` skill text (shipped in the crate; a template by address), and — feature `cli` — the `polis` binary | re-exports the four crates above; `apple` → `polis-embed/apple`; `cli` → clap + polis-server `standalone` + polis-mcp `remote` |
 
 ## Using it from a host
 
@@ -48,9 +47,35 @@ if it wants the capture route, `polis_core::host::IngestObserver`; builds a
 and auth. The gardener runs as `polis_memory::gardener::step(...)` on the
 host's idle signal. Redline is the reference host (`src-tauri/src/polis_host.rs`).
 
-Enable nothing you do not need: `cli` (ahead), `standalone`, `anthropic` and
+Enable nothing you do not need: `cli`, `standalone`, `anthropic` and
 `openai-compat` each add a dependency a host usually already has, and cargo
 unifies features across a graph.
+
+## Install
+
+Nothing is published yet. From the repo:
+
+```sh
+cargo install --git https://github.com/sersiousSenpai/polis-memory polis-memory --features cli
+polis init                              # ~/.polis: the store, a private token, config.toml
+polis hook install                      # capture every prompt you submit in Claude Code
+polis mcp install --client claude       # answer questions about them (see docs/mcp.md)
+polis doctor                            # the install, the chain, the backups, the clients
+```
+
+`polis serve` runs the daemon (HTTP routes, MCP at `/mcp`, the gardener,
+rotating verified backups); without it every command opens the store file
+directly and the capture hook writes locally. `polis restore` swaps in the
+newest verifying snapshot when `doctor` reports the chain red or the file
+unsound. No model, key or network is needed for any of this.
+
+## MCP
+
+`claude mcp add polis -- polis mcp` (stdio) or, against a running daemon,
+`claude mcp add --transport http polis http://127.0.0.1:7677/mcp`. Start with
+`memory_search`; every hit carries a `#seq`. The tool table, the compat
+aliases, the resources and the grounding prompt are in
+[docs/mcp.md](docs/mcp.md).
 
 ## Build and test
 

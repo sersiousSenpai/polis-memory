@@ -50,3 +50,11 @@ polis-memory = { version = "0.1.0", path = "crates/polis-memory" }
 # each function; naming those tuples would add aliases without adding meaning.
 [workspace.lints.clippy]
 type_complexity = "allow"
+
+# The `polis` binary's release profile — the same three levers Redline's
+# app uses. G1 (cargo-dist) measures and ratchets the byte ceiling; this is
+# the shape it starts from.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

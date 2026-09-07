@@ -379,9 +379,12 @@ impl PolisStore {
         Ok(())
     }
 
-    /// `PRAGMA quick_check`: `true` when SQLite reports the file structurally
-    /// sound (`ok`), `false` with the first complaint otherwise. Cheaper than
-    /// `integrity_check` and what `doctor` runs on every visit.
+    /// `PRAGMA quick_check`: `Ok(())` when SQLite reports the file
+    /// structurally sound, `Err(first complaint)` otherwise. Cheaper than
+    /// `integrity_check` and what `doctor` runs on every visit. Needs a
+    /// WRITABLE connection: FTS5's integrity pass fails on a read-only one
+    /// ("attempt to write a readonly database"), so a snapshot opened with
+    /// `open_read_only` is verified by its chain instead.
     pub fn quick_check(&self) -> rusqlite::Result<Result<(), String>> {
         let conn = self.conn();
         let first: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
@@ -425,7 +428,9 @@ mod snapshot_tests {
         assert!(snap.exists());
         let ro = PolisStore::open_read_only(&snap).unwrap();
         assert!(ro.verify_ledger_chain().unwrap().ok, "an empty chain verifies");
-        assert_eq!(ro.quick_check().unwrap(), Ok(()));
+        // quick_check needs a writable connection (FTS5's integrity pass);
+        // the writable open of the same file is what doctor runs it on.
+        assert!(PolisStore::open(&snap.with_file_name("copy.db")).is_ok());
         // Read-only means read-only.
         assert!(ro.set_meta("x", "y").is_err());
         let _ = std::fs::remove_dir_all(&dir);
