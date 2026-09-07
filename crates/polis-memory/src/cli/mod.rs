@@ -1,0 +1,432 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
+//! The `polis` command (feature `cli`, Session E1):
+//! `init | serve | mcp | hook | capture | search | context | grep | tree |
+//! stats | verify | doctor | restore | backup`. Reads go to a running daemon
+//! when there is one and to the store file otherwise (`backend`); nothing
+//! here needs a model, a key or a network.
+
+pub mod backend;
+pub mod doctor;
+pub mod home;
+pub mod install;
+pub mod serve;
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use clap::{Parser, Subcommand, ValueEnum};
+use polis_core::api::{CaptureRequest, ContextRequest, GrepRequest, Scope, SearchRequest, TreeRequest};
+use polis_core::ledger::Origin;
+use polis_core::types::GrepScope;
+use polis_core::MemoryApi;
+use polis_mcp::render;
+use polis_server::hook::CaptureHookSpec;
+use polis_store::PolisStore;
+
+use backend::Backend;
+use home::Home;
+
+#[derive(Parser)]
+#[command(name = "polis", version, about = "Polis Memory — a local-first memory for coding agents", long_about = None)]
+struct Cli {
+    /// Emit JSON instead of text.
+    #[arg(long, global = true)]
+    json: bool,
+    /// A daemon to talk to instead of the store file (also `POLIS_REMOTE`).
+    #[arg(long, global = true, value_name = "URL")]
+    remote: Option<String>,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Create $POLIS_HOME (~/.polis): the store, a private token, config.toml.
+    /// Identity keys (Ed25519, device chains) land in E2; until then the
+    /// author is the local user name.
+    Init,
+    /// Run the daemon: HTTP routes, MCP at /mcp, the gardener, rotating backups.
+    Serve {
+        /// Bind address (default: config.toml `listen`, else 127.0.0.1:7677).
+        #[arg(long)]
+        listen: Option<String>,
+        /// A token file for the writes (required for a non-loopback bind).
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+        /// Serve without running the gardener.
+        #[arg(long)]
+        no_gardener: bool,
+        /// Gardener tick in seconds.
+        #[arg(long, default_value_t = 30)]
+        tick: u64,
+    },
+    /// Serve MCP over stdio (what `claude mcp add polis -- polis mcp` runs),
+    /// or write a client's config.
+    Mcp {
+        #[command(subcommand)]
+        cmd: Option<McpCmd>,
+    },
+    /// Install, remove or inspect the UserPromptSubmit capture hook.
+    Hook {
+        #[command(subcommand)]
+        cmd: HookCmd,
+    },
+    /// The capture hook's command: reads the UserPromptSubmit payload on stdin,
+    /// records the prompt (through the daemon, or locally), always exits 0.
+    Capture,
+    /// The answer pack for a question — START HERE.
+    Search {
+        q: Vec<String>,
+        #[arg(long)]
+        node: Option<String>,
+        #[arg(long)]
+        limit: Option<i64>,
+    },
+    /// The answer pack rendered as one grounding block.
+    Context {
+        q: Vec<String>,
+        #[arg(long)]
+        node: Option<String>,
+        #[arg(long)]
+        max_tokens: Option<usize>,
+    },
+    /// Literal / regex search over the record.
+    Grep {
+        literal: String,
+        #[arg(long)]
+        re: Option<String>,
+        #[arg(long)]
+        case_sensitive: bool,
+        /// all | prompts | browse
+        #[arg(long, default_value = "all")]
+        kinds: String,
+        #[arg(long)]
+        limit: Option<i64>,
+    },
+    /// The class catalog.
+    Tree {
+        #[arg(long)]
+        root: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Counts over the record.
+    Stats,
+    /// Re-walk the hash chain.
+    Verify,
+    /// Check the install, the file, the chain, the hook, the clients, the backups.
+    Doctor,
+    /// Swap in a verifying snapshot (newest, or --from FILE). Stop `polis serve` first.
+    Restore {
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
+    /// Write one snapshot now (verified, pruned to keep 7).
+    Backup,
+}
+
+#[derive(Subcommand)]
+enum McpCmd {
+    /// Write the MCP server entry into a client's config (merge, never overwrite).
+    Install {
+        #[arg(long, value_enum)]
+        client: ClientArg,
+        /// The config file (default: the client's usual place).
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// The polis binary to point at (default: this one).
+        #[arg(long)]
+        polis: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ClientArg {
+    Claude,
+    Codex,
+    Project,
+}
+
+#[derive(Subcommand)]
+enum HookCmd {
+    Install {
+        /// Claude Code's global settings (default ~/.claude/settings.json).
+        #[arg(long)]
+        settings: Option<PathBuf>,
+        /// The polis binary the hook runs (default: this one).
+        #[arg(long)]
+        polis: Option<PathBuf>,
+    },
+    Uninstall {
+        #[arg(long)]
+        settings: Option<PathBuf>,
+    },
+    Status {
+        #[arg(long)]
+        settings: Option<PathBuf>,
+    },
+}
+
+/// The spec `polis hook` installs for this home.
+pub fn hook_spec(home: &Home) -> CaptureHookSpec {
+    doctor::spec_for(home, None)
+}
+
+fn init_logging() {
+    let level = match std::env::var("POLIS_LOG").ok().as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("trace") => tracing::Level::TRACE,
+        Some("debug") => tracing::Level::DEBUG,
+        Some("info") => tracing::Level::INFO,
+        Some("error") => tracing::Level::ERROR,
+        _ => tracing::Level::WARN,
+    };
+    let _ = tracing_subscriber::fmt().with_max_level(level).with_writer(std::io::stderr).with_ansi(false).try_init();
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| format!("runtime: {e}"))
+}
+
+fn words(v: Vec<String>) -> Option<String> {
+    let s = v.join(" ").trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+fn emit<T: serde::Serialize>(json: bool, value: &T, text: impl FnOnce() -> String) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(value).unwrap_or_default());
+    } else {
+        println!("{}", text());
+    }
+}
+
+/// The entry point: exit code.
+pub fn main() -> i32 {
+    init_logging();
+    let cli = Cli::parse();
+    match run(cli) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("polis: {e}");
+            1
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<(), String> {
+    let home = Home::resolve()?;
+    let json = cli.json;
+    match cli.cmd {
+        Cmd::Init => {
+            let fresh = !home.exists();
+            home.ensure()?;
+            let db = home.db_path();
+            let created_db = !db.exists();
+            PolisStore::open(&db).map_err(|e| format!("create {}: {e}", db.display()))?;
+            home.ensure_token()?;
+            let wrote_config = home.ensure_config()?;
+            emit(json, &serde_json::json!({ "home": home.root, "db": db, "createdHome": fresh, "createdDb": created_db, "wroteConfig": wrote_config }), || {
+                format!(
+                    "home   {}{}\nstore  {}{}\ntoken  {}\nconfig {}{}\n\nnext: `polis hook install` (capture prompts), `polis mcp install --client claude` (answer them), `polis serve` (a daemon with the gardener and backups).\nidentity keys and device chains land in E2; the author is the local user name today.",
+                    home.root.display(),
+                    if fresh { " (created)" } else { "" },
+                    db.display(),
+                    if created_db { " (created)" } else { " (present)" },
+                    home.token_path().display(),
+                    home.config_path().display(),
+                    if wrote_config { " (written)" } else { "" }
+                )
+            });
+            Ok(())
+        }
+        Cmd::Serve { listen, token_file, no_gardener, tick } => {
+            let rt = runtime()?;
+            rt.block_on(serve::run(&home, serve::ServeOptions { listen, token_file, no_gardener, tick_secs: tick }))
+        }
+        Cmd::Mcp { cmd: None } => {
+            let backend = backend::choose(&home, cli.remote);
+            tracing::info!(backend = %backend.describe(), "polis mcp");
+            let api = backend::open(&home, &backend)?;
+            let rt = runtime()?;
+            rt.block_on(polis_mcp::serve_stdio(api)).map_err(|e| format!("mcp: {e}"))
+        }
+        Cmd::Mcp { cmd: Some(McpCmd::Install { client, path, polis }) } => {
+            let client = match client {
+                ClientArg::Claude => install::Client::Claude,
+                ClientArg::Codex => install::Client::Codex,
+                ClientArg::Project => install::Client::Project,
+            };
+            let (path, outcome) = install::install(client, path, polis)?;
+            emit(json, &serde_json::json!({ "path": path, "outcome": outcome }), || format!("{}: polis MCP server {outcome}", path.display()));
+            Ok(())
+        }
+        Cmd::Hook { cmd } => {
+            let settings = |s: Option<PathBuf>| s.or_else(install::claude_settings_path).ok_or_else(|| "no settings path (set HOME or pass --settings)".to_string());
+            match cmd {
+                HookCmd::Install { settings: s, polis } => {
+                    let path = settings(s)?;
+                    let spec = doctor::spec_for(&home, polis);
+                    let installed = spec.install_at(&path)?;
+                    emit(json, &serde_json::json!({ "settings": path, "installed": installed, "command": spec.command() }), || format!("{}: capture hook {} → {}", path.display(), if installed { "installed" } else { "NOT installed" }, spec.command()));
+                    Ok(())
+                }
+                HookCmd::Uninstall { settings: s } => {
+                    let path = settings(s)?;
+                    let still = hook_spec(&home).uninstall_at(&path)?;
+                    emit(json, &serde_json::json!({ "settings": path, "installed": still }), || format!("{}: capture hook {}", path.display(), if still { "still present" } else { "removed" }));
+                    Ok(())
+                }
+                HookCmd::Status { settings: s } => {
+                    let path = settings(s)?;
+                    let spec = hook_spec(&home);
+                    let (installed, current) = (spec.installed_at(&path), spec.current_at(&path));
+                    emit(json, &serde_json::json!({ "settings": path, "installed": installed, "current": current, "command": spec.command() }), || {
+                        format!("{}: {}{}\ncommand: {}", path.display(), if installed { "installed" } else { "not installed" }, if installed && !current { " (stale — run `polis hook install`)" } else { "" }, spec.command())
+                    });
+                    Ok(())
+                }
+            }
+        }
+        Cmd::Capture => {
+            capture(&home);
+            Ok(())
+        }
+        Cmd::Search { q, node, limit } => {
+            let api = open(&home, cli.remote)?;
+            let req = SearchRequest { q: words(q), node, limit, scope: Scope::default() };
+            let pack = api.search(&req).map_err(|e| e.to_string())?;
+            emit(json, &pack, || render::pack(&pack));
+            Ok(())
+        }
+        Cmd::Context { q, node, max_tokens } => {
+            let api = open(&home, cli.remote)?;
+            let q = words(q).ok_or("a question is required")?;
+            let block = api.context(&ContextRequest { q, node, max_tokens, scope: Scope::default() }).map_err(|e| e.to_string())?;
+            emit(json, &block, || render::context(&block));
+            Ok(())
+        }
+        Cmd::Grep { literal, re, case_sensitive, kinds, limit } => {
+            let api = open(&home, cli.remote)?;
+            let hits = api
+                .grep(&GrepRequest { literal, regex: re, case_sensitive, kinds: GrepScope::parse(Some(&kinds)), limit: Some(limit.unwrap_or(30)), scope: Scope::default() })
+                .map_err(|e| e.to_string())?;
+            emit(json, &serde_json::json!({ "hits": hits }), || render::grep(&hits));
+            Ok(())
+        }
+        Cmd::Tree { root, project } => {
+            let api = open(&home, cli.remote)?;
+            let nodes = api.tree(&TreeRequest { root, project, scope: Scope::default() }).map_err(|e| e.to_string())?;
+            emit(json, &serde_json::json!({ "nodes": nodes }), || render::tree(&nodes));
+            Ok(())
+        }
+        Cmd::Stats => {
+            let api = open(&home, cli.remote)?;
+            let s = api.stats(&Scope::default()).map_err(|e| e.to_string())?;
+            emit(json, &s, || render::stats(&s));
+            Ok(())
+        }
+        Cmd::Verify => {
+            let api = open(&home, cli.remote)?;
+            let v = api.verify().map_err(|e| e.to_string())?;
+            emit(json, &v, || render::verdict(&v));
+            if v.ok {
+                Ok(())
+            } else {
+                Err(format!("the chain does not verify (first bad seq {:?}) — `polis doctor` for the restore offer", v.first_bad_seq))
+            }
+        }
+        Cmd::Doctor => {
+            let d = doctor::run(&home);
+            emit(json, &d, || doctor::render(&d));
+            if d.problems.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("{} problem(s)", d.problems.len()))
+            }
+        }
+        Cmd::Restore { from } => {
+            if let Some(base) = backend::daemon_alive(&home) {
+                return Err(format!("a daemon holds the store ({base}) — stop `polis serve` before restoring"));
+            }
+            let r = crate::backup::restore(&home.db_path(), from.as_deref(), &home.backups_dir())?;
+            emit(json, &serde_json::json!({ "from": r.from, "keptAs": r.kept_as, "checked": r.verdict.checked, "ok": r.verdict.ok }), || {
+                format!("restored {} → {}\n  snapshot chain: {} events, ok\n  previous file kept as {}", r.from.display(), home.db_path().display(), r.verdict.checked, r.kept_as.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "(none)".into()))
+            });
+            Ok(())
+        }
+        Cmd::Backup => {
+            let db = home.db_path();
+            let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
+            let policy = crate::backup::BackupPolicy::default();
+            let r = crate::backup::backup_verify_prune(&store, &home.backups_dir(), policy.keep)?;
+            emit(json, &serde_json::json!({ "path": r.path, "ok": r.verdict.ok, "checked": r.verdict.checked, "pruned": r.pruned }), || {
+                format!("{} · chain {} ({} events) · pruned {}", r.path.display(), if r.verdict.ok { "ok" } else { "BROKEN" }, r.verdict.checked, r.pruned)
+            });
+            if r.verdict.ok {
+                Ok(())
+            } else {
+                Err("the snapshot was written but its chain does not verify".into())
+            }
+        }
+    }
+}
+
+fn open(home: &Home, remote: Option<String>) -> Result<Arc<dyn MemoryApi>, String> {
+    let backend = backend::choose(home, remote);
+    backend::open(home, &backend)
+}
+
+/// The hook's whole life: never block prompt submission. Every branch ends
+/// in exit 0; anything printed to stdout is the daemon's own hook answer
+/// (`hookSpecificOutput`), which the harness hands the model as context.
+fn capture(home: &Home) {
+    use std::io::Read;
+    let started = std::time::Instant::now();
+    let budget = Duration::from_millis(1000);
+    let mut raw = String::new();
+    if std::io::stdin().read_to_string(&mut raw).is_err() || raw.trim().is_empty() {
+        return;
+    }
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let prompt = polis_server::ingest_prompt_text(&payload);
+    if prompt.is_empty() {
+        return;
+    }
+    let session = payload.get("session_id").and_then(serde_json::Value::as_str).map(str::to_string);
+    let cwd = payload.get("cwd").and_then(serde_json::Value::as_str).map(str::to_string);
+
+    // A daemon: hand it the payload as the hook would, and relay only a
+    // body carrying hookSpecificOutput.
+    if let Some(info) = home.read_serve() {
+        let remaining = budget.saturating_sub(started.elapsed()).max(Duration::from_millis(150));
+        let api = polis_mcp::remote::RemoteApi::new(info.base_url(), home.read_token()).with_timeout(remaining);
+        match api.capture_raw(&payload) {
+            Ok(body) => {
+                if body.get("hookSpecificOutput").is_some() {
+                    print!("{body}");
+                }
+                return;
+            }
+            Err(e) => tracing::debug!(error = %e, "daemon capture failed; recording locally"),
+        }
+    }
+    // No daemon (or it did not answer in time): the store, here.
+    let db = home.db_path();
+    if !db.exists() {
+        tracing::warn!(db = %db.display(), "capture: no store — run `polis init`");
+        return;
+    }
+    match backend::open(home, &Backend::Local) {
+        Ok(api) => {
+            let req = CaptureRequest { body: prompt, origin: Origin::External, surface: "external".into(), session, project: cwd };
+            if let Err(e) = api.capture(&req) {
+                tracing::warn!(error = %e, "capture: local record failed");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "capture: could not open the store"),
+    }
+}

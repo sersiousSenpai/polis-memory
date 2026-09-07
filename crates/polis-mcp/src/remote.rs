@@ -118,6 +118,14 @@ impl RemoteApi {
         Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
     }
 
+    /// The hook contract, raw: POST the UserPromptSubmit payload as the hook
+    /// would and return the daemon's body verbatim (a `{seq}` receipt, a
+    /// `{skipped}` note, or a `hookSpecificOutput` answer the harness must
+    /// see). What `polis capture` relays.
+    pub fn capture_raw(&self, payload: &Value) -> Result<Value, MemoryError> {
+        self.post_json("/v1/prompts/ingest", payload).map(|(_, v)| v)
+    }
+
     /// `GET /v1/memory/health` with a short timeout: is a daemon alive at
     /// `base`? The backend chooser's probe.
     pub fn probe(base: &str, timeout: Duration) -> Option<HealthReport> {

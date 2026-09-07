@@ -280,7 +280,7 @@ pub fn browse(hits: &[BrowseHit]) -> String {
 
 fn top(pairs: &[(String, i64)], n: usize) -> String {
     let mut v: Vec<&(String, i64)> = pairs.iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     v.iter().take(n).map(|(k, c)| format!("{k}={c}")).collect::<Vec<_>>().join(" ")
 }
 

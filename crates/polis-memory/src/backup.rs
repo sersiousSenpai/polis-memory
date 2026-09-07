@@ -75,7 +75,7 @@ pub fn list_snapshots(dir: &Path) -> Vec<PathBuf> {
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter_map(|p| snapshot_stamp(&p).map(|s| (s, p)))
         .collect();
-    stamped.sort_by(|a, b| b.0.cmp(&a.0));
+    stamped.sort_by_key(|(stamp, _)| std::cmp::Reverse(*stamp));
     stamped.into_iter().map(|(_, p)| p).collect()
 }
 

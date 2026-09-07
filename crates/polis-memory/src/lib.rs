@@ -21,6 +21,8 @@
 pub mod agent;
 pub mod backup;
 pub mod bundle;
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod gardener;
 pub mod mirror;
 pub mod organize;

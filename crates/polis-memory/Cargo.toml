@@ -12,6 +12,27 @@ repository.workspace = true
 default = []
 # Apple's on-device embedder (macOS) — Redline turns it on.
 apple = ["polis-embed/apple"]
+# The `polis` binary (Session E1): init | serve | mcp | hook | capture |
+# search | context | grep | tree | stats | verify | doctor | restore | backup.
+# NEVER enabled by a host: it pulls clap, the standalone server, the MCP
+# transports and their runtime into the graph (the documented feature-
+# unification hazard; Redline's `polis_deps_stay_lean` pins it off).
+cli = [
+    "dep:clap",
+    "dep:polis-mcp",
+    "polis-mcp/remote",
+    "dep:polis-server",
+    "polis-server/standalone",
+    "dep:axum",
+    "dep:tokio",
+    "dep:tracing-subscriber",
+    "dep:uuid",
+]
+
+[[bin]]
+name = "polis"
+path = "src/bin/polis.rs"
+required-features = ["cli"]
 
 [lints]
 workspace = true
@@ -25,6 +46,14 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
+# --- the `cli` feature's deps (all optional) ---
+clap = { version = "4", features = ["derive"], optional = true }
+polis-mcp = { workspace = true, optional = true }
+polis-server = { workspace = true, optional = true }
+axum = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "io-std"], optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"], optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
