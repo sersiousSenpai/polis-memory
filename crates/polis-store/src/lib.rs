@@ -359,3 +359,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Snapshots and integrity (Session E1): what `polis backup` / `restore` /
+// `doctor` and the gardener's backup cadence stand on. Host-neutral — Redline
+// keeps its own `snapshot_database` wrapper, which can call these.
+// ---------------------------------------------------------------------------
+
+impl PolisStore {
+    /// `VACUUM INTO` a consistent copy of the whole database at `dest` — the
+    /// crown-jewels backup. Works while the store is open and in use (the
+    /// copy is transactionally consistent); `dest` must not exist.
+    pub fn snapshot_to(&self, dest: &Path) -> rusqlite::Result<()> {
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let conn = self.conn();
+        conn.execute("VACUUM INTO ?1", [dest.to_string_lossy().as_ref()])?;
+        Ok(())
+    }
+
+    /// `PRAGMA quick_check`: `true` when SQLite reports the file structurally
+    /// sound (`ok`), `false` with the first complaint otherwise. Cheaper than
+    /// `integrity_check` and what `doctor` runs on every visit.
+    pub fn quick_check(&self) -> rusqlite::Result<Result<(), String>> {
+        let conn = self.conn();
+        let first: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        Ok(if first == "ok" { Ok(()) } else { Err(first) })
+    }
+
+    /// Open an existing store file WITHOUT migrating it — read-only, for
+    /// verifying a snapshot before it is trusted (`backup::verify_snapshot`)
+    /// or reading a file another process owns. Refuses a file whose schema is
+    /// not already current (a snapshot of an older store is not something to
+    /// swap in silently).
+    pub fn open_read_only(path: &Path) -> Result<Self, StoreError> {
+        use rusqlite::OpenFlags;
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        Self::require_capabilities(&conn)?;
+        schema::Migration::verify(&conn)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            last_attach: AttachReport::default(),
+            author: default_author(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn a_snapshot_verifies_read_only_and_quick_check_is_ok() {
+        let dir = std::env::temp_dir().join(format!("polis-snap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let live = dir.join("polis.db");
+        let store = PolisStore::open(&live).unwrap();
+        assert_eq!(store.quick_check().unwrap(), Ok(()));
+        let snap = dir.join("backups").join("polis-1.db");
+        store.snapshot_to(&snap).unwrap();
+        assert!(snap.exists());
+        let ro = PolisStore::open_read_only(&snap).unwrap();
+        assert!(ro.verify_ledger_chain().unwrap().ok, "an empty chain verifies");
+        assert_eq!(ro.quick_check().unwrap(), Ok(()));
+        // Read-only means read-only.
+        assert!(ro.set_meta("x", "y").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

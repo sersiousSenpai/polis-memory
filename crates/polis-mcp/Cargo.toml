@@ -1,0 +1,35 @@
+[package]
+name = "polis-mcp"
+version.workspace = true
+description = "Polis Memory over the Model Context Protocol: the read tools (memory_search first), resources and the grounding prompt served over stdio by `polis mcp` and over streamable HTTP at `/mcp` by `polis serve` and by any host that nests the service; plus a remote MemoryApi client so one MCP process can front a running daemon."
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# `RemoteApi`: the MemoryApi implemented as an HTTP client over polis-server's
+# routes, for `polis mcp --remote` and for a `polis mcp` that finds a running
+# daemon. Off for a host that serves its own store in-process. Plain HTTP
+# only (the daemon is loopback): no TLS stack rides into the binary until a
+# remote org node (E4) needs one.
+remote = ["dep:ureq"]
+
+[dependencies]
+polis-core = { workspace = true }
+rmcp = { version = "3.2", default-features = false, features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync"] }
+tracing = "0.1"
+ureq = { version = "3", default-features = false, features = ["json"], optional = true }
+
+[dev-dependencies]
+polis-memory = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util"] }

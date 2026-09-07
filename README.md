@@ -67,9 +67,9 @@ with `RUSTFLAGS=-D warnings`, plus a keyless job (no API key, no `claude` /
 `codex` / `ollama` on PATH — the no-model guarantee), the license gate, a check
 on the pinned MSRV and the lean-core tree check.
 
-**MSRV:** Rust **1.85** (`rust-version` in the workspace manifest). The floor
-is set by the dependency graph — `reqwest` 0.13 and `uuid` 1.23 — and raised
-only deliberately, in its own commit.
+**MSRV:** Rust **1.88** (`rust-version` in the workspace manifest). The floor
+is set by the dependency graph — `rmcp` 3.2 (the MCP SDK) — and raised only
+deliberately, in its own commit.
 
 ## Rules the code keeps
 

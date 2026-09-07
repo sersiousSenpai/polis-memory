@@ -32,13 +32,30 @@ pub struct CaptureHookSpec {
     pub headers: Vec<(String, String)>,
     /// The hook entry's `timeout` (seconds), as the harness reads it.
     pub timeout_secs: u64,
+    /// Render the command as `"<binary>" capture` instead of the curl form
+    /// (Session E1): the `polis` binary reads the payload on stdin, finds the
+    /// daemon itself and writes locally when there is none — no shell
+    /// quoting of headers or URLs, and the same command on Windows. The
+    /// forwarded `headers` are ignored in this form (the binary reads its
+    /// own environment).
+    pub binary: Option<std::path::PathBuf>,
 }
 
 impl CaptureHookSpec {
     /// A spec with no forwarded headers — the standalone daemon's.
     pub fn new(ingest_url: impl Into<String>) -> Self {
-        Self { ingest_url: ingest_url.into(), headers: Vec::new(), timeout_secs: 5 }
+        Self { ingest_url: ingest_url.into(), headers: Vec::new(), timeout_secs: 5, binary: None }
     }
+
+    /// Render the command as the `polis` binary's `capture` subcommand.
+    pub fn with_binary(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.binary = Some(path.into());
+        self
+    }
+
+    /// The trailing token both renderings' recognizers look for in the
+    /// binary form (`… capture`).
+    pub const BINARY_SUBCOMMAND: &'static str = "capture";
 
     pub fn with_header(mut self, name: impl Into<String>, env: impl Into<String>) -> Self {
         self.headers.push((name.into(), env.into()));
@@ -60,6 +77,11 @@ impl CaptureHookSpec {
     /// `hookSpecificOutput` is printed. A timeout, a closed daemon or a partial
     /// read all fall through it silently.
     pub fn command(&self) -> String {
+        if let Some(bin) = &self.binary {
+            // Double quotes survive both `sh -c` and `cmd /c`; the path may
+            // carry spaces (`Program Files`, `Application Support`).
+            return format!("\"{}\" {}", bin.display(), Self::BINARY_SUBCOMMAND);
+        }
         let mut headers = String::new();
         for (name, env) in &self.headers {
             headers.push_str(&format!("-H \"{name}: ${{{env}:-}}\" "));
@@ -72,8 +94,20 @@ impl CaptureHookSpec {
         )
     }
 
+    /// Is this command one of ours, in either rendering: the curl form names
+    /// the ingest route; the binary form ends in `" capture"` and names a
+    /// `polis` binary (any path — an install moved since is still ours, and
+    /// `install_at` rewrites it to the current path).
+    pub fn command_is_capture(command: &str, ingest_url: &str) -> bool {
+        if command.contains(ingest_url) {
+            return true;
+        }
+        let trimmed = command.trim_end();
+        trimmed.ends_with(&format!("\" {}", Self::BINARY_SUBCOMMAND)) && trimmed.contains("polis")
+    }
+
     /// Is the entry's `hooks` array one of ours (a command hook whose command
-    /// targets the ingest route)?
+    /// targets the ingest route, or runs the `polis` binary's capture)?
     pub fn entry_is_capture(&self, entry: &Value) -> bool {
         entry
             .get("hooks")
@@ -82,7 +116,7 @@ impl CaptureHookSpec {
                 hooks.iter().any(|h| {
                     h.get("command")
                         .and_then(|v| v.as_str())
-                        .is_some_and(|c| c.contains(self.ingest_url.as_str()))
+                        .is_some_and(|c| Self::command_is_capture(c, &self.ingest_url))
                 })
             })
     }
@@ -256,6 +290,34 @@ mod tests {
         let with = spec().with_header("X-A", "ENV_A").with_header("X-B", "ENV_B").command();
         assert!(with.contains("application/json' -H \"X-A: ${ENV_A:-}\" -H \"X-B: ${ENV_B:-}\" --data-binary @-"), "{with}");
         assert!(!with.contains("'X-A"), "single quotes would send the literal variable name");
+    }
+
+    #[test]
+    fn the_binary_rendering_is_quoted_and_recognized_at_any_path() {
+        let spec = CaptureHookSpec::new("http://127.0.0.1:7677/v1/prompts/ingest")
+            .with_header("X-Polis-Agent", "POLIS_AGENT")
+            .with_binary("/Applications/Polis Memory/polis");
+        assert_eq!(spec.command(), "\"/Applications/Polis Memory/polis\" capture");
+        assert!(CaptureHookSpec::command_is_capture(&spec.command(), &spec.ingest_url));
+        assert!(CaptureHookSpec::command_is_capture("\"/usr/local/bin/polis\" capture", &spec.ingest_url), "moved binary, still ours");
+        assert!(!CaptureHookSpec::command_is_capture("\"/usr/local/bin/other\" capture", &spec.ingest_url));
+        assert!(!CaptureHookSpec::command_is_capture("curl http://elsewhere/x", &spec.ingest_url));
+        // The curl form is untouched by the option.
+        let curl = CaptureHookSpec::new("http://127.0.0.1:7677/v1/prompts/ingest");
+        assert!(curl.command().starts_with("resp=$(curl"));
+        assert!(curl.command().contains(curl.ingest_url.as_str()));
+        // And an install of the binary form round-trips through the file.
+        let path = std::env::temp_dir().join(format!("polis-hook-bin-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert!(spec.install_at(&path).unwrap());
+        assert!(spec.installed_at(&path));
+        assert!(spec.current_at(&path));
+        // The curl spec sees the binary install as ours too (same route family), and
+        // refreshing with it rewrites the command to the curl form.
+        assert!(curl.installed_at(&path));
+        assert!(!curl.current_at(&path));
+        assert!(!spec.uninstall_at(&path).unwrap());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

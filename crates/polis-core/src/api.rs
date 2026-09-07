@@ -116,7 +116,7 @@ pub struct TreeRequest {
 }
 
 /// One catalog node with its filed-link count — the tree route's row.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TreeNodeView {
     #[serde(flatten)]
@@ -126,7 +126,7 @@ pub struct TreeNodeView {
 
 /// One link with its lake label and supersession status resolved — the same
 /// `(label, supersededBy)` decoration the answer pack carries.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkView {
     #[serde(flatten)]
@@ -138,7 +138,7 @@ pub struct LinkView {
 }
 
 /// `memory_node` / `GET /v1/memory/node/:id`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeView {
     pub node: ClassNode,

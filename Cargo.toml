@@ -17,18 +17,19 @@ members = [
     "crates/polis-embed",
     "crates/polis-llm",
     "crates/polis-server",
+    "crates/polis-mcp",
     "crates/polis-memory",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-# MSRV. The floor set by the dependency graph on 2026-09-07: `reqwest` 0.13
-# (behind polis-llm's `anthropic` / `openai-compat` features) and `uuid` 1.23
-# both require 1.85; every other dependency is older. Verified by
-# `cargo +1.85.0 check --workspace --all-features --locked`. Raise it
-# deliberately, in its own commit, when a dependency forces it.
-rust-version = "1.85"
+# MSRV. Raised 1.85 → 1.88 in Session E1: `rmcp` 3.2 (the MCP SDK behind
+# polis-mcp) requires 1.88; the previous floor was `reqwest` 0.13 and `uuid`
+# 1.23 at 1.85. Verified by `cargo +1.88.0 check --workspace --all-features
+# --locked`. Raise it deliberately, in its own commit, when a dependency
+# forces it.
+rust-version = "1.88"
 license = "Apache-2.0"
 authors = ["Yusuf Al-Bazian"]
 repository = "https://github.com/sersiousSenpai/polis-memory"
@@ -41,6 +42,7 @@ polis-store = { version = "0.1.0", path = "crates/polis-store" }
 polis-embed = { version = "0.1.0", path = "crates/polis-embed" }
 polis-llm = { version = "0.1.0", path = "crates/polis-llm" }
 polis-server = { version = "0.1.0", path = "crates/polis-server" }
+polis-mcp = { version = "0.1.0", path = "crates/polis-mcp" }
 polis-memory = { version = "0.1.0", path = "crates/polis-memory" }
 
 # Clippy runs with `-D warnings` in CI. The one lint switched off, and why:

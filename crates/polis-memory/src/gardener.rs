@@ -578,6 +578,15 @@ pub struct GardenerConfig {
     pub embed_every_ms: i64,
     pub embed_batch: usize,
     pub observe_every_n_organizes: i64,
+    /// Where the gardener writes its rotating `VACUUM INTO` snapshots
+    /// (Session E1). `None` = a host that keeps its own backup cadence
+    /// (Redline's keeper watch), which is the default.
+    pub backup_dir: Option<std::path::PathBuf>,
+    /// How often, when `backup_dir` is set (default 6 h). Each snapshot is
+    /// chain-verified after it is written and the oldest are pruned to
+    /// `backup_keep`.
+    pub backup_every_ms: i64,
+    pub backup_keep: usize,
 }
 
 impl Default for GardenerConfig {
@@ -590,6 +599,9 @@ impl Default for GardenerConfig {
             embed_every_ms: EMBED_INDEX_EVERY_MS,
             embed_batch: EMBED_BATCH,
             observe_every_n_organizes: OBSERVE_EVERY_N_ORGANIZES,
+            backup_dir: None,
+            backup_every_ms: crate::backup::BackupPolicy::default().every_ms,
+            backup_keep: crate::backup::BackupPolicy::default().keep,
         }
     }
 }
@@ -600,6 +612,9 @@ impl Default for GardenerConfig {
 pub struct GardenerState {
     pub last_run_ms: Option<i64>,
     pub last_embed_ms: Option<i64>,
+    /// When the last snapshot was written (E1). A daemon that backs up at
+    /// startup seeds this so the first tick does not write a second one.
+    pub last_backup_ms: Option<i64>,
 }
 
 /// Which gate a tick stopped at, or that the passes ran.
@@ -627,6 +642,8 @@ pub struct StepOutcome {
     /// A model pass was asked for and the install has no model (R12): the
     /// deterministic tiers ran, nothing errored.
     pub no_model: bool,
+    /// The snapshot this tick wrote, when the backup cadence fired (E1).
+    pub backed_up: Option<std::path::PathBuf>,
 }
 
 /// One tick: the semantic index on its own cadence, then idle → debounce →
@@ -643,6 +660,24 @@ pub async fn step(
 ) -> StepOutcome {
     let now = clock.now_ms();
     let mut out = StepOutcome::default();
+
+    // --- backups (E1): the rotating snapshot, on its own cadence, ahead of
+    // every gate — a busy lake is exactly the one worth a fresh copy. Only a
+    // config with a `backup_dir` (the standalone daemon's) runs it. ---
+    if let Some(dir) = cfg.backup_dir.as_deref() {
+        if state.last_backup_ms.map(|l| now - l >= cfg.backup_every_ms).unwrap_or(true) {
+            state.last_backup_ms = Some(now);
+            match crate::backup::backup_verify_prune(polis.store, dir, cfg.backup_keep) {
+                Ok(report) => {
+                    out.backed_up = Some(report.path.clone());
+                    tracing::info!(path = %report.path.display(), verified = report.verdict.ok, pruned = report.pruned, "gardener wrote a snapshot");
+                }
+                Err(e) => tracing::warn!(error = %e, "gardener backup failed"),
+            }
+        }
+    }
+    // --- end backups ---
+
     let lake_newest = polis.store.lake_envelope().map(|e| e.newest).unwrap_or(0);
     let idle_now = is_idle(idle.last_activity_ms(), lake_newest, now, cfg.idle_window_ms);
 

@@ -19,6 +19,7 @@
 //! the watch bus, friction, its own tables, provider selection.
 
 pub mod agent;
+pub mod backup;
 pub mod bundle;
 pub mod gardener;
 pub mod mirror;

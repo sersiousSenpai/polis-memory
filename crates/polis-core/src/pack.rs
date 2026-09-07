@@ -6,7 +6,7 @@
 //! prompt. Assembly against a store lives with the store; everything here is
 //! pure and is what the server, the MCP tools and the clients agree on.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::query::FtsPlan;
 use crate::types::{LakeItem, UserNote};
@@ -49,7 +49,7 @@ pub fn clamp_answer_pack_limit(raw: Option<i64>) -> i64 {
 /// resolved — the same `(label, supersededBy)` decoration
 /// `GET /v1/memory/node/:id` carries, so an agent reading the pack and an agent
 /// reading the node route see one shape.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackLink {
     #[serde(flatten)]
@@ -60,7 +60,7 @@ pub struct PackLink {
 }
 
 /// The resolved node and everything hanging off it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackNode {
     pub node: crate::types::ClassNode,
@@ -74,7 +74,7 @@ pub struct PackNode {
 
 /// A matching prompt from the lake, carrying its supersession status so a
 /// stale decision can't be read back as current.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackPromptHit {
     #[serde(flatten)]
@@ -84,7 +84,7 @@ pub struct PackPromptHit {
     /// around a different question. Reported rather than hidden: "four copies"
     /// and "one copy, three duplicates suppressed" are different facts about
     /// the record, and the second is the true one.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub duplicate_of: Vec<i64>,
     /// Which stage of the query cascade found this: `and` (every term present)
     /// or `or` (widened) or `like` (substring fallback).
@@ -93,7 +93,7 @@ pub struct PackPromptHit {
     /// found by two arms is stronger evidence than one found by either alone,
     /// and a `semantic`-only hit is *associated* rather than asserted — see
     /// [`Arm`] for the trust ordering.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arms: Vec<ArmHit>,
 }
 
@@ -109,7 +109,7 @@ pub struct PackPromptHit {
 /// `?node=`. A resolution miss must still hand back lexical evidence — never
 /// an empty pack that pushes the agent back into the walk it was built to
 /// replace.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnswerPack {
     /// The ledger head this pack was assembled at — the agent cites against it.
@@ -127,7 +127,7 @@ pub struct AnswerPack {
     /// reaching for a literal (a flag, a path, an identifier, a quoted phrase)
     /// — a trigram probe on every natural-language question would cost an index
     /// scan to return noise.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grep_hits: Vec<crate::types::GrepHit>,
     /// Which arms ran, and what each returned. Read this before concluding
     /// anything from an empty list: an arm that did not run is ABSENT, which is
@@ -242,7 +242,7 @@ pub fn enforce_pack_budget(pack: &mut AnswerPack) {
 /// - `Grep` — an exact string match, with no relevance claim beyond "it's here".
 /// - `Semantic` — **associated**, not asserted. A vector said these are alike.
 ///   A `Semantic`-only hit must be verified before being stated as fact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Arm {
     Node,
@@ -265,7 +265,7 @@ impl Arm {
 }
 
 /// One arm's contribution to a hit: which arm, where it ranked, what it scored.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArmHit {
     pub arm: Arm,
@@ -310,7 +310,7 @@ pub fn rrf_fuse(lists: &[(Arm, Vec<(String, f64)>)]) -> Vec<(String, Vec<ArmHit>
 
 /// Which arms ran and what each returned — so an empty result reads as "the
 /// semantic index isn't built yet" rather than "you never thought about this".
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArmCoverage {
     pub arm: Arm,
@@ -319,7 +319,7 @@ pub struct ArmCoverage {
     pub ran: bool,
     pub hits: usize,
     /// Why it did not run, when it did not.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub absent_because: Option<String>,
 }
 

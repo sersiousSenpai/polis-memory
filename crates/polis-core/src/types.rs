@@ -45,7 +45,7 @@ pub struct ClassLink {
 /// An agent-written pattern statement over a node's lake items. Derived,
 /// never ground truth — retrieval surfaces these after facts/decisions,
 /// labeled as patterns. `cite_seqs` is always non-empty (uncited = rejected).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClassObservation {
     pub id: i64,
@@ -62,7 +62,7 @@ pub struct ClassObservation {
 /// `GET /v1/memory/prompts`. Provenance (`project_path`/`surface`/dates) is
 /// carried as ground truth — the classifier never infers where a memory came
 /// from.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LakeItem {
     pub seq: i64,
@@ -103,7 +103,7 @@ pub struct StageResult {
 /// One user note/star row (`user_notes`) — the readable, current-state side of
 /// `note` ledger events (Second Brain P3). Serialized camelCase for the Memory
 /// surface.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserNote {
     pub id: i64,
@@ -122,7 +122,7 @@ pub struct UserNote {
 /// agents/MCP AND the Memory surface's facet rails and activity ribbon (the
 /// old "no dashboard UI" stance was overturned by the Memory-as-a-Second-Brain
 /// plan). Every axis is a `(label, count)` list plus the two grand totals.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextStats {
     pub generated_ts: i64,
@@ -198,7 +198,7 @@ pub fn clamp_ledger_limit(raw: Option<i64>) -> i64 {
 /// renders — prompt columns when the event is a prompt, the browse columns
 /// when it is a browse event, and the accepted class filing. All joined at
 /// query time; nothing here is stored beyond the existing tables.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineItem {
     #[serde(flatten)]
@@ -247,7 +247,7 @@ pub struct TimelineItem {
 /// prompts; prompts appear only as `mass`. Exactly one of the four focus
 /// handles is set, and it is what a click filters the Timeline by (§3 rule 4):
 /// a class filing, a plan session, a browse tab's trail, or an agent thread.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MapNode {
     /// Map keyspace: `class:<node_id>` | `thread:<kind>:<id>`.
@@ -272,7 +272,7 @@ pub struct MapNode {
 /// `lineage` (session → threads) · `supersedes` (decision chain, endpoints
 /// resolved to their class/session) · `co_occurs` (the only derived edge —
 /// classes sharing sessions or a project while filed apart).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MapEdge {
     pub kind: String,
@@ -285,7 +285,7 @@ pub struct MapEdge {
 
 /// The `memory_map` command's payload — data only; the deterministic layout is
 /// the frontend's pure `memoryMap.ts` (same input → same picture).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryMapView {
     pub generated_ts: i64,
@@ -293,7 +293,7 @@ pub struct MemoryMapView {
     pub edges: Vec<MapEdge>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowseHit {
     pub id: i64,
@@ -324,7 +324,7 @@ pub struct BrowseHit {
 
 /// One grep hit. `seq` is the ledger seq, so a hit is citable as `#seq` and
 /// opens the Timeline exactly like every other citation.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrepHit {
     /// `prompt` | `browse`.
