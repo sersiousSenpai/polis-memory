@@ -26,7 +26,10 @@ pub const CORPUS_ROLE_VERSION_KEY: &str = "corpus_role_version";
 /// idempotent DDL then re-runs once on every existing store.
 /// 2 (B1): `class_runs` gained duration_ms / items / ops / model / outcome /
 /// canary_before / canary_after / error.
-pub const STORE_SCHEMA_VERSION: &str = "2";
+/// "3" since Session E2 (identity: `principals`, `principal_aliases`, the
+/// scope columns) — the same "3" B2's journal tables land on; both additive
+/// blocks are idempotent, so the merged block runs once.
+pub const STORE_SCHEMA_VERSION: &str = "3";
 
 /// The host's legacy `app_settings` keys, read once at adoption.
 pub const LEGACY_LEXICAL_KEY: &str = "redline.memory.lexicalVersion";

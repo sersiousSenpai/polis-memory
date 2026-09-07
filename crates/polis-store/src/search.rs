@@ -69,11 +69,19 @@ impl PolisStore {
     /// vectorless walk). Ranks by FTS5 `bm25`, best first, and returns a matched
     /// snippet per hit. A query that sanitizes to nothing yields no hits.
     pub fn search_browse_events(&self, query: &str, limit: i64) -> rusqlite::Result<Vec<BrowseHit>> {
+        self.search_browse_events_scoped(query, limit, &crate::principals::ScopeFilter::default())
+    }
+
+    /// The browse arm under an identity scope (E2) — the same cascade with
+    /// the scope clause bound on `be`.
+    pub fn search_browse_events_scoped(&self, query: &str, limit: i64, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Vec<BrowseHit>> {
         use polis_core::query::MatchStage;
         let Some(plan) = polis_core::query::plan_fts_query(query) else {
             return Ok(Vec::new());
         };
         let conn = self.conn();
+        let scoped = Self::scope_clause_locked(&conn, "be", scope)?;
+        let lim = limit.max(1);
         // Same AND-then-OR cascade as the prompt arm. Columns are weighted
         // `title 5 / url 2 / text 1`: a term in a page's title says the page is
         // ABOUT it; the same term buried in 3 KB of DOM text says it appeared.
@@ -88,7 +96,7 @@ impl PolisStore {
             if match_q.is_empty() {
                 continue;
             }
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare(&format!(
                 "SELECT be.id, le.seq, be.ts, be.url, be.title,
                         snippet(browse_events_fts, 2, '[', ']', '…', 12),
                         bm25(browse_events_fts, 5.0, 2.0, 1.0),
@@ -97,12 +105,17 @@ impl PolisStore {
                  JOIN browse_events be ON be.id = browse_events_fts.rowid
                  LEFT JOIN ledger_events le
                         ON le.ref_kind = 'browse_event' AND le.ref_id = CAST(be.id AS TEXT)
-                 WHERE browse_events_fts MATCH ?1
+                 WHERE browse_events_fts MATCH ?1{}
                  ORDER BY bm25(browse_events_fts, 5.0, 2.0, 1.0)
                  LIMIT ?2",
-            )?;
+                scoped.sql
+            ))?;
+            let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&match_q, &lim];
+            for b in &scoped.binds {
+                binds.push(b.as_ref());
+            }
             let rows: Vec<BrowseHit> = stmt
-                .query_map(params![match_q, limit.max(1)], |r| {
+                .query_map(binds.as_slice(), |r| {
                     Ok(BrowseHit {
                         id: r.get(0)?,
                         seq: r.get(1)?,
@@ -141,6 +154,18 @@ impl PolisStore {
         q: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<(polis_core::types::LakeItem, polis_core::query::MatchStage)>> {
+        self.search_prompts_ranked_scoped(q, limit, &crate::principals::ScopeFilter::default())
+    }
+
+    /// The same cascade under an identity scope (E2): the scope clause is
+    /// appended to every stage with bound values, so a scoped search is the
+    /// same plan over fewer rows — never a different ranking.
+    pub fn search_prompts_ranked_scoped(
+        &self,
+        q: &str,
+        limit: i64,
+        scope: &crate::principals::ScopeFilter,
+    ) -> rusqlite::Result<Vec<(polis_core::types::LakeItem, polis_core::query::MatchStage)>> {
         use polis_core::query::MatchStage;
         let trimmed = q.trim();
         if trimmed.is_empty() {
@@ -152,6 +177,8 @@ impl PolisStore {
                     p.thread_kind, p.thread_id, p.parent_session_id, p.model";
         let plan = polis_core::query::plan_fts_query(trimmed);
         let conn = self.conn();
+        let scoped = Self::scope_clause_locked(&conn, "p", scope)?;
+        let lim = limit.max(1);
 
         if let Some(plan) = &plan {
             for stage in [MatchStage::And, MatchStage::Or] {
@@ -164,11 +191,16 @@ impl PolisStore {
                      FROM prompts_fts
                      JOIN prompts p ON p.id = prompts_fts.rowid
                      JOIN ledger_events le ON le.prompt_id = p.id
-                     WHERE prompts_fts MATCH ?1 AND le.kind = 'prompt'
-                     ORDER BY bm25(prompts_fts, 3.0, 1.0) LIMIT ?2"
+                     WHERE prompts_fts MATCH ?1 AND le.kind = 'prompt'{}
+                     ORDER BY bm25(prompts_fts, 3.0, 1.0) LIMIT ?2",
+                    scoped.sql
                 ))?;
+                let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&match_q, &lim];
+                for b in &scoped.binds {
+                    binds.push(b.as_ref());
+                }
                 let rows: Vec<polis_core::types::LakeItem> = stmt
-                    .query_map(params![match_q, limit.max(1)], Self::row_to_lake_item)?
+                    .query_map(binds.as_slice(), Self::row_to_lake_item)?
                     .collect::<rusqlite::Result<_>>()?;
                 if !rows.is_empty() {
                     return Ok(rows.into_iter().map(|r| (r, stage)).collect());
@@ -196,13 +228,16 @@ impl PolisStore {
                      FROM prompts p
                      JOIN ledger_events le ON le.prompt_id = p.id
                      WHERE p.fts_text LIKE ?1 ESCAPE '\\'
-                       AND le.kind = 'prompt'
-                     ORDER BY le.seq DESC LIMIT ?2"
+                       AND le.kind = 'prompt'{}
+                     ORDER BY le.seq DESC LIMIT ?2",
+            scoped.sql
         ))?;
-        let rows = stmt.query_map(
-            params![format!("%{escaped}%"), limit.max(1)],
-            Self::row_to_lake_item,
-        )?;
+        let like = format!("%{escaped}%");
+        let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&like, &lim];
+        for b in &scoped.binds {
+            binds.push(b.as_ref());
+        }
+        let rows = stmt.query_map(binds.as_slice(), Self::row_to_lake_item)?;
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()

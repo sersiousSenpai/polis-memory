@@ -51,6 +51,12 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
+# Identity (E2, plan §4.5): one Ed25519 key per human; devices and agents are
+# derived ids (polis-core), so this is the only crypto crate in the graph and
+# it is behind no feature — a bundle's signature must verify everywhere.
+# BSD-3-Clause; the seed comes from the OS through `getrandom`.
+ed25519-dalek = "3"
+getrandom = { version = "0.4", features = ["std"] }
 # --- the `cli` feature's deps (all optional) ---
 clap = { version = "4", features = ["derive"], optional = true }
 polis-mcp = { workspace = true, optional = true }

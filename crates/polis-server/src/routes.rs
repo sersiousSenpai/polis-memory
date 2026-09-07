@@ -243,6 +243,12 @@ pub struct ContextPromptsQ {
     /// Opt in to the host's own constructed prefaces, which are excluded by
     /// default. `1`/`true` to include.
     include_agent: Option<String>,
+    /// Identity scope (E2): a principal (human / device / agent id, or an
+    /// aliased legacy name), an agent, a run, an org — bound, never spliced.
+    principal: Option<String>,
+    agent: Option<String>,
+    run: Option<String>,
+    org: Option<String>,
 }
 
 /// `GET /v1/context/prompts?session=&mission=&surface=&project=&since_seq=&q=&limit=&role=&include_agent=`
@@ -267,6 +273,10 @@ pub async fn handle_context_prompts(
         model: q.model,
         role: q.role,
         include_agent: matches!(q.include_agent.as_deref(), Some("1") | Some("true")),
+        principal: q.principal,
+        agent: q.agent,
+        run: q.run,
+        org: q.org,
     };
     match state.api.list_prompts(&filters, &Scope::default()) {
         Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
@@ -393,6 +403,8 @@ pub struct LedgerQ {
     thread_id: Option<String>,
     browse_id: Option<String>,
     role: Option<String>,
+    /// Identity scope (E2): the author resolved through the alias table.
+    principal: Option<String>,
 }
 
 fn flag(v: Option<&str>) -> Option<bool> {
@@ -424,6 +436,7 @@ pub async fn handle_memory_ledger(
         thread_id: q.thread_id,
         browse_id: q.browse_id,
         role: q.role,
+        principal: q.principal,
     };
     let api = state.api.clone();
     match tokio::task::spawn_blocking(move || api.timeline(&filters, &Scope::default())).await {

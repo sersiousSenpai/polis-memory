@@ -322,6 +322,19 @@ pub fn build_answer_pack(
     node_id: Option<&str>,
     limit: i64,
 ) -> AnswerPack {
+    build_answer_pack_scoped(polis, q, node_id, limit, &polis_store::principals::ScopeFilter::default())
+}
+
+/// The pack under an identity scope (E2): the lexical and browse arms bind
+/// the scope's ids; every other arm is a catalog read the scope does not
+/// narrow yet (class nodes are stamped but a class is shared by design).
+pub fn build_answer_pack_scoped(
+    polis: &Polis<'_>,
+    q: Option<&str>,
+    node_id: Option<&str>,
+    limit: i64,
+    scope: &polis_store::principals::ScopeFilter,
+) -> AnswerPack {
     let db = polis.store;
     // The whole pack is one op (`pack`); every arm below is its own
     // (`pack.<arm>`), so the stats route can say which arm a slow question
@@ -416,7 +429,7 @@ pub fn build_answer_pack(
     let mut ranked = crate::latency::timed("pack.lexical", || {
         query
             .map(|term| {
-                db.search_prompts_ranked(term, limit).unwrap_or_else(|e| {
+                db.search_prompts_ranked_scoped(term, limit, scope).unwrap_or_else(|e| {
                     tracing::warn!(error = %e, "answer-pack: prompt search failed");
                     Vec::new()
                 })
@@ -558,7 +571,7 @@ pub fn build_answer_pack(
     // attention, but four identical copies of it are not four pieces of evidence.
     let browse_hits = crate::latency::timed("pack.browse", || {
         let raw = query
-            .map(|term| db.search_browse_events(term, limit).unwrap_or_default())
+            .map(|term| db.search_browse_events_scoped(term, limit, scope).unwrap_or_default())
             .unwrap_or_default();
         let hashes = db
             .context_hashes_for_browse_ids(&raw.iter().map(|h| h.id).collect::<Vec<_>>())
@@ -740,10 +753,15 @@ pub fn thread_view(polis: &Polis<'_>, kind: &str, id: &str, limit: i64) -> Optio
 /// plan the question, build the pack, render it honest about what it searched
 /// and trimmed. `text: None` when the record has nothing on it.
 pub fn context_block(polis: &Polis<'_>, q: &str, node: Option<&str>, max_bytes: usize) -> ContextBlock {
+    context_block_scoped(polis, q, node, max_bytes, &polis_store::principals::ScopeFilter::default())
+}
+
+/// The grounding block under an identity scope (E2).
+pub fn context_block_scoped(polis: &Polis<'_>, q: &str, node: Option<&str>, max_bytes: usize, scope: &polis_store::principals::ScopeFilter) -> ContextBlock {
     crate::latency::timed("context", || {
         let plan = plan_fts_query(q);
         let terms = plan.as_ref().map(|p| p.terms.clone()).unwrap_or_default();
-        let mut pack = build_answer_pack(polis, Some(q), node, INLINE_PACK_LIMIT);
+        let mut pack = build_answer_pack_scoped(polis, Some(q), node, INLINE_PACK_LIMIT, scope);
         enforce_pack_budget(&mut pack);
         let text = render_answer_pack_block(&pack, plan.as_ref(), max_bytes);
         ContextBlock { text, terms }

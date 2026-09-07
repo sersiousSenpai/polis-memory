@@ -50,6 +50,9 @@ pub const MEMORY_TABLES: &[&str] = &[
     "session_tree",
     "prompt_archive",
     "embeddings",
+    // E2: identity
+    "principals",
+    "principal_aliases",
 ];
 
 /// The FTS5 tables of the lexical layer (`lexical.rs`), for the schema dump.
@@ -560,6 +563,59 @@ impl Migration {
         let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN canary_before REAL", []);
         let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN canary_after REAL", []);
         let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN error TEXT", []);
+
+        // ---- E2: identity and scoping (plan §4.5) ----------------------------
+        // Who a memory belongs to is a hash of a public key. `principals`
+        // holds the human (keyed), their devices and agents (derived, no key)
+        // and, later, orgs; `principal_aliases` maps every LEGACY author
+        // string (a login, `local`, a seat name, a surface name) to one of
+        // them, because existing events are hashed and never rewritten —
+        // reads resolve through `COALESCE(alias.principal_id, author)`.
+        // The scope columns are NON-HASHED (the `gist` / `thread_kind`
+        // precedent): only ids and hashes enter the chain, so they are free
+        // to add and to backfill. Every statement is idempotent; the block
+        // runs once per store schema bump and is a no-op after.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS principals (
+                principal_id TEXT PRIMARY KEY,   -- hex(sha256(pubkey)) or a derived id
+                kind TEXT NOT NULL,              -- human | device | agent | org
+                pubkey TEXT,                     -- hex; keyed principals only
+                parent_id TEXT,                  -- device → human, agent → device
+                display_name TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_principals_parent ON principals (parent_id);
+            CREATE TABLE IF NOT EXISTS principal_aliases (
+                alias TEXT PRIMARY KEY,          -- a legacy author string
+                principal_id TEXT NOT NULL
+            );",
+        )?;
+        for table in ["prompts", "browse_events", "user_notes", "class_nodes", "class_observations"] {
+            for col in ["principal_id TEXT", "device_id TEXT", "agent_id TEXT", "run_id TEXT", "org_id TEXT", "visibility TEXT NOT NULL DEFAULT 'private'"] {
+                let _ = conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {col}"), []);
+            }
+            // The rows a stamp still has to visit — a partial index so the
+            // post-write sweep is O(new rows), not a table scan.
+            let _ = conn.execute(
+                &format!("CREATE INDEX IF NOT EXISTS idx_{table}_unscoped ON {table} (rowid) WHERE principal_id IS NULL"),
+                [],
+            );
+        }
+        // The scope index the plan names: (principal, org, project) where a
+        // project column exists; (principal, org) elsewhere.
+        for (table, cols) in [
+            ("prompts", "principal_id, org_id, project_path"),
+            ("class_nodes", "principal_id, org_id, project_path"),
+            ("browse_events", "principal_id, org_id"),
+            ("user_notes", "principal_id, org_id"),
+            ("class_observations", "principal_id, org_id"),
+        ] {
+            let _ = conn.execute(
+                &format!("CREATE INDEX IF NOT EXISTS idx_{table}_scope ON {table} ({cols})"),
+                [],
+            );
+        }
+        // ---- end E2 ------------------------------------------------------------
         Ok(())
     }
 

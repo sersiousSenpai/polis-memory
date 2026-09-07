@@ -155,6 +155,8 @@ impl TimelineParams {
             thread_id: self.thread_id.clone(),
             browse_id: self.browse_id.clone(),
             role: self.role.clone(),
+            // the identity scope rides in `scope`, merged by the handle
+            principal: None,
         }
     }
 }
@@ -231,6 +233,10 @@ impl QueryPromptsParams {
             model: None,
             role: self.role.clone(),
             include_agent: self.include_agent.unwrap_or(false),
+            principal: None,
+            agent: None,
+            run: None,
+            org: None,
         }
     }
 }

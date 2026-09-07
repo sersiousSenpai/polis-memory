@@ -217,9 +217,48 @@ pub enum EventKind {
     /// `payload_hash`; the readable sidecar lives in `app_settings` under
     /// `redline.router.verdict.<review id>`.
     RouterVerdict,
+    // --- E2 ---
+    /// Identity (plan §4.5): a key bound to a chain at init / rotation. The
+    /// payload is [`crate::identity::BindPayload`] — the human and device
+    /// cards, the chain id, the head the signature covers, the signature —
+    /// committed by `payload_hash`; `(ref_kind="principal", ref_id=device id)`.
+    /// A bundle importer refuses a chain with no bind for its writer.
+    PrincipalBind,
+    /// Sharing (E4): a `forget` propagated to peers — the target
+    /// `(chain_id, seq)` whose body must be tombstoned. Reserved here so the
+    /// vocabulary and the bundle verifier know the kind before a peer ever
+    /// sends one.
+    Redaction,
 }
 
 impl EventKind {
+    /// Every kind's wire string, for the bundle verifier and a host's facets.
+    pub const ALL: &'static [EventKind] = &[
+        EventKind::Prompt,
+        EventKind::Revision,
+        EventKind::Resolution,
+        EventKind::Approval,
+        EventKind::Reopen,
+        EventKind::ReviewVerdict,
+        EventKind::Pin,
+        EventKind::SourceTrust,
+        EventKind::TaxonomyReorg,
+        EventKind::ClassCurate,
+        EventKind::Compaction,
+        EventKind::BrowseEvent,
+        EventKind::SessionLink,
+        EventKind::Supersede,
+        EventKind::Observation,
+        EventKind::Note,
+        EventKind::WorkFile,
+        EventKind::WorkClaim,
+        EventKind::WorkClose,
+        EventKind::MootTurn,
+        EventKind::RouterVerdict,
+        EventKind::PrincipalBind,
+        EventKind::Redaction,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             EventKind::Prompt => "prompt",
@@ -243,6 +282,9 @@ impl EventKind {
             EventKind::WorkClose => "work_close",
             EventKind::MootTurn => "moot_turn",
             EventKind::RouterVerdict => "router_verdict",
+            // --- E2 ---
+            EventKind::PrincipalBind => "principal_bind",
+            EventKind::Redaction => "redaction",
         }
     }
 }

@@ -651,6 +651,19 @@ impl PolisStore {
             sql.push_str(" AND le.author = ?");
             binds.push(Box::new(a.to_string()));
         }
+        // Identity scope (E2): the author resolved through the alias table
+        // (`COALESCE(alias, author)`) must be the principal, one of its
+        // devices or one of its agents. Bound as an id list.
+        if let Some(pr) = f.principal.as_deref().filter(|s| !s.is_empty()) {
+            let ids = Self::principal_id_set_locked(&conn, pr)?;
+            let marks = std::iter::repeat_n("?", ids.len()).collect::<Vec<_>>().join(", ");
+            sql.push_str(&format!(
+                " AND COALESCE((SELECT pa.principal_id FROM principal_aliases pa WHERE pa.alias = le.author), le.author) IN ({marks})"
+            ));
+            for id in ids {
+                binds.push(Box::new(id));
+            }
+        }
         if let Some(s) = f.session_id.as_deref().filter(|s| !s.is_empty()) {
             sql.push_str(" AND le.session_id = ?");
             binds.push(Box::new(s.to_string()));
