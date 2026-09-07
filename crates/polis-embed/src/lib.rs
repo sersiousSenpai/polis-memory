@@ -430,7 +430,7 @@ mod tests {
     fn brute_force_stays_viable_for_years_at_the_observed_rate() {
         const CHUNKS_TODAY: usize = 3_073;
         const CHUNKS_PER_YEAR: usize = 27_000;
-        assert!(CHUNKS_TODAY < BRUTE_FORCE_CEILING_CHUNKS / 40);
+        const { assert!(CHUNKS_TODAY < BRUTE_FORCE_CEILING_CHUNKS / 40) };
         let years = (BRUTE_FORCE_CEILING_CHUNKS - CHUNKS_TODAY) / CHUNKS_PER_YEAR;
         assert!(years >= 5, "only {years} years of headroom — time to reconsider ANN");
     }

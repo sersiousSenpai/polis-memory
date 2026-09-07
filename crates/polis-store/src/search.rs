@@ -372,7 +372,7 @@ impl PolisStore {
             }
         }
 
-        out.sort_by(|a, b| b.ts.cmp(&a.ts));
+        out.sort_by_key(|b| std::cmp::Reverse(b.ts));
         out.truncate(limit as usize);
         Ok(out)
     }

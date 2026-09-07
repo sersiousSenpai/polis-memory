@@ -89,7 +89,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_binary_is_reported_as_not_found() {
         let mut cmd = Command::new("/nonexistent/polis-llm-test-binary");
-        let err = spawn(&mut cmd).err().expect("no such binary");
+        let err = spawn(&mut cmd).expect_err("no such binary");
         assert!(err.0, "NotFound is distinguished from other spawn failures");
     }
 }

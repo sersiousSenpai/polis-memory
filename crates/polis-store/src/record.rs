@@ -436,10 +436,12 @@ pub fn record_moot_turn(
 /// Resolve the parent for a NEW interaction thread — called ONCE at thread
 /// creation; the relation is then recorded via `record_session_link` and never
 /// re-derived. Precedence:
-///   explicit seed (voice→plan, drafter-from-mission→mission, fork→its session)
-///   > the active mission, for browser-family surfaces (browse, linked)
-///   > the active surface's plan session (the user was looking at plan X)
-///   > none (a root thread).
+///
+/// 1. explicit seed (voice→plan, drafter-from-mission→mission, fork→its session)
+/// 2. the active mission, for browser-family surfaces (browse, linked)
+/// 3. the active surface's plan session (the user was looking at plan X)
+/// 4. none (a root thread).
+///
 /// The companion is always a root: it spans surfaces by design.
 pub fn resolve_parent(
     explicit: Option<(&str, &str)>,

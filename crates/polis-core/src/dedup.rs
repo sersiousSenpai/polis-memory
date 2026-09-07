@@ -287,8 +287,8 @@ mod tests {
         // distinguishable — the property the head clip destroyed.
         let a = format!("{}ALPHA-ANSWER", "identical preface. ".repeat(300));
         let b = format!("{}BETA-ANSWER", "identical preface. ".repeat(300));
-        let ea = excerpt_around(&a, &vec!["alpha-answer".to_string()], 120);
-        let eb = excerpt_around(&b, &vec!["beta-answer".to_string()], 120);
+        let ea = excerpt_around(&a, &["alpha-answer".to_string()], 120);
+        let eb = excerpt_around(&b, &["beta-answer".to_string()], 120);
         assert_ne!(ea, eb);
     }
 
