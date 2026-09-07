@@ -362,6 +362,29 @@ where
         // with its parent + child digests).
         .route("/v1/context/threads/:kind/:id", get(routes::handle_context_thread))
         .route("/v1/context/tree/:kind/:id", get(routes::handle_context_tree))
+        // Per-route latency (`route:<pattern>`) into the same ring the arms
+        // record in — `/v1/context/stats` reports both. `route_layer`, so a
+        // host's own routes merged beside these are not counted here.
+        .route_layer(axum::middleware::from_fn(record_route_latency))
+}
+
+/// The route timer: one sample per request, keyed by the matched pattern
+/// (`route:/v1/memory/answer-pack`), plus an `info_span!` with the `ms`.
+async fn record_route_latency(
+    matched: Option<axum::extract::MatchedPath>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use tracing::Instrument;
+    let path = matched.map(|m| m.as_str().to_string()).unwrap_or_else(|| req.uri().path().to_string());
+    let method = req.method().to_string();
+    let span = tracing::info_span!("polis.route", %path, %method, ms = tracing::field::Empty);
+    let start = std::time::Instant::now();
+    let res = next.run(req).instrument(span.clone()).await;
+    let ms = start.elapsed().as_millis().min(u32::MAX as u128) as u32;
+    span.record("ms", ms);
+    polis_core::latency::record(&format!("route:{path}"), ms);
+    res
 }
 
 #[cfg(test)]
@@ -443,6 +466,25 @@ mod tests {
             rest = &after[q2..];
         }
         paths
+    }
+
+    /// The route layer records one sample per request under the matched
+    /// pattern, so `/v1/context/stats` can report the surface's own latency.
+    #[tokio::test]
+    async fn every_request_records_its_route_latency() {
+        let app = router::<PolisState>().with_state(testing::state());
+        let req = Request::builder().uri("/v1/context/stats").body(Body::empty()).unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let row = polis_core::latency::report_for("route:/v1/context/stats").expect("the route recorded a sample");
+        assert!(row.n >= 1);
+        // …and a second call reports the first in its body.
+        let req = Request::builder().uri("/v1/context/stats").body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let ops: Vec<&str> = v["latency"].as_array().unwrap().iter().filter_map(|r| r["op"].as_str()).collect();
+        assert!(ops.contains(&"route:/v1/context/stats"), "{ops:?}");
     }
 
     #[test]

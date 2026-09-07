@@ -136,6 +136,12 @@ pub struct ContextStats {
     /// since P0 made agents author as their seat name; older rows are uniformly
     /// the local human.
     pub by_author: Vec<(String, i64)>,
+    /// Per-op latency (p50/p95 over the newest 256 samples) recorded in this
+    /// process — every answer-pack arm, every route, the write paths. Empty
+    /// until something ran; the measurement program's runtime instrument
+    /// (docs/bench.md).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub latency: Vec<crate::latency::OpLatency>,
 }
 
 /// Clamp + default for the Timeline's page size. Pages are cursor-chained
@@ -414,6 +420,33 @@ pub struct ClassRun {
     pub seq_to: Option<i64>,
     pub claude_session_id: Option<String>,
     pub summary: Option<String>,
+    /// B1's accounting columns (all `None` on rows written before them).
+    pub duration_ms: Option<i64>,
+    /// Lake items the run was fed.
+    pub items: Option<i64>,
+    /// Proposals it staged/applied (nodes + links + structural).
+    pub ops: Option<i64>,
+    /// The agent that ran it (`None` = no model configured).
+    pub model: Option<String>,
+    /// `done | error | reverted_by_canary` (B3 adds the third).
+    pub outcome: Option<String>,
+    pub canary_before: Option<f64>,
+    pub canary_after: Option<f64>,
+    pub error: Option<String>,
+}
+
+/// What `finish_class_run_with` records about a completed run.
+#[derive(Debug, Clone, Default)]
+pub struct ClassRunFinish {
+    pub status: String,
+    pub claude_session_id: Option<String>,
+    pub summary: String,
+    pub duration_ms: Option<i64>,
+    pub items: Option<i64>,
+    pub ops: Option<i64>,
+    pub model: Option<String>,
+    pub outcome: Option<String>,
+    pub error: Option<String>,
 }
 
 /// What `Database::stage_proposal` did with one proposal.

@@ -280,6 +280,53 @@ fn lock(conn: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
 
 #[cfg(test)]
 mod tests {
+
+    /// B1: `class_runs` carries what a run cost and did; the old finisher
+    /// still writes (status → outcome), the new one writes every column, and
+    /// both readers see them. Schema version 2 re-runs the additive block
+    /// once on a version-1 store.
+    #[test]
+    fn class_runs_carry_the_b1_accounting_and_the_schema_version_moved() {
+        let store = PolisStore::open_in_memory().unwrap();
+        assert_eq!(store.meta(meta::SCHEMA_VERSION_KEY).unwrap().as_deref(), Some("2"));
+        let id = store.insert_class_run(0, 10).unwrap();
+        store.finish_class_run(id, "done", None, "legacy call").unwrap();
+        let run = store.latest_class_run().unwrap().unwrap();
+        assert_eq!(run.outcome.as_deref(), Some("done"));
+        assert_eq!(run.duration_ms, None);
+        let id2 = store.insert_class_run(10, 20).unwrap();
+        store
+            .finish_class_run_with(
+                id2,
+                &polis_core::types::ClassRunFinish {
+                    status: "error".into(),
+                    summary: "boom".into(),
+                    duration_ms: Some(1234),
+                    items: Some(7),
+                    ops: Some(3),
+                    model: Some("claude-cli".into()),
+                    outcome: Some("error".into()),
+                    error: Some("boom".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store.set_class_run_canary(id2, Some(0.91), Some(0.90)).unwrap();
+        let runs = store.list_class_runs(10).unwrap();
+        assert_eq!(runs.len(), 2);
+        let r = &runs[0];
+        assert_eq!((r.id, r.duration_ms, r.items, r.ops), (id2, Some(1234), Some(7), Some(3)));
+        assert_eq!(r.model.as_deref(), Some("claude-cli"));
+        assert_eq!(r.error.as_deref(), Some("boom"));
+        assert_eq!((r.canary_before, r.canary_after), (Some(0.91), Some(0.90)));
+        // A version-1 store migrates once on attach and is current after.
+        store.set_meta(meta::SCHEMA_VERSION_KEY, "1").unwrap();
+        let again = PolisStore::attach(store.shared_connection(), AttachOptions::standalone()).unwrap();
+        assert!(again.last_attach().migrated);
+        assert_eq!(again.meta(meta::SCHEMA_VERSION_KEY).unwrap().as_deref(), Some("2"));
+        let third = PolisStore::attach(store.shared_connection(), AttachOptions::standalone()).unwrap();
+        assert!(!third.last_attach().migrated, "a current store is a no-op");
+    }
     use super::*;
 
     #[test]

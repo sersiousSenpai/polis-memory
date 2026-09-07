@@ -139,3 +139,23 @@ that prove the carve was byte-for-byte.
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+## Benchmarks
+
+The measurement program lives in [`docs/bench.md`](docs/bench.md): the latency
+budget per operation (p50/p95), the corpus-derived eval (Recall@k, MRR,
+pack-contains-gold, bytes per pack — reachability of what was recorded, not
+human relevance), the canary the gardener is measured against, and the
+baseline this repository was last measured at, on a synthetic lake fitted to
+a real one and on a copy of that real one.
+
+```sh
+cargo bench -p polis-memory                                   # criterion, 1k prompts (POLIS_BENCH_PROMPTS=10000 …)
+cargo test -p polis-memory --features eval -- eval_gate        # CI's gate against bench/results/baseline.json
+cargo test -p polis-memory --features eval -- --ignored eval_ --nocapture   # write today's results file
+POLIS_REAL_DB=/path/to/a/COPY.db cargo test -p polis-memory --features eval -- --ignored eval_real_db --nocapture
+```
+
+Every op reports its own p50/p95 at runtime on `GET /v1/context/stats`
+(`latency`), so a slow install can be read rather than guessed at.
+

@@ -143,6 +143,17 @@ impl PolisStore {
     /// rather than one query per seq: a node with a hundred links used to mean
     /// a hundred statement executions here. (As-of queries later fall out of
     /// the same table by filtering `event_seq <= asof`.)
+    /// The newest supersessions as `(old seq, new seq, supersede event seq)`
+    /// — the canary's Supersession subjects.
+    pub fn list_supersessions(&self, limit: i64) -> rusqlite::Result<Vec<(i64, i64, i64)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT old_seq, new_seq, event_seq FROM supersessions ORDER BY event_seq DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit.max(1)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect()
+    }
+
     pub fn supersessions_for_seqs(
         &self,
         seqs: &[i64],

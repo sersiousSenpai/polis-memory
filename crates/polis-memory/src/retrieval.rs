@@ -110,6 +110,7 @@ pub fn build_stats(polis: &Polis<'_>) -> ContextStats {
         by_kind,
         by_class,
         by_author,
+        latency: Vec::new(),
     }
 }
 
@@ -322,13 +323,20 @@ pub fn build_answer_pack(
     limit: i64,
 ) -> AnswerPack {
     let db = polis.store;
+    // The whole pack is one op (`pack`); every arm below is its own
+    // (`pack.<arm>`), so the stats route can say which arm a slow question
+    // spent its time in. docs/bench.md "answer pack" is this timer.
+    let pack_span = tracing::info_span!("polis.op", op = "pack", ms = tracing::field::Empty);
+    let pack_timer = crate::latency::Timer::start("pack");
     let head_seq = db.max_ledger_seq().unwrap_or(0);
     let query = q.map(str::trim).filter(|s| !s.is_empty());
 
     // --- resolve a node: the explicit id first, then the best title match ---
-    let mut matched: Vec<polis_core::types::ClassNode> = query
-        .map(|term| db.match_class_nodes(term, limit).unwrap_or_default())
-        .unwrap_or_default();
+    let mut matched: Vec<polis_core::types::ClassNode> = crate::latency::timed("pack.resolve", || {
+        query
+            .map(|term| db.match_class_nodes(term, limit).unwrap_or_default())
+            .unwrap_or_default()
+    });
     let resolved = node_id
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -346,7 +354,7 @@ pub fn build_answer_pack(
     // worth asking about. The budget below still has the final say.
     let node_cap = (limit * 5).max(20) as usize;
     let mut over_cap: Vec<&str> = Vec::new();
-    let node = resolved.map(|node| {
+    let node = crate::latency::timed("pack.node", || resolved.map(|node| {
         let mut children = db.list_class_children(&node.id).unwrap_or_default();
         // ONE query for the whole generation, not one per child — the same
         // N+1 the Timeline's filing probe had, in the route that is supposed
@@ -394,23 +402,27 @@ pub fn build_answer_pack(
             over_cap.push("observations");
         }
         PackNode { node, children, grandchildren, links, observations }
-    });
+    }));
 
     // --- lexical evidence: always produced, node or no node ---
-    let notes = query
-        .map(|term| db.search_user_notes(term, limit).unwrap_or_default())
-        .unwrap_or_default();
+    let notes = crate::latency::timed("pack.notes", || {
+        query
+            .map(|term| db.search_user_notes(term, limit).unwrap_or_default())
+            .unwrap_or_default()
+    });
     let plan = query.and_then(polis_core::query::plan_fts_query);
     let terms: Vec<String> = plan.as_ref().map(|p| p.terms.clone()).unwrap_or_default();
 
-    let mut ranked = query
-        .map(|term| {
-            db.search_prompts_ranked(term, limit).unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "answer-pack: prompt search failed");
-                Vec::new()
+    let mut ranked = crate::latency::timed("pack.lexical", || {
+        query
+            .map(|term| {
+                db.search_prompts_ranked(term, limit).unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "answer-pack: prompt search failed");
+                    Vec::new()
+                })
             })
-        })
-        .unwrap_or_default();
+            .unwrap_or_default()
+    });
 
     // --- the semantic arm, and the FUSE the pipeline is named for ------------
     //
@@ -422,8 +434,8 @@ pub fn build_answer_pack(
     // on-device model (or a macOS below 14 with no sentence fallback either),
     // and the pack SAYS so rather than returning a short list that reads as an
     // empty history.
-    let semantic = query.and_then(|term| {
-        crate::semantic_search(polis, term, (limit * 3).max(24) as usize)
+    let semantic = crate::latency::timed("pack.semantic", || {
+        query.and_then(|term| crate::semantic_search(polis, term, (limit * 3).max(24) as usize))
     });
     let semantic_prompt_hits: Vec<(i64, f64)> = semantic
         .as_ref()
@@ -544,7 +556,7 @@ pub fn build_answer_pack(
     // sha256 of the normalized DOM — and 20% of them are exact duplicates today
     // (829 rows, 665 distinct). Revisiting a page is a real signal about
     // attention, but four identical copies of it are not four pieces of evidence.
-    let browse_hits = {
+    let browse_hits = crate::latency::timed("pack.browse", || {
         let raw = query
             .map(|term| db.search_browse_events(term, limit).unwrap_or_default())
             .unwrap_or_default();
@@ -570,13 +582,13 @@ pub fn build_answer_pack(
             .filter(|(_, v)| matches!(v, polis_core::dedup::Verdict::Keep { .. }))
             .map(|(h, _)| h)
             .collect::<Vec<_>>()
-    };
+    });
 
     // The grep arm runs only when the question reaches for a literal. Its
     // needle is the longest quoted phrase, else the longest term — the most
     // specific thing the user actually typed.
     let literal_query = matches!((&plan, query), (Some(p), Some(raw)) if polis_core::query::looks_literal(p, raw));
-    let grep_hits = match (&plan, query) {
+    let grep_hits = crate::latency::timed("pack.grep", || match (&plan, query) {
         (Some(plan), Some(raw)) if polis_core::query::looks_literal(plan, raw) => {
             let needle = plan
                 .phrases
@@ -589,7 +601,7 @@ pub fn build_answer_pack(
                 .unwrap_or_default()
         }
         _ => Vec::new(),
-    };
+    });
 
     // Every arm reports whether it RAN, not just what it returned.
     let arm_coverage = vec![
@@ -647,6 +659,7 @@ pub fn build_answer_pack(
         truncated: over_cap.into_iter().map(str::to_string).collect(),
     };
     enforce_pack_budget(&mut pack);
+    pack_span.record("ms", pack_timer.stop());
     pack
 }
 
@@ -727,12 +740,14 @@ pub fn thread_view(polis: &Polis<'_>, kind: &str, id: &str, limit: i64) -> Optio
 /// plan the question, build the pack, render it honest about what it searched
 /// and trimmed. `text: None` when the record has nothing on it.
 pub fn context_block(polis: &Polis<'_>, q: &str, node: Option<&str>, max_bytes: usize) -> ContextBlock {
-    let plan = plan_fts_query(q);
-    let terms = plan.as_ref().map(|p| p.terms.clone()).unwrap_or_default();
-    let mut pack = build_answer_pack(polis, Some(q), node, INLINE_PACK_LIMIT);
-    enforce_pack_budget(&mut pack);
-    let text = render_answer_pack_block(&pack, plan.as_ref(), max_bytes);
-    ContextBlock { text, terms }
+    crate::latency::timed("context", || {
+        let plan = plan_fts_query(q);
+        let terms = plan.as_ref().map(|p| p.terms.clone()).unwrap_or_default();
+        let mut pack = build_answer_pack(polis, Some(q), node, INLINE_PACK_LIMIT);
+        enforce_pack_budget(&mut pack);
+        let text = render_answer_pack_block(&pack, plan.as_ref(), max_bytes);
+        ContextBlock { text, terms }
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -548,6 +548,18 @@ impl Migration {
         // the dedupe and the hash chain all rest on — folding a caption into
         // `text` would silently re-key the page.
         let _ = conn.execute("ALTER TABLE browse_events ADD COLUMN caption TEXT", []);
+        // Program B1 (docs/bench.md "Gardener efficacy"): what a run cost and
+        // what it did, so `catalog_health` can report organize p50/p90, the
+        // error rate and — once B3 wires the canary — the recall it was
+        // measured against. Additive; the old columns keep their meaning.
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN duration_ms INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN items INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN ops INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN model TEXT", []);
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN outcome TEXT", []);
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN canary_before REAL", []);
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN canary_after REAL", []);
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN error TEXT", []);
         Ok(())
     }
 

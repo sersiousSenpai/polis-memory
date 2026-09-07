@@ -465,6 +465,23 @@ impl PolisStore {
 
     /// Prompt counts grouped by UTC day (`YYYY-MM-DD`), oldest day first —
     /// `/v1/context/stats` day histogram.
+    /// The newest user-role prompts that still carry a body of at least
+    /// `min_chars` characters, as `(ledger seq, prompt id, body)`, newest
+    /// first — the canary's PromptSpan subjects (docs/bench.md).
+    pub fn recent_user_prompts(&self, limit: i64, min_chars: i64) -> rusqlite::Result<Vec<(i64, i64, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT le.seq, p.id, p.body FROM prompts p
+             JOIN ledger_events le ON le.prompt_id = p.id AND le.kind = 'prompt'
+             WHERE p.role = 'user' AND LENGTH(p.body) >= ?2
+             ORDER BY p.id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit.max(1), min_chars.max(1)], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect()
+    }
+
     pub fn prompt_counts_by_day(&self) -> rusqlite::Result<Vec<(String, i64)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
