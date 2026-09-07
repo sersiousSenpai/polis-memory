@@ -1,0 +1,215 @@
+{
+  "schema": 1,
+  "date": "2026-09-07",
+  "sha": "5822b6389b1d",
+  "machine": "macos aarch64 (16 cpus)",
+  "lake": {
+    "source": "synthetic-1000-seed-0x5eed0001",
+    "prompts": 1000,
+    "events": 1724,
+    "nodes": 126,
+    "browseEvents": 649,
+    "notes": 10
+  },
+  "runId": 1,
+  "probes": 218,
+  "recallAt": {
+    "10": 0.97,
+    "20": 0.97,
+    "5": 0.97
+  },
+  "mrr": 0.95,
+  "packContainsGold": 0.9724770642201835,
+  "bytesPerPack": {
+    "n": 218,
+    "mean": 16167.45871559633,
+    "p50": 16121.0,
+    "p95": 24895.0,
+    "max": 27957.0
+  },
+  "tokensPerPack": {
+    "n": 218,
+    "mean": 4041.8646788990827,
+    "p50": 4030.25,
+    "p95": 6223.75,
+    "max": 6989.25
+  },
+  "armAttribution": {
+    "lexical_only": 49
+  },
+  "subjects": [
+    {
+      "subject": "decision",
+      "n": 51,
+      "hits": 50,
+      "recall": 0.9803921568627451
+    },
+    {
+      "subject": "supersession",
+      "n": 7,
+      "hits": 5,
+      "recall": 0.7142857142857143
+    },
+    {
+      "subject": "note",
+      "n": 10,
+      "hits": 10,
+      "recall": 1.0
+    },
+    {
+      "subject": "prompt_span",
+      "n": 50,
+      "hits": 49,
+      "recall": 0.98
+    },
+    {
+      "subject": "class_reach",
+      "n": 50,
+      "hits": 50,
+      "recall": 1.0
+    },
+    {
+      "subject": "browse_title",
+      "n": 50,
+      "hits": 48,
+      "recall": 0.96
+    }
+  ],
+  "canary": {
+    "run_id": 1,
+    "head_seq": 1724,
+    "n": 168,
+    "hits": 164,
+    "recall": 0.9761904761904762,
+    "subjects": [
+      {
+        "subject": "decision",
+        "n": 51,
+        "hits": 50,
+        "recall": 0.9803921568627451
+      },
+      {
+        "subject": "supersession",
+        "n": 7,
+        "hits": 5,
+        "recall": 0.7142857142857143
+      },
+      {
+        "subject": "note",
+        "n": 10,
+        "hits": 10,
+        "recall": 1.0
+      },
+      {
+        "subject": "prompt_span",
+        "n": 50,
+        "hits": 49,
+        "recall": 0.98
+      },
+      {
+        "subject": "class_reach",
+        "n": 50,
+        "hits": 50,
+        "recall": 1.0
+      }
+    ],
+    "unfiled_decisions": 1,
+    "packs": 168,
+    "elapsed_ms": 1733,
+    "p50_ms": 9,
+    "p95_ms": 15
+  },
+  "latency": [
+    {
+      "op": "context",
+      "n": 20,
+      "p50Ms": 8,
+      "p95Ms": 12,
+      "maxMs": 12
+    },
+    {
+      "op": "grep",
+      "n": 5,
+      "p50Ms": 3,
+      "p95Ms": 3,
+      "maxMs": 3
+    },
+    {
+      "op": "ingest",
+      "n": 1,
+      "p50Ms": 17,
+      "p95Ms": 17,
+      "maxMs": 17
+    },
+    {
+      "op": "ingest.item",
+      "n": 100,
+      "p50Ms": 0,
+      "p95Ms": 0,
+      "maxMs": 0
+    },
+    {
+      "op": "pack",
+      "n": 238,
+      "p50Ms": 8,
+      "p95Ms": 14,
+      "maxMs": 20
+    },
+    {
+      "op": "pack.browse",
+      "n": 238,
+      "p50Ms": 5,
+      "p95Ms": 9,
+      "maxMs": 11
+    },
+    {
+      "op": "pack.grep",
+      "n": 238,
+      "p50Ms": 0,
+      "p95Ms": 3,
+      "maxMs": 3
+    },
+    {
+      "op": "pack.lexical",
+      "n": 238,
+      "p50Ms": 0,
+      "p95Ms": 1,
+      "maxMs": 2
+    },
+    {
+      "op": "pack.node",
+      "n": 238,
+      "p50Ms": 0,
+      "p95Ms": 1,
+      "maxMs": 1
+    },
+    {
+      "op": "pack.notes",
+      "n": 238,
+      "p50Ms": 0,
+      "p95Ms": 0,
+      "maxMs": 0
+    },
+    {
+      "op": "pack.resolve",
+      "n": 238,
+      "p50Ms": 0,
+      "p95Ms": 0,
+      "maxMs": 0
+    },
+    {
+      "op": "pack.semantic",
+      "n": 238,
+      "p50Ms": 0,
+      "p95Ms": 0,
+      "maxMs": 0
+    }
+  ],
+  "filingConsistency": null,
+  "notes": [
+    "Measures reachability of what Polis recorded through the answer pack, by the words written — not human relevance.",
+    "Unfiled decisions are unreachable today (no text of their own in the store); the Decision subject covers filed ones.",
+    "Leave-one-out filing consistency: deferred to the C-program (needs class centroids).",
+    "No embedder configured: the semantic arm was absent for every probe."
+  ]
+}

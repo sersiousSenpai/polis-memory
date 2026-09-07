@@ -424,6 +424,8 @@ pub struct OrganizeOutcome {
 /// change events. This is the brain the background keeper drives autonomously
 /// and the `classmem_organize` command wraps.
 pub async fn organize_once(polis: &Polis<'_>) -> Result<OrganizeOutcome, String> {
+    let started = std::time::Instant::now();
+    let model = polis.agent.as_ref().map(|a| a.name().to_string());
     let db = polis.store;
     let roots = seed_root_rows(&polis.list_project_paths().map_err(|e| e.to_string())?);
     db.seed_class_roots(&roots).map_err(|e| e.to_string())?;
@@ -437,8 +439,20 @@ pub async fn organize_once(polis: &Polis<'_>) -> Result<OrganizeOutcome, String>
     let run_id = db.insert_class_run(seq_from, seq_to).map_err(|e| e.to_string())?;
 
     if delta.is_empty() {
-        db.finish_class_run(run_id, "done", None, "no new lake items to classify")
-            .map_err(|e| e.to_string())?;
+        db.finish_class_run_with(
+            run_id,
+            &ClassRunFinish {
+                status: "done".into(),
+                summary: "no new lake items to classify".into(),
+                duration_ms: Some(started.elapsed().as_millis() as i64),
+                items: Some(0),
+                ops: Some(0),
+                model: model.clone(),
+                outcome: Some("done".into()),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
         return Ok(OrganizeOutcome {
             summary: "Nothing new to classify yet — capture some prompts first.".to_string(),
             seq_from,
@@ -557,8 +571,21 @@ pub async fn organize_once(polis: &Polis<'_>) -> Result<OrganizeOutcome, String>
                     staged.created_nodes, staged.staged_links, staged.structural, staged.skipped
                 )
             };
-            db.finish_class_run(run_id, "done", session.as_deref(), &summary)
-                .map_err(|e| e.to_string())?;
+            db.finish_class_run_with(
+                run_id,
+                &ClassRunFinish {
+                    status: "done".into(),
+                    claude_session_id: session.clone(),
+                    summary: summary.clone(),
+                    duration_ms: Some(started.elapsed().as_millis() as i64),
+                    items: Some(delta.len() as i64),
+                    ops: Some((staged.created_nodes + staged.staged_links + applied_reorgs + superseded) as i64),
+                    model: model.clone(),
+                    outcome: Some("done".into()),
+                    error: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
             Ok(OrganizeOutcome {
                 staged,
                 summary,
@@ -569,7 +596,20 @@ pub async fn organize_once(polis: &Polis<'_>) -> Result<OrganizeOutcome, String>
             })
         }
         Err(e) => {
-            let _ = db.finish_class_run(run_id, "error", None, &e);
+            let _ = db.finish_class_run_with(
+                run_id,
+                &ClassRunFinish {
+                    status: "error".into(),
+                    summary: e.clone(),
+                    duration_ms: Some(started.elapsed().as_millis() as i64),
+                    items: Some(delta.len() as i64),
+                    ops: Some(0),
+                    model: model.clone(),
+                    outcome: Some("error".into()),
+                    error: Some(e.clone()),
+                    ..Default::default()
+                },
+            );
             Err(e)
         }
     }

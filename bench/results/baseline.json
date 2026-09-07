@@ -1,0 +1,280 @@
+{
+  "_comment": "The eval gate's baseline (docs/bench.md). `gate` is what CI enforces on the deterministic synthetic corpus: Recall@10 may not drop more than `recallTolerance` below `recallAt10`, and no op's p95 may exceed `p95Ms`. `measured` records everything measured the day the baseline was taken (this machine); documentation, not a gate. Regenerate with `cargo test -p polis-memory --features eval -- --ignored eval_synthetic_writes_results --nocapture` and edit deliberately.",
+  "schema": 1,
+  "date": "2026-09-07",
+  "sha": "c8fea9440c52",
+  "machine": "macos aarch64 (16 cpus)",
+  "gateCorpus": {
+    "prompts": 1000,
+    "seed": 1592590337
+  },
+  "gate": {
+    "recallAt10": 0.97,
+    "recallTolerance": 0.02,
+    "p95Ms": {
+      "ingest.item": 20,
+      "pack": 200,
+      "grep": 100,
+      "context": 300
+    }
+  },
+  "measured": {
+    "synthetic1k": {
+      "lake": {
+        "source": "synthetic-1000-seed-0x5eed0001",
+        "prompts": 1000,
+        "events": 1724,
+        "nodes": 126,
+        "browseEvents": 649,
+        "notes": 10
+      },
+      "recallAt": {
+        "10": 0.97,
+        "20": 0.97,
+        "5": 0.97
+      },
+      "mrr": 0.95,
+      "packContainsGold": 0.972,
+      "subjects": {
+        "decision": {
+          "n": 51,
+          "hits": 50
+        },
+        "supersession": {
+          "n": 7,
+          "hits": 5
+        },
+        "note": {
+          "n": 10,
+          "hits": 10
+        },
+        "prompt_span": {
+          "n": 50,
+          "hits": 49
+        },
+        "class_reach": {
+          "n": 50,
+          "hits": 50
+        },
+        "browse_title": {
+          "n": 50,
+          "hits": 48
+        }
+      },
+      "canary": {
+        "n": 168,
+        "recall": 0.9762,
+        "p50Ms": 9,
+        "p95Ms": 15,
+        "elapsedMs": 1733
+      },
+      "bytesPerPack": {
+        "n": 218,
+        "mean": 16167.45871559633,
+        "p50": 16121.0,
+        "p95": 24895.0,
+        "max": 27957.0
+      },
+      "latency": {
+        "context": {
+          "n": 20,
+          "p50Ms": 8,
+          "p95Ms": 12
+        },
+        "grep": {
+          "n": 5,
+          "p50Ms": 3,
+          "p95Ms": 3
+        },
+        "ingest": {
+          "n": 1,
+          "p50Ms": 17,
+          "p95Ms": 17
+        },
+        "ingest.item": {
+          "n": 100,
+          "p50Ms": 0,
+          "p95Ms": 0
+        },
+        "pack": {
+          "n": 238,
+          "p50Ms": 8,
+          "p95Ms": 14
+        },
+        "pack.browse": {
+          "n": 238,
+          "p50Ms": 5,
+          "p95Ms": 9
+        },
+        "pack.grep": {
+          "n": 238,
+          "p50Ms": 0,
+          "p95Ms": 3
+        },
+        "pack.lexical": {
+          "n": 238,
+          "p50Ms": 0,
+          "p95Ms": 1
+        },
+        "pack.node": {
+          "n": 238,
+          "p50Ms": 0,
+          "p95Ms": 1
+        },
+        "pack.notes": {
+          "n": 238,
+          "p50Ms": 0,
+          "p95Ms": 0
+        },
+        "pack.resolve": {
+          "n": 238,
+          "p50Ms": 0,
+          "p95Ms": 0
+        },
+        "pack.semantic": {
+          "n": 238,
+          "p50Ms": 0,
+          "p95Ms": 0
+        }
+      }
+    },
+    "realDbCopy": {
+      "lake": {
+        "source": "real-db-copy",
+        "prompts": 2164,
+        "events": 5735,
+        "nodes": 229,
+        "browseEvents": 1483,
+        "notes": 0
+      },
+      "recallAt": {
+        "10": 0.7,
+        "20": 0.7,
+        "5": 0.66
+      },
+      "mrr": 0.588,
+      "packContainsGold": 0.701,
+      "subjects": {
+        "decision": {
+          "n": 100,
+          "hits": 55
+        },
+        "supersession": {
+          "n": 1,
+          "hits": 1
+        },
+        "prompt_span": {
+          "n": 50,
+          "hits": 45
+        },
+        "class_reach": {
+          "n": 50,
+          "hits": 50
+        },
+        "browse_title": {
+          "n": 50,
+          "hits": 25
+        }
+      },
+      "canary": {
+        "n": 201,
+        "recall": 0.7512,
+        "p50Ms": 17,
+        "p95Ms": 27,
+        "elapsedMs": 3317,
+        "unfiled_decisions": 0
+      },
+      "bytesPerPack": {
+        "n": 251,
+        "mean": 15445.430278884462,
+        "p50": 14341.0,
+        "p95": 29304.0,
+        "max": 29979.0
+      },
+      "latency": {
+        "context": {
+          "n": 20,
+          "p50Ms": 19,
+          "p95Ms": 32
+        },
+        "grep": {
+          "n": 5,
+          "p50Ms": 8,
+          "p95Ms": 8
+        },
+        "ingest": {
+          "n": 1,
+          "p50Ms": 92,
+          "p95Ms": 92
+        },
+        "ingest.item": {
+          "n": 100,
+          "p50Ms": 0,
+          "p95Ms": 2
+        },
+        "pack": {
+          "n": 272,
+          "p50Ms": 14,
+          "p95Ms": 27
+        },
+        "pack.browse": {
+          "n": 272,
+          "p50Ms": 10,
+          "p95Ms": 18
+        },
+        "pack.grep": {
+          "n": 272,
+          "p50Ms": 0,
+          "p95Ms": 8
+        },
+        "pack.lexical": {
+          "n": 272,
+          "p50Ms": 0,
+          "p95Ms": 2
+        },
+        "pack.node": {
+          "n": 272,
+          "p50Ms": 0,
+          "p95Ms": 1
+        },
+        "pack.notes": {
+          "n": 272,
+          "p50Ms": 0,
+          "p95Ms": 0
+        },
+        "pack.resolve": {
+          "n": 272,
+          "p50Ms": 0,
+          "p95Ms": 0
+        },
+        "pack.semantic": {
+          "n": 272,
+          "p50Ms": 0,
+          "p95Ms": 0
+        }
+      },
+      "note": "45 of the 100 probed decisions sit past the pack's 40-link per-node cap of their class (34 in one 317-link class): the Decision subject's 0.55 is the pack's fan-out cap, measured."
+    },
+    "calibration": {
+      "synthetic1k": {
+        "runs": 10,
+        "aggregateMean": 0.9845,
+        "aggregateStddev": 0.0057,
+        "promptSpanStddev": 0.0184,
+        "threeSigma": 0.0172,
+        "setMsP50": 1709
+      },
+      "realDbCopy": {
+        "runs": 10,
+        "aggregateMean": 0.7557,
+        "aggregateStddev": 0.0057,
+        "promptSpanStddev": 0.0227,
+        "threeSigma": 0.017,
+        "setMsP50": 3356
+      }
+    },
+    "benches": {
+      "_pending": "filled in by the criterion run (see docs/bench.md)"
+    }
+  }
+}

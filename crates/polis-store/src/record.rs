@@ -179,8 +179,14 @@ pub struct BrowseEventInput {
 /// consecutive duplicate for the tab (nothing written). Best-effort — surfaces DB
 /// errors as `Err` for logging; never blocks the browser.
 pub fn record_browse_event(store: &PolisStore, input: BrowseEventInput) -> Result<Option<i64>, String> {
+    record_browse_event_at(store, input, now_millis())
+}
+
+/// `record_browse_event` with the caller's clock — an import (or a synthetic
+/// corpus) carries the moment the page was seen, not the moment it was
+/// written.
+pub fn record_browse_event_at(store: &PolisStore, input: BrowseEventInput, ts: i64) -> Result<Option<i64>, String> {
     let ch = body_hash(&input.text);
-    let ts = now_millis();
     let row = BrowseEventRow {
         ts,
         action: input.action.as_str(),

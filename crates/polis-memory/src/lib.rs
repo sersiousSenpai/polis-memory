@@ -20,6 +20,9 @@
 
 pub mod agent;
 pub mod bundle;
+pub mod canary;
+pub mod corpus;
+pub mod eval;
 pub mod gardener;
 pub mod latency;
 pub mod mirror;

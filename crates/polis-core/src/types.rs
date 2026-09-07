@@ -420,6 +420,33 @@ pub struct ClassRun {
     pub seq_to: Option<i64>,
     pub claude_session_id: Option<String>,
     pub summary: Option<String>,
+    /// B1's accounting columns (all `None` on rows written before them).
+    pub duration_ms: Option<i64>,
+    /// Lake items the run was fed.
+    pub items: Option<i64>,
+    /// Proposals it staged/applied (nodes + links + structural).
+    pub ops: Option<i64>,
+    /// The agent that ran it (`None` = no model configured).
+    pub model: Option<String>,
+    /// `done | error | reverted_by_canary` (B3 adds the third).
+    pub outcome: Option<String>,
+    pub canary_before: Option<f64>,
+    pub canary_after: Option<f64>,
+    pub error: Option<String>,
+}
+
+/// What `finish_class_run_with` records about a completed run.
+#[derive(Debug, Clone, Default)]
+pub struct ClassRunFinish {
+    pub status: String,
+    pub claude_session_id: Option<String>,
+    pub summary: String,
+    pub duration_ms: Option<i64>,
+    pub items: Option<i64>,
+    pub ops: Option<i64>,
+    pub model: Option<String>,
+    pub outcome: Option<String>,
+    pub error: Option<String>,
 }
 
 /// What `Database::stage_proposal` did with one proposal.

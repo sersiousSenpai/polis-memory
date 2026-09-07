@@ -58,6 +58,20 @@ impl PolisStore {
     /// ids — the exact-identity key the answer pack dedupes on. Already stored
     /// and indexed, which is what makes exact dedup free: 829 browse events
     /// hold only 665 distinct pages.
+    /// The newest browse events that carry a title, as `(ledger seq, title,
+    /// url)` — the eval's browse-title reachability subjects.
+    pub fn recent_browse_titles(&self, limit: i64) -> rusqlite::Result<Vec<(i64, String, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT le.seq, b.title, b.url FROM browse_events b
+             JOIN ledger_events le ON le.ref_kind = 'browse_event' AND le.ref_id = CAST(b.id AS TEXT)
+             WHERE b.title IS NOT NULL AND LENGTH(b.title) >= 8
+             ORDER BY b.id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit.max(1)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect()
+    }
+
     pub fn context_hashes_for_browse_ids(
         &self,
         ids: &[i64],

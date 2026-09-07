@@ -967,6 +967,76 @@ impl PolisStore {
         )
     }
 
+    /// The newest accepted links whose target is a decision event, as
+    /// `(node id, node title, decision seq)` — the canary's Decision subjects:
+    /// a filed decision is reachable through its class today (an unfiled one
+    /// is not; the C-program's decision arm is what changes that).
+    pub fn recent_decision_links(&self, limit: i64) -> rusqlite::Result<Vec<(String, String, i64)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.title, CAST(l.target_id AS INTEGER)
+             FROM class_links l JOIN class_nodes n ON n.id = l.node_id
+             WHERE l.status = 'accepted' AND n.status = 'accepted'
+               AND l.target_kind IN ('decision', 'resolution', 'approval', 'review_verdict')
+               AND l.target_id GLOB '[0-9]*'
+             ORDER BY l.id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit.max(1)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect()
+    }
+
+    /// Accepted non-root nodes that hold at least one accepted link, with
+    /// their link counts, by id — the canary's ClassReach candidates (the
+    /// caller picks its sample; the order here is stable so a seeded pick
+    /// is reproducible).
+    pub fn nodes_with_links(&self) -> rusqlite::Result<Vec<(polis_core::types::ClassNode, i64)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.parent_id, n.kind, n.title, n.summary, n.project_path, n.ip_name,
+                    n.status, n.pinned, n.curated_by, n.created_at, n.updated_at,
+                    (SELECT COUNT(*) FROM class_links l WHERE l.node_id = n.id AND l.status = 'accepted') AS links
+             FROM class_nodes n
+             WHERE n.status = 'accepted' AND n.parent_id IS NOT NULL AND links > 0
+             ORDER BY n.id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                polis_core::types::ClassNode {
+                    id: r.get(0)?,
+                    parent_id: r.get(1)?,
+                    kind: r.get(2)?,
+                    title: r.get(3)?,
+                    summary: r.get(4)?,
+                    project_path: r.get(5)?,
+                    ip_name: r.get(6)?,
+                    status: r.get(7)?,
+                    pinned: r.get::<_, i64>(8)? != 0,
+                    curated_by: r.get(9)?,
+                    created_at: r.get(10)?,
+                    updated_at: r.get(11)?,
+                },
+                r.get(12)?,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// The accepted nodes whose accepted links point at a ledger seq, as
+    /// `(node id, node title)`.
+    pub fn nodes_linking_seq(&self, seq: i64) -> rusqlite::Result<Vec<(String, String)>> {
+        let conn = self.conn();
+        let s = seq.to_string();
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.title FROM class_links l JOIN class_nodes n ON n.id = l.node_id
+             WHERE l.status = 'accepted' AND n.status = 'accepted'
+               AND l.target_kind IN ('prompt', 'decision', 'ledger', 'resolution', 'approval', 'review_verdict')
+               AND l.target_id = ?1
+             ORDER BY l.id ASC",
+        )?;
+        let rows = stmt.query_map(params![s], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
     pub fn insert_class_run(&self, seq_from: i64, seq_to: i64) -> rusqlite::Result<i64> {
         let conn = self.conn();
         conn.execute(
@@ -984,33 +1054,95 @@ impl PolisStore {
         claude_session_id: Option<&str>,
         summary: &str,
     ) -> rusqlite::Result<()> {
+        self.finish_class_run_with(
+            id,
+            &polis_core::types::ClassRunFinish {
+                status: status.to_string(),
+                claude_session_id: claude_session_id.map(str::to_string),
+                summary: summary.to_string(),
+                outcome: Some(status.to_string()),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// `finish_class_run` with B1's accounting: what the run cost and did.
+    pub fn finish_class_run_with(&self, id: i64, f: &polis_core::types::ClassRunFinish) -> rusqlite::Result<()> {
         let conn = self.conn();
         conn.execute(
-            "UPDATE class_runs SET status = ?2, finished_at = ?3, claude_session_id = ?4, summary = ?5
+            "UPDATE class_runs SET status = ?2, finished_at = ?3, claude_session_id = ?4, summary = ?5,
+                    duration_ms = ?6, items = ?7, ops = ?8, model = ?9, outcome = ?10, error = ?11
              WHERE id = ?1",
-            params![id, status, polis_core::ledger::now_millis(), claude_session_id, summary],
+            params![
+                id,
+                f.status,
+                polis_core::ledger::now_millis(),
+                f.claude_session_id,
+                f.summary,
+                f.duration_ms,
+                f.items,
+                f.ops,
+                f.model,
+                f.outcome,
+                f.error
+            ],
         )?;
         Ok(())
+    }
+
+    /// Stamp a run's canary recall before/after (B3's auto-revert writes
+    /// these; B1 only measures).
+    pub fn set_class_run_canary(&self, id: i64, before: Option<f64>, after: Option<f64>) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE class_runs SET canary_before = ?2, canary_after = ?3 WHERE id = ?1",
+            params![id, before, after],
+        )?;
+        Ok(())
+    }
+
+    /// The newest `limit` runs, newest first — the efficacy table's input
+    /// (organize p50/p90, error rate over the last 50).
+    pub fn list_class_runs(&self, limit: i64) -> rusqlite::Result<Vec<polis_core::types::ClassRun>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM class_runs ORDER BY id DESC LIMIT ?1",
+            Self::CLASS_RUN_COLS
+        ))?;
+        let rows = stmt.query_map(params![limit.max(1)], Self::row_to_class_run)?;
+        rows.collect()
+    }
+
+    pub const CLASS_RUN_COLS: &'static str = "id, started_at, finished_at, status, seq_from, seq_to, claude_session_id, summary,
+             duration_ms, items, ops, model, outcome, canary_before, canary_after, error";
+
+    pub fn row_to_class_run(r: &rusqlite::Row) -> rusqlite::Result<polis_core::types::ClassRun> {
+        Ok(polis_core::types::ClassRun {
+            id: r.get(0)?,
+            started_at: r.get(1)?,
+            finished_at: r.get(2)?,
+            status: r.get(3)?,
+            seq_from: r.get(4)?,
+            seq_to: r.get(5)?,
+            claude_session_id: r.get(6)?,
+            summary: r.get(7)?,
+            duration_ms: r.get(8)?,
+            items: r.get(9)?,
+            ops: r.get(10)?,
+            model: r.get(11)?,
+            outcome: r.get(12)?,
+            canary_before: r.get(13)?,
+            canary_after: r.get(14)?,
+            error: r.get(15)?,
+        })
     }
 
     pub fn latest_class_run(&self) -> rusqlite::Result<Option<polis_core::types::ClassRun>> {
         let conn = self.conn();
         conn.query_row(
-            "SELECT id, started_at, finished_at, status, seq_from, seq_to, claude_session_id, summary
-             FROM class_runs ORDER BY id DESC LIMIT 1",
+            &format!("SELECT {} FROM class_runs ORDER BY id DESC LIMIT 1", Self::CLASS_RUN_COLS),
             [],
-            |r| {
-                Ok(polis_core::types::ClassRun {
-                    id: r.get(0)?,
-                    started_at: r.get(1)?,
-                    finished_at: r.get(2)?,
-                    status: r.get(3)?,
-                    seq_from: r.get(4)?,
-                    seq_to: r.get(5)?,
-                    claude_session_id: r.get(6)?,
-                    summary: r.get(7)?,
-                })
-            },
+            Self::row_to_class_run,
         )
         .optional()
     }

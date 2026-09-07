@@ -24,7 +24,9 @@ pub const CORPUS_ROLE_VERSION_KEY: &str = "corpus_role_version";
 
 /// The store schema's version. Bump when `schema.rs` gains a statement; the
 /// idempotent DDL then re-runs once on every existing store.
-pub const STORE_SCHEMA_VERSION: &str = "1";
+/// 2 (B1): `class_runs` gained duration_ms / items / ops / model / outcome /
+/// canary_before / canary_after / error.
+pub const STORE_SCHEMA_VERSION: &str = "2";
 
 /// The host's legacy `app_settings` keys, read once at adoption.
 pub const LEGACY_LEXICAL_KEY: &str = "redline.memory.lexicalVersion";
