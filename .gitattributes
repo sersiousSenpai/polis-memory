@@ -1,0 +1,5 @@
+# LF everywhere, including Windows checkouts: several tests read this repo's
+# own sources with `include_str!` and scrape them by line, and a CRLF checkout
+# turned one of them red on the windows-latest runner (the router-registration
+# drift test looked for "\n}\n").
+* text=auto eol=lf

@@ -426,11 +426,14 @@ mod tests {
     /// — deliberately dumb, the same scrape Redline's own drift test uses.
     fn registered_route_paths() -> Vec<String> {
         let mut paths = Vec::new();
+        // Line endings normalized: a CRLF checkout (Windows, without the
+        // repo's .gitattributes) must scrape the same as an LF one.
+        let src = LIB_SRC.replace("\r\n", "\n");
         // Only the router fn's body: this file also holds these tests, whose
         // own `.route(` literal must not count as a registration.
-        let start = LIB_SRC.find("pub fn router<S>()").expect("the router fn");
-        let end = LIB_SRC[start..].find("\n}\n").expect("the router fn's end") + start;
-        let mut rest = &LIB_SRC[start..end];
+        let start = src.find("pub fn router<S>()").expect("the router fn");
+        let end = src[start..].find("\n}\n").expect("the router fn's end") + start;
+        let mut rest = &src[start..end];
         while let Some(idx) = rest.find(".route(") {
             rest = &rest[idx + ".route(".len()..];
             let Some(q1) = rest.find('"') else { break };
