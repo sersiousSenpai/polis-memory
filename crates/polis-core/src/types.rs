@@ -136,6 +136,12 @@ pub struct ContextStats {
     /// since P0 made agents author as their seat name; older rows are uniformly
     /// the local human.
     pub by_author: Vec<(String, i64)>,
+    /// Per-op latency (p50/p95 over the newest 256 samples) recorded in this
+    /// process — every answer-pack arm, every route, the write paths. Empty
+    /// until something ran; the measurement program's runtime instrument
+    /// (docs/bench.md).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub latency: Vec<crate::latency::OpLatency>,
 }
 
 /// Clamp + default for the Timeline's page size. Pages are cursor-chained

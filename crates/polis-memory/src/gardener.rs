@@ -656,7 +656,7 @@ pub async fn step(
                 .map(|(_, pending)| pending > 0)
                 .unwrap_or(false);
             if pending {
-                let done = crate::index_tick(polis, cfg.embed_batch);
+                let done = crate::latency::timed("gardener.embed", || crate::index_tick(polis, cfg.embed_batch));
                 if done > 0 {
                     tracing::info!(targets = done, "embedded a batch for the semantic arm");
                     out.embedded = done;
@@ -693,7 +693,7 @@ pub async fn step(
 
     // --- run: organize, then compact, then (occasionally) observe. All
     // best-effort. ---
-    match crate::organize::organize_once(polis).await {
+    match crate::latency::timed_async("gardener.organize", crate::organize::organize_once(polis)).await {
         Ok(o) if o.ran => {
             out.organized = true;
             tracing::info!(summary = %o.summary, "gardener organized");
@@ -702,7 +702,7 @@ pub async fn step(
         Err(e) if e == crate::agent::NO_MODEL => out.no_model = true,
         Err(e) => tracing::warn!(error = %e, "gardener organize pass failed"),
     }
-    match compaction_pass(polis).await {
+    match crate::latency::timed_async("gardener.compaction", compaction_pass(polis)).await {
         Ok(n) => {
             out.compacted = n;
             if n > 0 {
@@ -721,7 +721,7 @@ pub async fn step(
             .unwrap_or(0)
             + 1;
         if n >= cfg.observe_every_n_organizes {
-            match observations_pass(polis).await {
+            match crate::latency::timed_async("gardener.observations", observations_pass(polis)).await {
                 Ok(k) => {
                     out.observed = k;
                     if k > 0 {

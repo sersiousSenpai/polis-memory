@@ -21,6 +21,7 @@
 pub mod agent;
 pub mod bundle;
 pub mod gardener;
+pub mod latency;
 pub mod mirror;
 pub mod organize;
 pub mod retrieval;
@@ -220,12 +221,14 @@ impl MemoryApi for PolisHandle {
 
     fn grep(&self, req: &GrepRequest) -> Result<Vec<GrepHit>, MemoryError> {
         let limit = req.limit.unwrap_or(20).clamp(1, 200);
-        self.store
-            .grep_memory(&req.literal, req.regex.as_deref(), req.case_sensitive, req.kinds, limit)
-            .map_err(|e| match e {
-                GrepError::Db(m) => MemoryError::Store(m),
-                other => MemoryError::Rejected(other.to_string()),
-            })
+        latency::timed("grep", || {
+            self.store
+                .grep_memory(&req.literal, req.regex.as_deref(), req.case_sensitive, req.kinds, limit)
+                .map_err(|e| match e {
+                    GrepError::Db(m) => MemoryError::Store(m),
+                    other => MemoryError::Rejected(other.to_string()),
+                })
+        })
     }
 
     fn tree(&self, req: &TreeRequest) -> Result<Vec<TreeNodeView>, MemoryError> {
@@ -246,7 +249,10 @@ impl MemoryApi for PolisHandle {
     }
 
     fn stats(&self, _scope: &Scope) -> Result<ContextStats, MemoryError> {
-        Ok(retrieval::build_stats_cached(&self.view()))
+        // The counts are cached (head-seq keyed); the latency table is live.
+        let mut stats = retrieval::build_stats_cached(&self.view());
+        stats.latency = latency::report();
+        Ok(stats)
     }
 
     fn map(&self, _scope: &Scope) -> Result<MemoryMapView, MemoryError> {
@@ -322,13 +328,14 @@ impl MemoryApi for PolisHandle {
             model: None,
             model_source: None,
         };
-        record_prompt(&self.store, input).map_err(MemoryError::Store)
+        latency::timed("ingest.capture", || record_prompt(&self.store, input).map_err(MemoryError::Store))
     }
 
     fn remember(&self, req: &RememberRequest) -> Result<WriteReceipt, MemoryError> {
         if req.text.trim().is_empty() {
             return Err(MemoryError::Rejected("nothing to remember".into()));
         }
+        let _timer = latency::Timer::start("remember");
         if req.as_user {
             let seq = record_prompt(
                 &self.store,
@@ -357,8 +364,10 @@ impl MemoryApi for PolisHandle {
     }
 
     fn ingest(&self, req: &IngestRequest) -> Result<IngestReceipt, MemoryError> {
+        let _timer = latency::Timer::start("ingest");
         let mut receipt = IngestReceipt::default();
         for item in &req.items {
+            let _item_timer = latency::Timer::start("ingest.item");
             if item.body.trim().is_empty() {
                 receipt.skipped += 1;
                 continue;
@@ -522,6 +531,21 @@ mod tests {
 
     fn handle() -> PolisHandle {
         PolisHandle::new(Arc::new(PolisStore::open_in_memory().unwrap()), None, Arc::new(NoHost), Arc::new(NoopSink))
+    }
+
+    #[test]
+    fn stats_report_the_latency_of_every_op_that_ran() {
+        let api = handle();
+        let _ = api.search(&SearchRequest { q: Some("anything at all".into()), ..Default::default() }).unwrap();
+        let _ = api.grep(&GrepRequest { literal: "anything".into(), ..Default::default() }).unwrap();
+        let _ = api.context(&ContextRequest { q: "anything".into(), ..Default::default() }).unwrap();
+        let stats = api.stats(&Scope::default()).unwrap();
+        let ops: Vec<&str> = stats.latency.iter().map(|r| r.op.as_str()).collect();
+        for op in ["pack", "pack.resolve", "pack.lexical", "pack.browse", "pack.grep", "grep", "context"] {
+            assert!(ops.contains(&op), "stats.latency lacks `{op}`: {ops:?}");
+        }
+        let json = serde_json::to_value(&stats).unwrap();
+        assert!(json["latency"].as_array().map(|a| !a.is_empty()).unwrap_or(false), "serialized as `latency`");
     }
 
     #[test]

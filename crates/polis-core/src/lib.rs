@@ -9,7 +9,8 @@
 //! ([`coldness`]), the answer pack's types, byte budget, fusion and render
 //! ([`pack`]), the verifiable export bundle ([`bundle`]), the deterministic
 //! gist ([`gist`]), the tolerant JSON extractor every agent-reply parser uses
-//! ([`json`]), and the [`MemoryApi`] trait — the ONE surface the store, the
+//! ([`json`]), the latency ring every op reports into ([`latency`]), and the
+//! [`MemoryApi`] trait — the ONE surface the store, the
 //! HTTP server, the MCP server and the generated clients speak.
 //!
 //! No I/O, no database, no async runtime. A bundle verifies with this crate
@@ -28,6 +29,7 @@ pub mod dedup;
 pub mod gist;
 pub mod host;
 pub mod json;
+pub mod latency;
 pub mod ledger;
 pub mod pack;
 pub mod proposal;
@@ -69,6 +71,7 @@ mod guards {
             ("gist.rs", include_str!("gist.rs")),
             ("host.rs", include_str!("host.rs")),
             ("json.rs", include_str!("json.rs")),
+            ("latency.rs", include_str!("latency.rs")),
             ("ledger.rs", include_str!("ledger.rs")),
             ("pack.rs", include_str!("pack.rs")),
             ("proposal.rs", include_str!("proposal.rs")),
