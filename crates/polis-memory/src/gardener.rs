@@ -1082,6 +1082,62 @@ mod step_tests {
         let again = step(&polis, &mut st, &Idle(0), &clock, &cfg, &bus).await;
         assert_eq!(again.gate, Gate::Debounced);
     }
+
+    /// §5.3 end to end: a classifier that collapses every class it can
+    /// makes the frozen probes miss, the canary catches the drop, the run is
+    /// reverted (the classes come back), its subjects are quarantined, the
+    /// regression is on the chain, and the run's seq window is released.
+    #[tokio::test]
+    async fn the_canary_reverts_a_run_that_made_the_memory_less_reachable() {
+        use crate::corpus::{seed_corpus, CorpusSpec};
+        use crate::scripted::{shown_items, shown_nodes, ScriptedAgent};
+        let store = PolisStore::open_in_memory().unwrap();
+        seed_corpus(&store, &CorpusSpec::new(300).with_seed(21)).unwrap();
+        // One far-future capture makes every class cold relative to the span.
+        let far = store.lake_envelope().unwrap().newest + 400 * 86_400_000;
+        prompt(&store, "a fresh capture, long after", far);
+        let classes_before = store.list_class_nodes().unwrap().into_iter().filter(|n| n.parent_id.is_some()).count();
+        let window_before = store.last_run_seq_to().unwrap();
+
+        let agent = ScriptedAgent::new(|seat, prompt| {
+            if seat != "classifier" || crate::scripted::is_verifier_prompt(prompt) {
+                return crate::scripted::keeper_reply(prompt);
+            }
+            // Collapse every non-root class shown, citing the shown seqs.
+            let seqs: Vec<i64> = shown_items(prompt).iter().map(|i| i.seq).collect();
+            let props: Vec<serde_json::Value> = shown_nodes(prompt)
+                .into_iter()
+                .filter(|n| !n.starts_with("root-"))
+                .map(|n| serde_json::json!({ "op": "collapse", "node_id": n, "summary": "gone", "cite_seqs": seqs, "rationale": "cold" }))
+                .collect();
+            serde_json::json!({ "proposals": props }).to_string()
+        });
+        let polis = Polis::new(&store, Some(agent), &NoHost, &NoopSink);
+        let clock = FakeClock(Mutex::new(far + 1_000_000));
+        let bus = Bus(Mutex::new(Vec::new()));
+        let cfg = GardenerConfig { canary: Some(CanaryConfig { decisions: 30, spans: 20, classes: 40, ..Default::default() }), ..Default::default() };
+        let mut st = GardenerState::default();
+
+        let o = step(&polis, &mut st, &Idle(0), &clock, &cfg, &bus).await;
+        assert_eq!(o.gate, Gate::Ran);
+        assert!(o.reverted_by_canary, "the collapses made the probes miss and the canary reverted the run");
+        assert!(!o.organized);
+        let classes_after = store.list_class_nodes().unwrap().into_iter().filter(|n| n.parent_id.is_some() && n.kind == "node").count();
+        assert_eq!(classes_after, classes_before, "the classes are back");
+        let runs = store.list_class_runs(5).unwrap();
+        let organize = runs.iter().find(|r| r.mode.as_deref() == Some("organize")).unwrap();
+        assert_eq!(organize.outcome.as_deref(), Some("reverted_by_canary"));
+        assert!(organize.canary_json.as_deref().unwrap().contains("regression"));
+        assert!(organize.canary_before.unwrap() > organize.canary_after.unwrap());
+        assert_eq!(organize.seq_to, None, "the window is released");
+        assert_eq!(store.last_run_seq_to().unwrap(), window_before, "the next delta starts where the last good run ended");
+        let regressions = store
+            .query_ledger_events(&polis_core::types::LedgerFilters { kind: Some("gardener_regression".into()), limit: Some(10), ..Default::default() })
+            .unwrap();
+        assert_eq!(regressions.len(), 1);
+        assert!(!crate::organize::quarantined(&polis, organize.id).is_empty(), "the failing subjects are quarantined");
+        assert!(store.verify_ledger_chain().unwrap().ok);
+    }
 }
 
 #[cfg(test)]

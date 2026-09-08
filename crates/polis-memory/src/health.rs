@@ -189,7 +189,7 @@ mod tests {
         };
         file(&root_a, a_seq);
         file(&root_a, b_seq); // b's prompt under a's root
-        file(&crate::organize::GENERAL_ROOT_ID.to_string(), b_seq);
+        file(crate::organize::GENERAL_ROOT_ID, b_seq);
         let polis = Polis::new(&store, None, &NoHost, &NoopSink);
         let h = catalog_health(&polis);
         assert_eq!(h.provenance_violations, 1);

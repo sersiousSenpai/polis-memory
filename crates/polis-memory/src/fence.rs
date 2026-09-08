@@ -93,7 +93,7 @@ impl Fence {
             // newline into the delimiter line.
             let _ = write!(s, " source={}", src.replace(">>>", "> > >").replace('\n', " "));
         }
-        let _ = write!(s, " nonce={}>>>\n", self.nonce);
+        let _ = writeln!(s, " nonce={}>>>", self.nonce);
         s
     }
 

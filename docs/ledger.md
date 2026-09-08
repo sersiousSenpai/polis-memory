@@ -144,3 +144,14 @@ embedding tables, and autoincrement counters (a reverted filing's link is
 deleted; the next id is higher). Everything else — every live node column but
 `updated_at`, every live link and observation, the `supersessions` rows, every
 prompt's body / gist / compaction marks, the archive — comes back exactly.
+
+## No curation (B3)
+
+Since Session B3 the chain records what an autonomous loop did, never what a
+person approved: `class_curate` events carry `action = file | create |
+organize | refuse | expire`, `taxonomy_reorg` the applied structural ops,
+`supersede` the applied supersessions, `observation` the written and the
+retired patterns (`action = retire`), `gardener_revert` the reverts and
+`gardener_regression` the canary's own. The `status`, `pinned`, `dismissed`
+and `starred` columns those older events referred to stay in the tables
+unread; see `docs/architecture.md` for what decides instead.

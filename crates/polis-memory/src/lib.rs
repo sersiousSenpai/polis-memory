@@ -36,6 +36,7 @@ pub mod latency;
 pub mod mirror;
 pub mod organize;
 pub mod retrieval;
+pub mod scripted;
 pub mod revert;
 pub mod skill;
 pub mod warmth;

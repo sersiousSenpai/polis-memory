@@ -119,13 +119,7 @@ pub fn stage_adjudicated(
         if let Some(run) = run_id {
             let _ = db.journal_op(run, &polis_store::runs::OpRecord::refused(p.op_name(), subjects, reason));
         }
-        let node = match p {
-            Proposal::File { parent_id, .. } | Proposal::Create { parent_id, .. } => parent_id.clone(),
-            Proposal::Promote { node_id, .. } | Proposal::Split { node_id, .. } | Proposal::Collapse { node_id, .. } => node_id.clone(),
-            Proposal::Merge { node_ids, .. } => node_ids.first().cloned().unwrap_or_default(),
-            Proposal::Supersede { old_seq, .. } => old_seq.to_string(),
-        };
-        record_curate(db, actor, &node, "refuse", &format!("{}: {reason}", p.op_name()));
+        record_curate(db, actor, &refusal_subject(p), "refuse", &format!("{}: {reason}", p.op_name()));
     };
     for p in proposals {
         match p {
@@ -181,10 +175,39 @@ pub fn stage_adjudicated(
                 Verdict::Refuse(r) => refuse(p, &r, &mut out),
                 Verdict::Verify => unreachable!("create never verifies"),
             },
+            Proposal::Supersede { old_seq, new_seq, .. } => {
+                // Decision kinds only (§5.1) — judged here so a supersede of
+                // a prompt, or of a seq that does not exist, is a journaled
+                // refusal rather than a silent stage-time skip.
+                let refs = (db.ledger_event_ref(*old_seq), db.ledger_event_ref(*new_seq));
+                match refs {
+                    (Ok(Some(o)), Ok(Some(n))) => {
+                        if !DECISION_KINDS.contains(&o.0.as_str()) || !DECISION_KINDS.contains(&n.0.as_str()) {
+                            refuse(p, "only decision events supersede", &mut out);
+                        } else {
+                            count_staged(db.stage_proposal(run_id, p).map_err(|e| e.to_string())?, &mut out.result);
+                        }
+                    }
+                    (Ok(None), _) | (_, Ok(None)) => refuse(p, "a seq does not exist", &mut out),
+                    (Err(e), _) | (_, Err(e)) => return Err(e.to_string()),
+                }
+            }
             _ => count_staged(db.stage_proposal(run_id, p).map_err(|e| e.to_string())?, &mut out.result),
         }
     }
     Ok(out)
+}
+
+/// The node a refusal's `class_curate` event references (the parent for an
+/// additive op, the subject for a structural one, the old seq for a
+/// supersede).
+fn refusal_subject(p: &Proposal) -> String {
+    match p {
+        Proposal::File { parent_id, .. } | Proposal::Create { parent_id, .. } => parent_id.clone(),
+        Proposal::Promote { node_id, .. } | Proposal::Split { node_id, .. } | Proposal::Collapse { node_id, .. } => node_id.clone(),
+        Proposal::Merge { node_ids, .. } => node_ids.first().cloned().unwrap_or_default(),
+        Proposal::Supersede { old_seq, .. } => old_seq.to_string(),
+    }
 }
 
 fn count_staged(staged: StagedOutcome, r: &mut StageResult) {
@@ -707,7 +730,9 @@ pub async fn organize_once_with(polis: &Polis<'_>, oracle: &dyn SimilarityOracle
             let mut refused = 0usize;
             for (p, reason) in &out_of_scope {
                 refused += 1;
-                let _ = db.journal_op(run_id, &polis_store::runs::OpRecord::refused(p.op_name(), adjudicate::subjects_of(p), format!("outside the shown seqs: {reason}")));
+                let why = format!("outside the shown seqs: {reason}");
+                let _ = db.journal_op(run_id, &polis_store::runs::OpRecord::refused(p.op_name(), adjudicate::subjects_of(p), why.clone()));
+                record_curate(db, CLASSIFIER_ACTOR, &refusal_subject(p), "refuse", &format!("{}: {why}", p.op_name()));
                 tracing::info!(target: "polis::organize", op = p.op_name(), reason = %reason, "op refused: outside the shown seqs");
             }
             let staged = stage_adjudicated(polis, Some(run_id), &kept, CLASSIFIER_ACTOR)?;
