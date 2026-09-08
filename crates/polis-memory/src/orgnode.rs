@@ -125,6 +125,12 @@ impl SyncRelay for OrgNode {
         // Stored verbatim for relay: a peer re-verifies the bytes the
         // publisher signed, never a re-serialization.
         FolderTransport::publish_to(self.folder(), &env).map_err(|e| SyncApiError::Refused(e.to_string()))?;
+        // The node holds the chain up to here too — its own ack, so an
+        // emitter's `doctor` does not list the relay as a peer that never
+        // acknowledged a redaction it has in fact imported.
+        self.store
+            .record_org_ack(&self.identity.device_id(), &env.header.chain_id, env.header.segment.to_seq)
+            .map_err(|e| SyncApiError::Store(e.to_string()))?;
         if let Some(fp) = &report.trusted_now {
             tracing::info!(peer = %fp, "trusted a peer's key on first use");
         }

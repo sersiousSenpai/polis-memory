@@ -256,7 +256,13 @@ enum Cmd {
         cmd: TrustCmd,
     },
     /// The peer chains held here: source, head, forked.
-    Peers,
+    Peers {
+        /// E4: clear a chain's FORKED mark (a chain id or fingerprint prefix)
+        /// after the operator has looked — the held history stays, newer
+        /// segments that link onto it land again. Nothing is deleted.
+        #[arg(long, value_name = "CHAIN")]
+        unfork: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -794,9 +800,23 @@ fn run(cli: Cli) -> Result<(), String> {
                 }
             }
         }
-        Cmd::Peers => {
+        Cmd::Peers { unfork } => {
             let db = home.db_path();
             let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
+            if let Some(prefix) = unfork {
+                let p = prefix.trim().to_ascii_lowercase();
+                let chains = store.list_foreign_chains().map_err(|e| e.to_string())?;
+                let matches: Vec<_> = chains.iter().filter(|c| c.chain_id == p || c.chain_id.starts_with(&p) || polis_core::identity::fingerprint(&c.chain_id) == p).collect();
+                let Some(c) = matches.first() else { return Err(format!("no held chain matches `{prefix}`")) };
+                if matches.len() > 1 {
+                    return Err(format!("`{prefix}` matches {} chains — give more of the id", matches.len()));
+                }
+                let cleared = store.clear_foreign_fork(&c.chain_id).map_err(|e| e.to_string())?;
+                emit(json, &serde_json::json!({ "chain": c.chain_id, "cleared": cleared }), || {
+                    format!("{} ({}) · fork mark {}", polis_core::identity::fingerprint(&c.chain_id), c.display_name.as_deref().unwrap_or("unnamed"), if cleared { "cleared — segments linking onto the held head land again" } else { "was not set" })
+                });
+                return Ok(());
+            }
             let chains = store.list_foreign_chains().map_err(|e| e.to_string())?;
             emit(json, &chains, || {
                 if chains.is_empty() {
