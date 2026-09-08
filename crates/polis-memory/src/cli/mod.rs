@@ -151,6 +151,20 @@ enum Cmd {
     Organize,
     /// Counts over the record.
     Stats,
+    /// Embed the backlog (C2). `--model` names a provider — apple |
+    /// model2vec | fastembed | remote, or a row model id — and may fetch its
+    /// files on first use (verified against their pinned hashes); `--all`
+    /// drains the whole backlog instead of one bounded pass; `--prune`
+    /// drops every OTHER model's rows afterwards (by default they stay: a
+    /// switch back is then free, at one byte per dimension per chunk).
+    Reindex {
+        #[arg(long, value_name = "PROVIDER")]
+        model: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        prune: bool,
+    },
     /// Re-walk the hash chain.
     Verify,
     /// Check the install, the file, the chain, the hook, the clients, the backups.
@@ -431,6 +445,9 @@ fn run(cli: Cli) -> Result<(), String> {
             // An org node's human card carries the org's name, not a login.
             let login = home.config_get("org").unwrap_or_else(crate::identity::login_name);
             let report = crate::identity::adopt(&store, &identity, &login)?;
+            let _ = std::fs::create_dir_all(home.models_dir());
+            tracing::info!(model = %backend::ensure_default_model(&home), "default embedding model");
+            tracing::info!(assets = backend::request_apple_assets_if_allowed(), "apple contextual embedding assets");
             emit(
                 json,
                 &serde_json::json!({
@@ -562,6 +579,78 @@ fn run(cli: Cli) -> Result<(), String> {
                     format!("nothing to organize · {}", r.summary)
                 }
             });
+            Ok(())
+        }
+        Cmd::Reindex { model, all, prune } => {
+            if model.is_some() && (cli.remote.is_some() || backend::daemon_alive(&home).is_some()) {
+                return Err("`reindex --model` switches this process's provider; stop `polis serve` first (a daemon reindexes under its own)".into());
+            }
+            let embedder: Option<Arc<dyn polis_embed::Embedder>> = match &model {
+                Some(name) => Some(backend::embedder_named(&home, name)?),
+                None => None,
+            };
+            let api: Arc<dyn polis_core::MemoryApi> = match embedder {
+                Some(e) => {
+                    let db = home.db_path();
+                    if !db.exists() {
+                        return Err(format!("no store at {} — run `polis init` first", db.display()));
+                    }
+                    let store = Arc::new(PolisStore::open(&db).map_err(|err| format!("open {}: {err}", db.display()))?);
+                    let identity = crate::identity::Identity::load(&home.identity_dir(), home.device_name())?.map(Arc::new);
+                    Arc::new(
+                        crate::PolisHandle::new(store, backend::agent_for(), Arc::new(polis_core::host::NoHost), Arc::new(polis_llm::NoopSink))
+                            .with_identity(identity)
+                            .with_embedder(Some(e)),
+                    )
+                }
+                None => open(&home, cli.remote)?,
+            };
+            let mut embedded = 0usize;
+            let mut passes = 0usize;
+            let provider = loop {
+                let r = api.reindex(&Scope::default()).map_err(|e| e.to_string())?;
+                embedded += r.embedded;
+                passes += 1;
+                if !all || r.embedded == 0 {
+                    break r.provider;
+                }
+            };
+            let mut pruned: Vec<(String, usize)> = Vec::new();
+            let index: Vec<(String, i64, i64)> = {
+                let db = home.db_path();
+                match PolisStore::open(&db) {
+                    Ok(store) => {
+                        if prune {
+                            let keep = model
+                                .as_deref()
+                                .map(|n| backend::embedder_named(&home, n).map(|e| e.model_id()))
+                                .transpose()?;
+                            for (m, _, _) in store.models_in_index().unwrap_or_default() {
+                                if keep.as_deref().is_some_and(|k| k != m) {
+                                    let n = store.delete_embeddings_for_model(&m).unwrap_or(0);
+                                    pruned.push((m, n));
+                                }
+                            }
+                        }
+                        store.models_in_index().unwrap_or_default()
+                    }
+                    Err(_) => Vec::new(),
+                }
+            };
+            emit(
+                json,
+                &serde_json::json!({ "provider": provider, "embedded": embedded, "passes": passes, "pruned": pruned, "index": index.iter().map(|(m, d, n)| serde_json::json!({"model": m, "dim": d, "rows": n})).collect::<Vec<_>>() }),
+                || {
+                    let mut s = format!("reindex · provider {provider} · embedded {embedded} target(s) in {passes} pass(es)");
+                    for (m, d, n) in &index {
+                        s.push_str(&format!("\n  {m} · {d}-dim · {n} rows"));
+                    }
+                    for (m, n) in &pruned {
+                        s.push_str(&format!("\n  pruned {m}: {n} rows"));
+                    }
+                    s
+                },
+            );
             Ok(())
         }
         Cmd::Stats => {

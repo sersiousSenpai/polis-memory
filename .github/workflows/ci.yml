@@ -14,6 +14,14 @@
 #               the dependency graph set; see the workspace Cargo.toml).
 #   lean-core — polis-core links serde, serde_json and sha2 and nothing else
 #               (Redline's size_guard pins the same fact from its side).
+#   providers — C2 (docs/bench.md "Embedding providers"): the Model2Vec
+#               runtime against the official implementation's golden ids
+#               and vectors, on all three OSes, with the pinned model files
+#               fetched once and cached by their sha256; the remote
+#               provider against a fake endpoint; the ONNX provider
+#               build-checked on Ubuntu only (its runtime is a download the
+#               build performs — every-OS, every-run would be a flake, not a
+#               gate).
 #   eval      — the PR gate of the measurement program (docs/bench.md): the
 #               corpus-derived eval on the deterministic 1k synthetic corpus
 #               against bench/results/baseline.json — Recall@10 may not fall
@@ -38,6 +46,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # `--all-features` minus `fastembed` (see the providers job).
+  FEATURES_BUT_ORT: polis-memory/cli,polis-memory/eval,polis-memory/apple,polis-memory/bundled-model,polis-server/standalone,polis-mcp/remote,polis-llm/anthropic,polis-llm/openai-compat,polis-embed/model2vec,polis-embed/download,polis-embed/remote
+  # The pinned potion-base-8M files (crates/polis-embed/src/model2vec.rs PINNED).
+  POLIS_MODEL_SHA: f65d0f325faadc1e121c319e2faa41170d3fa07d8c89abd48ca5358d9a223de2
 
 jobs:
   test:
@@ -57,8 +69,60 @@ jobs:
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --all-features --locked
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # Every feature but the ONNX runtime (`fastembed`), whose build
+      # downloads a native library — it has its own Ubuntu check below.
+      # `bundled-model` builds with placeholders here (no model directory).
+      - run: cargo test --workspace --features "${{ env.FEATURES_BUT_ORT }}" --locked
+      - run: cargo clippy --workspace --all-targets --features "${{ env.FEATURES_BUT_ORT }}" --locked -- -D warnings
+
+  providers:
+    name: providers (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: the pinned Model2Vec files, cached by their hash
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: ci-models/potion-base-8M
+          key: potion-base-8M-${{ env.POLIS_MODEL_SHA }}
+      - name: fetch and verify the model files
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-models/potion-base-8M
+          for f in model.safetensors tokenizer.json config.json; do
+            curl -sSL --retry 5 --retry-delay 5 "https://huggingface.co/minishlab/potion-base-8M/resolve/main/$f" -o "ci-models/potion-base-8M/$f"
+          done
+          python3 - <<'PY'
+          import hashlib, sys
+          want = {
+            "model.safetensors": "f65d0f325faadc1e121c319e2faa41170d3fa07d8c89abd48ca5358d9a223de2",
+            "tokenizer.json": "e67e803f624fb4d67dea1c730d06e1067e1b14d830e2c2202569e3ef0f70bb50",
+            "config.json": "2a6ac0e9aaa356a68a5688070db78fc3a464fefe85d2f06a1905ce3718687553",
+          }
+          for name, sha in want.items():
+              got = hashlib.sha256(open(f"ci-models/potion-base-8M/{name}", "rb").read()).hexdigest()
+              if got != sha:
+                  sys.exit(f"{name}: {got} != pinned {sha}")
+          print("model files verified")
+          PY
+      - name: the Model2Vec runtime against the reference goldens; the remote provider against a fake endpoint
+        shell: bash
+        env:
+          POLIS_MODELS_DIR: ${{ github.workspace }}/ci-models
+        run: cargo test -p polis-embed --features model2vec,download,remote --locked -- --nocapture
+      - name: the ONNX provider builds (Ubuntu only — its runtime is a build-time download)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo check -p polis-embed --features fastembed --locked
 
   keyless:
     name: keyless (no model, no CLI)
@@ -152,3 +216,12 @@ jobs:
         run: cargo test -p polis-memory --features eval --locked -- eval_gate --nocapture
       - name: the benches build
         run: cargo bench -p polis-memory --locked --no-run
+      # C2: the §6.1 row "semantic search alone, 100k chunks" measured in
+      # release on this runner — printed, not yet asserted: the budget was
+      # written for a developer machine (this laptop: p50 16 ms, p95 25 ms
+      # at dim 256) and the runner's number is read from this log before the
+      # gate is armed with `POLIS_BENCH_100K=1`.
+      - name: "semantic search alone at 100k chunks (release; prints, see docs/bench.md)"
+        env:
+          POLIS_BENCH_100K: print
+        run: cargo test -p polis-embed --release --test semantic_100k --locked -- --nocapture

@@ -1,7 +1,7 @@
 [package]
 name = "polis-embed"
 version.workspace = true
-description = "Polis Memory embeddings: the Embedder trait, on-device Apple backends (feature `apple`), the vector cache, brute-force cosine search over the store's int8 index, and the bounded index tick."
+description = "Polis Memory embeddings: the Embedder trait, the portable Model2Vec runtime (feature `model2vec`), the on-device Apple backends (`apple`), an ONNX provider (`fastembed`) and an OpenAI-compatible remote (`remote`), the vector cache keyed by model, brute-force cosine search over the store's int8 index, and the bounded index tick."
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,6 +18,31 @@ default = []
 # service, zero model bytes in the binary. Off by default so a Linux or Windows
 # build of the store never sees an objc2 crate; Redline turns it on.
 apple = ["dep:objc2", "dep:block2", "dep:objc2-foundation", "dep:objc2-natural-language"]
+# The portable provider (C2, plan §7.3): Model2Vec's potion-base-8M as a
+# self-contained runtime — a WordPiece tokenizer and a safetensors reader
+# written here (about 400 lines), NOT the `model2vec-rs` crate, whose tree
+# carries `tokenizers` (+ the oniguruma C library), `ndarray`, `clap` and
+# `anyhow` for what is a table lookup and a mean. Costs one small crate
+# (`unicode-normalization`, for accent stripping) beside sha2.
+model2vec = ["dep:unicode-normalization", "dep:unicode-general-category", "dep:sha2", "dep:serde_json"]
+# `model2vec` + fetching the three model files from Hugging Face on first use
+# into `$POLIS_HOME/models/`, each verified against a sha256 pinned in
+# `model2vec::PINNED` before it is used. Never on a read path; refused under
+# `POLIS_NO_NETWORK=1`. Off for a host that ships the bytes another way.
+download = ["model2vec", "dep:ureq"]
+# `model2vec` with the three files compiled INTO the binary from the
+# directory `POLIS_BUNDLED_MODEL_DIR` names at build time (the org node's
+# Docker image, air-gapped installs): +30 MB, no download ever. Without the
+# variable the build still succeeds (build.rs writes placeholders that the
+# runtime hash check refuses), so `--all-features` needs no model.
+bundled-model = ["model2vec", "dep:sha2"]
+# bge-small-en-v1.5 through ONNX Runtime (opt-in): a 384-dim transformer at
+# ~130 MB of model + a ~30 MB runtime the build downloads. Measured in
+# docs/bench.md before anyone makes it a default.
+fastembed = ["dep:fastembed"]
+# An OpenAI-compatible `/v1/embeddings` endpoint (opt-in egress): the only
+# provider that sends text off the machine, and only when configured.
+remote = ["dep:ureq", "dep:serde", "dep:serde_json"]
 
 [lints]
 workspace = true
@@ -26,6 +51,15 @@ workspace = true
 polis-core = { workspace = true }
 polis-store = { workspace = true }
 tracing = "0.1"
+sha2 = { version = "0.10", optional = true }
+unicode-normalization = { version = "0.1", optional = true }
+unicode-general-category = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+# Plain HTTP(S) for the model download and the remote provider — the same
+# runtime-free client polis-mcp's RemoteApi uses.
+ureq = { version = "3", optional = true }
+fastembed = { version = "6", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The same objc2 0.6 family Redline links (wry/tauri already carry it).
@@ -36,3 +70,13 @@ objc2-foundation = { version = "0.3.2", optional = true }
 objc2-natural-language = { version = "0.3.2", default-features = false, features = [
     "std", "NLEmbedding", "NLContextualEmbedding", "NLLanguage", "block2",
 ], optional = true }
+
+[build-dependencies]
+# The hash check the build script runs on a bundled model (only when the
+# `bundled-model` feature is on; the script is a no-op otherwise).
+sha2 = "0.10"
+
+[dev-dependencies]
+serde_json = "1"
+# The 100k gate fills the index directly (one transaction, not 100k).
+rusqlite = { version = "0.31", features = ["bundled"] }

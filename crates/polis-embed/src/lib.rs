@@ -22,8 +22,15 @@ use polis_store::PolisStore;
 
 pub use polis_core::vec::{
     chunk_text, cosine, pack, quantize, unpack, Chunk, QVec, CHUNK_MAX, CHUNK_OVERLAP, CHUNK_TARGET,
-    DIM, OPENING_CHARS,
+    OPENING_CHARS,
 };
+
+#[cfg(feature = "fastembed")]
+pub mod fastembed;
+#[cfg(feature = "model2vec")]
+pub mod model2vec;
+#[cfg(feature = "remote")]
+pub mod remote;
 
 /// The chunk count at which brute-force scan stops fitting a 50 ms budget.
 ///
@@ -58,12 +65,25 @@ pub trait Embedder: Send + Sync {
 }
 
 /// Which provider is configured, including the honest third state.
+///
+/// Every provider reports as ITSELF (C2): a cloud model used to read as
+/// `Absent` because the kind was derived from two Apple prefixes and
+/// nothing else — the bug plan §7.3 names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     /// Apple's contextual embeddings (macOS 14+).
     AppleContextual,
     /// Apple's sentence embeddings (macOS 11+) — the 11–13 fallback.
     AppleSentence,
+    /// The portable Model2Vec runtime (`model2vec/…`).
+    Model2Vec,
+    /// bge-small through ONNX Runtime (`fastembed/…`).
+    FastEmbed,
+    /// An OpenAI-compatible endpoint (`remote/…`, or a host's own `openai/…`).
+    Remote,
+    /// A model id this crate does not know — a host's own provider. Present,
+    /// just not one of ours.
+    Other,
     /// No provider available. The arm is ABSENT, not empty: the answer pack
     /// says so via `armCoverage` rather than returning nothing and letting the
     /// reader conclude the record is empty.
@@ -75,7 +95,24 @@ impl ProviderKind {
         match self {
             ProviderKind::AppleContextual => "apple-contextual",
             ProviderKind::AppleSentence => "apple-sentence",
+            ProviderKind::Model2Vec => "model2vec",
+            ProviderKind::FastEmbed => "fastembed",
+            ProviderKind::Remote => "remote",
+            ProviderKind::Other => "other",
             ProviderKind::Absent => "absent",
+        }
+    }
+
+    /// The kind a row's model id belongs to.
+    pub fn of_model_id(model_id: &str) -> ProviderKind {
+        match model_id {
+            m if m.starts_with("apple-contextual") => ProviderKind::AppleContextual,
+            m if m.starts_with("apple-sentence") => ProviderKind::AppleSentence,
+            m if m.starts_with("model2vec/") => ProviderKind::Model2Vec,
+            m if m.starts_with("fastembed/") => ProviderKind::FastEmbed,
+            m if m.starts_with("remote/") || m.starts_with("openai/") => ProviderKind::Remote,
+            "" => ProviderKind::Absent,
+            _ => ProviderKind::Other,
         }
     }
 }
@@ -97,10 +134,127 @@ pub fn provider_kind() -> ProviderKind {
 
 impl dyn Embedder {
     pub fn kind(&self) -> ProviderKind {
-        match self.model_id().as_str() {
-            m if m.starts_with("apple-contextual") => ProviderKind::AppleContextual,
-            m if m.starts_with("apple-sentence") => ProviderKind::AppleSentence,
-            _ => ProviderKind::Absent,
+        ProviderKind::of_model_id(&self.model_id())
+    }
+}
+
+/// Which provider to build (C2). Read from `POLIS_EMBED` by the CLI; a host
+/// passes its own choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderChoice {
+    /// The platform default, decided by measurement (docs/bench.md
+    /// "Embedding providers", 2026-09-08): Model2Vec when its files are
+    /// present — on the real corpus it beat the Apple sentence model on
+    /// semantic Recall@10 (0.96 vs 0.60), tied the fused pack, embedded a
+    /// thousand times faster and was the first provider to clear the
+    /// filing precision floor — else Apple's on-device model on macOS, else
+    /// none. Never a download on this path (`polis init` / `serve` fetch
+    /// the files; a read never does).
+    Auto,
+    Apple,
+    Model2Vec,
+    FastEmbed,
+    Remote,
+    /// No semantic arm.
+    None,
+}
+
+impl ProviderChoice {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => ProviderChoice::Auto,
+            "apple" => ProviderChoice::Apple,
+            "model2vec" | "potion" => ProviderChoice::Model2Vec,
+            "fastembed" | "bge" => ProviderChoice::FastEmbed,
+            "remote" | "openai" => ProviderChoice::Remote,
+            "none" | "off" | "absent" => ProviderChoice::None,
+            _ => return None,
+        })
+    }
+
+    /// `POLIS_EMBED`, or `Auto`.
+    pub fn from_env() -> Self {
+        std::env::var("POLIS_EMBED").ok().and_then(|v| Self::parse(&v)).unwrap_or(ProviderChoice::Auto)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderChoice::Auto => "auto",
+            ProviderChoice::Apple => "apple",
+            ProviderChoice::Model2Vec => "model2vec",
+            ProviderChoice::FastEmbed => "fastembed",
+            ProviderChoice::Remote => "remote",
+            ProviderChoice::None => "none",
+        }
+    }
+}
+
+/// Build the chosen provider. `models_root` is where downloadable models
+/// live (`$POLIS_HOME/models`); `allow_download` permits a first-use fetch
+/// for an EXPLICIT choice only — `Auto` never downloads (a read path must
+/// not start one). `Ok(None)` is the honest absent state; `Err` names why
+/// an explicit choice could not be met.
+pub fn select(
+    choice: ProviderChoice,
+    models_root: Option<&std::path::Path>,
+    allow_download: bool,
+) -> Result<Option<Arc<dyn Embedder>>, String> {
+    match choice {
+        ProviderChoice::None => Ok(None),
+        ProviderChoice::Apple => Ok(provider()),
+        ProviderChoice::Model2Vec => {
+            #[cfg(feature = "model2vec")]
+            {
+                let root = models_root.ok_or("model2vec needs a models directory")?;
+                let m = model2vec::Model2Vec::ensure(root, allow_download)?;
+                Ok(Some(Arc::new(m)))
+            }
+            #[cfg(not(feature = "model2vec"))]
+            {
+                let _ = (models_root, allow_download);
+                Err("this build has no `model2vec` feature".into())
+            }
+        }
+        ProviderChoice::FastEmbed => {
+            #[cfg(feature = "fastembed")]
+            {
+                let root = models_root.ok_or("fastembed needs a models directory")?;
+                let m = fastembed::FastEmbedder::load(&root.join("fastembed"))?;
+                Ok(Some(Arc::new(m)))
+            }
+            #[cfg(not(feature = "fastembed"))]
+            {
+                Err("this build has no `fastembed` feature".into())
+            }
+        }
+        ProviderChoice::Remote => {
+            #[cfg(feature = "remote")]
+            {
+                remote::RemoteEmbedder::from_env()
+                    .map(|r| Some(Arc::new(r) as Arc<dyn Embedder>))
+                    .ok_or_else(|| format!("remote needs {} and {} (and no POLIS_NO_NETWORK)", remote::ENV_URL, remote::ENV_MODEL))
+            }
+            #[cfg(not(feature = "remote"))]
+            {
+                Err("this build has no `remote` feature".into())
+            }
+        }
+        ProviderChoice::Auto => {
+            #[cfg(feature = "model2vec")]
+            {
+                if let Some(root) = models_root {
+                    if let Ok(m) = model2vec::Model2Vec::load(&model2vec::model_dir(root)) {
+                        return Ok(Some(Arc::new(m)));
+                    }
+                }
+                #[cfg(feature = "bundled-model")]
+                {
+                    if let Ok(m) = model2vec::Model2Vec::bundled() {
+                        return Ok(Some(Arc::new(m)));
+                    }
+                }
+            }
+            Ok(provider())
         }
     }
 }
@@ -122,10 +276,41 @@ fn build_provider() -> Option<Arc<dyn Embedder>> {
     None
 }
 
+/// One specific Apple provider, for a measurement that wants to name it
+/// (`polis_embed::select(Apple)` takes the best available). `None` off
+/// macOS, without the feature, or when that model is not loadable.
+pub fn apple_named(kind: ProviderKind) -> Option<Arc<dyn Embedder>> {
+    #[cfg(all(target_os = "macos", feature = "apple"))]
+    {
+        match kind {
+            ProviderKind::AppleContextual => apple::ContextualEmbedder::available().map(|e| Arc::new(e) as Arc<dyn Embedder>),
+            ProviderKind::AppleSentence => apple::SentenceEmbedder::available().map(|e| Arc::new(e) as Arc<dyn Embedder>),
+            _ => None,
+        }
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple")))]
+    {
+        let _ = kind;
+        None
+    }
+}
+
+/// Ask the OS for the Apple contextual model's assets (macOS + `apple`);
+/// `Ok(false)` everywhere else. See `apple::request_contextual_assets`.
+pub fn request_apple_assets() -> Result<bool, String> {
+    #[cfg(all(target_os = "macos", feature = "apple"))]
+    {
+        apple::request_contextual_assets()
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple")))]
+    {
+        Ok(false)
+    }
+}
+
 #[cfg(all(target_os = "macos", feature = "apple"))]
 mod apple {
     use super::Embedder;
-    use polis_core::vec::DIM;
     use std::sync::Mutex;
     use objc2_foundation::{NSRange, NSString};
     use objc2_natural_language::{NLContextualEmbedding, NLEmbedding, NLLanguage};
@@ -179,6 +364,30 @@ mod apple {
             let dim = unsafe { inner.dimension() };
             Some(Self { inner: Mutex::new(inner), revision, dim })
         }
+    }
+
+    /// Ask the OS to fetch the contextual model's assets (C2): the one-time
+    /// download that lets an install leave the weak sentence fallback.
+    /// Returns `Ok(true)` when a request was issued (the OS downloads in
+    /// the background and `available()` succeeds on a later start),
+    /// `Ok(false)` when the assets are already present or the API is not
+    /// offered on this OS. Never called from a read path — `polis init`,
+    /// `polis serve` and a host's boot call it.
+    pub fn request_contextual_assets() -> Result<bool, String> {
+        let lang = english().ok_or("NLLanguageEnglish unavailable")?;
+        let Some(inner) = (unsafe { NLContextualEmbedding::contextualEmbeddingWithLanguage(lang) }) else {
+            return Ok(false);
+        };
+        if unsafe { inner.hasAvailableAssets() } {
+            return Ok(false);
+        }
+        let block = block2::RcBlock::new(
+            |result: objc2_natural_language::NLContextualEmbeddingAssetsResult, _err: *mut objc2_foundation::NSError| {
+                tracing::info!(result = result.0, "contextual embedding assets request completed");
+            },
+        );
+        unsafe { inner.requestEmbeddingAssetsWithCompletionHandler(&block) };
+        Ok(true)
     }
 
     impl Embedder for ContextualEmbedder {
@@ -251,7 +460,9 @@ mod apple {
             let dim = unsafe { inner.dimension() };
             Some(Self {
                 inner: Mutex::new(inner),
-                dim: if dim == 0 { DIM } else { dim },
+                // The sentence model is 512-wide; a zero from the API means
+                // "not reported", never a zero-dimensional vector.
+                dim: if dim == 0 { 512 } else { dim },
             })
         }
     }
@@ -291,6 +502,9 @@ mod apple {
 /// single monotonic number rather than by anyone remembering to clear it.
 pub struct VectorCache {
     pub head_id: i64,
+    /// The model whose rows these are (C2): a switch of provider is a
+    /// different cache, never a stale one served under a new name.
+    pub model: String,
     pub rows: Vec<(i64, String, i64, QVec)>,
 }
 
@@ -336,13 +550,18 @@ pub fn semantic_search(
     // Hot cache keyed on the index head, mirroring `build_stats_cached`.
     let cached = {
         let guard = cache().read().ok()?;
-        guard.as_ref().filter(|c| c.head_id == head).cloned()
+        guard.as_ref().filter(|c| c.head_id == head && c.model == model).cloned()
     };
     let vectors = match cached {
         Some(c) => c,
         None => {
             let rows = store.all_embeddings(&model).ok()?;
-            let fresh = Arc::new(VectorCache { head_id: head, rows });
+            if rows.is_empty() {
+                // The index has rows, none under THIS model: absent for this
+                // provider until a reindex (the pack says which).
+                return None;
+            }
+            let fresh = Arc::new(VectorCache { head_id: head, model: model.clone(), rows });
             if let Ok(mut guard) = cache().write() {
                 *guard = Some(fresh.clone());
             }
@@ -361,17 +580,29 @@ pub fn semantic_search(
              maintenance cost (see BRUTE_FORCE_CEILING_CHUNKS)"
         );
     }
-    let mut best: std::collections::HashMap<(String, i64), f32> = std::collections::HashMap::new();
+    // Collapse chunks to their target by MAX. The target kinds are a
+    // handful of short strings, so they are interned to a small index once
+    // per row rather than cloned into every map key (C2: at 100k rows that
+    // clone was most of the scan).
+    let mut kinds: Vec<&str> = Vec::with_capacity(4);
+    let mut best: std::collections::HashMap<(u8, i64), f32> = std::collections::HashMap::with_capacity(vectors.rows.len());
     for (_, kind, id, v) in &vectors.rows {
         let s = cosine(&q, v);
-        let e = best.entry((kind.clone(), *id)).or_insert(f32::MIN);
+        let k = match kinds.iter().position(|k| k == kind) {
+            Some(i) => i as u8,
+            None => {
+                kinds.push(kind.as_str());
+                (kinds.len() - 1) as u8
+            }
+        };
+        let e = best.entry((k, *id)).or_insert(f32::MIN);
         if s > *e {
             *e = s;
         }
     }
     let mut hits: Vec<SemanticHit> = best
         .into_iter()
-        .map(|((target_kind, target_id), score)| SemanticHit { target_kind, target_id, score })
+        .map(|((k, target_id), score)| SemanticHit { target_kind: kinds[k as usize].to_string(), target_id, score })
         .collect();
     // Deterministic order: score desc, then target for ties.
     hits.sort_by(|a, b| {

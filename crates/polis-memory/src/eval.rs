@@ -752,3 +752,148 @@ mod instruments {
         }
     }
 }
+
+/// C2: every embedding provider this machine can build, measured on the
+/// real corpus with the same instruments (docs/bench.md "Embedding
+/// providers"). `POLIS_REAL_DB=<copy>`, `POLIS_MODELS_DIR=<root>` (where a
+/// first-use download may land), `POLIS_EVAL_PROVIDERS=apple-sentence,
+/// apple-contextual,model2vec,fastembed` (default: all four; an unbuildable
+/// one is reported as unavailable, not skipped silently).
+#[cfg(all(test, feature = "eval"))]
+mod provider_instruments {
+    use super::*;
+    use crate::canary::{Gold, Subject};
+    use polis_core::host::NoHost;
+    use polis_embed::{Embedder, ProviderChoice, ProviderKind};
+    use polis_llm::NoopSink;
+    use polis_store::PolisStore;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    fn build(name: &str, root: &Path) -> Result<Option<Arc<dyn Embedder>>, String> {
+        Ok(match name {
+            "apple-sentence" => polis_embed::apple_named(ProviderKind::AppleSentence),
+            "apple-contextual" => polis_embed::apple_named(ProviderKind::AppleContextual),
+            "model2vec" => polis_embed::select(ProviderChoice::Model2Vec, Some(root), true)?,
+            "fastembed" => polis_embed::select(ProviderChoice::FastEmbed, Some(root), true)?,
+            "remote" => polis_embed::select(ProviderChoice::Remote, Some(root), true)?,
+            other => return Err(format!("unknown provider {other}")),
+        })
+    }
+
+    /// `POLIS_REAL_DB=<copy> POLIS_MODELS_DIR=<root> cargo test -p polis-memory --features eval[,fastembed] -- --ignored eval_real_db_providers --nocapture`
+    #[test]
+    #[ignore]
+    fn eval_real_db_providers() {
+        let Some(src) = std::env::var("POLIS_REAL_DB").ok() else {
+            eprintln!("POLIS_REAL_DB not set — skipping");
+            return;
+        };
+        let root = std::env::var("POLIS_MODELS_DIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir().join("polis-c2-models"));
+        let names: Vec<String> = std::env::var("POLIS_EVAL_PROVIDERS")
+            .unwrap_or_else(|_| "apple-sentence,apple-contextual,model2vec,fastembed".into())
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        for name in &names {
+            let embedder = match build(name, &root) {
+                Ok(Some(e)) => e,
+                Ok(None) => {
+                    eprintln!("{name}: unavailable on this machine");
+                    out.push(serde_json::json!({"provider": name, "available": false}));
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("{name}: {e}");
+                    out.push(serde_json::json!({"provider": name, "available": false, "error": e}));
+                    continue;
+                }
+            };
+            let model = embedder.model_id();
+            let dim = embedder.dim();
+            // A fresh copy per provider: the index is rebuilt under this model.
+            let dst = std::env::temp_dir().join(format!("polis-c2-prov-{}-{}.db", std::process::id(), name));
+            let _ = std::fs::remove_file(&dst);
+            std::fs::copy(&src, &dst).expect("copy the real DB");
+            let store = PolisStore::open(&dst).expect("open the copy");
+            // Embed time per chunk, measured directly on 256 real prompt heads
+            // (the stored index may already hold this model's rows, which
+            // would make the tick's timing say nothing).
+            let heads: Vec<String> = {
+                let conn = store.conn();
+                let mut st = conn.prepare("SELECT substr(fts_text, 1, 400) FROM prompts WHERE COALESCE(role,'user') <> 'agent' AND LENGTH(fts_text) > 0 ORDER BY id DESC LIMIT 256").unwrap();
+                st.query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<Result<_, _>>().unwrap()
+            };
+            let t = Instant::now();
+            let _ = embedder.embed(&heads).expect("embed");
+            let embed_ms_per_chunk = t.elapsed().as_secs_f64() * 1000.0 / heads.len().max(1) as f64;
+            // Index the whole corpus under this model.
+            let t = Instant::now();
+            let mut targets = 0usize;
+            loop {
+                let n = polis_embed::index_tick(&store, embedder.as_ref(), 512);
+                if n == 0 {
+                    break;
+                }
+                targets += n;
+            }
+            let index_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let (rows, stored_dim) = store
+                .models_in_index()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|(m, _, _)| *m == model)
+                .map(|(_, d, n)| (n, d))
+                .unwrap_or((0, dim as i64));
+            let index_bytes = rows * (stored_dim + 4);
+            let polis = Polis::new(&store, None, &NoHost, &NoopSink).with_embedder(Some(embedder.clone()));
+            // Semantic arm alone: PromptSpan probes, top-10 by cosine.
+            let set = crate::canary::freeze(&polis, 7, &CanaryConfig::default());
+            let (mut n_span, mut hit_span) = (0usize, 0usize);
+            for p in set.probes.iter().filter(|p| p.subject == Subject::PromptSpan) {
+                let Gold::PromptSeq { seq } = &p.gold else { continue };
+                n_span += 1;
+                let hits = polis_embed::semantic_search(&store, embedder.as_ref(), &p.query, 10).unwrap_or_default();
+                let ids: Vec<i64> = hits.iter().filter(|h| h.target_kind == "prompt").map(|h| h.target_id).collect();
+                let seqs = store.seqs_for_prompt_ids(&ids).unwrap_or_default();
+                if seqs.values().any(|s| s == seq) {
+                    hit_span += 1;
+                }
+            }
+            let semantic_r10 = if n_span == 0 { 0.0 } else { hit_span as f64 / n_span as f64 };
+            // Fused: the whole eval with this embedder on the pack.
+            let report = run_eval(&polis, &EvalConfig::default(), "real");
+            let fused_r10 = report.recall_at.get("10").copied().unwrap_or(0.0);
+            // C1's calibration under this model.
+            let tree = store.list_class_nodes().unwrap();
+            let cal = crate::filing::leave_one_out(&store, &model, &tree).expect("calibration");
+            let chosen = cal.chosen.as_ref().map(|g| serde_json::json!({"t1": g.t1, "margin": g.margin, "precision": g.precision, "coverage": g.coverage}));
+            let best = cal.best.as_ref().map(|g| serde_json::json!({"t1": g.t1, "margin": g.margin, "precision": g.precision, "coverage": g.coverage}));
+            eprintln!(
+                "{name}: model={model} dim={dim} embed {embed_ms_per_chunk:.2} ms/chunk · index {targets} targets / {rows} rows in {index_ms:.0} ms ({index_bytes} B) · semantic R@10 {semantic_r10:.3} ({hit_span}/{n_span}) · fused R@10 {fused_r10:.3} MRR {:.3} · canary {:.3} · filing consistency {:.3} chosen {chosen:?} best {best:?}",
+                report.mrr, report.canary.recall, cal.consistency
+            );
+            out.push(serde_json::json!({
+                "provider": name, "available": true, "model": model, "dim": dim,
+                "embed_ms_per_chunk": embed_ms_per_chunk, "index_targets": targets, "index_rows": rows, "index_ms": index_ms, "index_bytes": index_bytes,
+                "semantic_recall_at_10": semantic_r10, "semantic_probes": n_span,
+                "fused_recall_at": report.recall_at, "fused_mrr": report.mrr, "arm_attribution": report.arm_attribution,
+                "canary_recall": report.canary.recall,
+                "filing_consistency": cal.consistency, "filing_population": cal.population, "filing_coverable": cal.coverable,
+                "filing_chosen": chosen, "filing_best": best,
+                "pack_p50_ms": report.latency.iter().find(|l| l.op == "pack").map(|l| l.p50_ms),
+            }));
+            drop(polis);
+            drop(store);
+            let _ = std::fs::remove_file(&dst);
+        }
+        let doc = serde_json::json!({ "schema": 1, "date": today(), "sha": git_sha(), "machine": machine(), "providers": out });
+        let dir = results_dir();
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join(format!("{}-{}-providers.json", today(), git_sha()));
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        eprintln!("wrote {}", path.display());
+    }
+}

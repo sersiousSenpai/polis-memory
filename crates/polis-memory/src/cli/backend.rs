@@ -86,7 +86,7 @@ pub fn open(home: &Home, backend: &Backend) -> Result<Arc<dyn MemoryApi>, String
                 None => None,
             };
             Ok(Arc::new(
-                PolisHandle::new(store, agent_for(), Arc::new(NoHost), Arc::new(NoopSink)).with_identity(identity).with_embedder(embedder_for()),
+                PolisHandle::new(store, agent_for(), Arc::new(NoHost), Arc::new(NoopSink)).with_identity(identity).with_embedder(embedder_for(home)),
             ))
         }
         Backend::Remote { base } => Ok(Arc::new(RemoteApi::new(base.clone(), home.read_token()))),
@@ -134,12 +134,73 @@ pub fn agent_for() -> Option<Arc<dyn Agent>> {
     None
 }
 
-/// The embedder the deterministic filer and the semantic arm use: the
-/// on-device provider when this platform has one (Apple's, on macOS), else
-/// `None` — the arm is absent and every ambiguous item waits in `~inbox`.
-/// Program C2 adds the portable providers.
-pub fn embedder_for() -> Option<Arc<dyn Embedder>> {
-    polis_embed::provider()
+/// The embedder the deterministic filer and the semantic arm use (C2):
+/// `POLIS_EMBED` when set (`apple` | `model2vec` | `fastembed` | `remote` |
+/// `none`), else the platform default `polis_embed::select` decides —
+/// never a download on this path (a read must not start one; `polis
+/// reindex --model …` is where a first-use fetch happens). An explicit
+/// choice that cannot be met is logged and the arm is absent.
+pub fn embedder_for(home: &Home) -> Option<Arc<dyn Embedder>> {
+    let choice = polis_embed::ProviderChoice::from_env();
+    match polis_embed::select(choice, Some(&home.models_dir()), false) {
+        Ok(e) => e,
+        Err(err) => {
+            tracing::warn!(choice = choice.as_str(), error = %err, "embedding provider unavailable — the semantic arm is absent");
+            None
+        }
+    }
+}
+
+/// An explicitly named provider for `polis reindex --model`, allowed to
+/// fetch its files on first use. Accepts a choice name (`model2vec`) or a
+/// row model id (`model2vec/potion-base-8M`, `apple-contextual-en-r1`).
+pub fn embedder_named(home: &Home, name: &str) -> Result<Arc<dyn Embedder>, String> {
+    let choice = polis_embed::ProviderChoice::parse(name)
+        .or_else(|| match polis_embed::ProviderKind::of_model_id(name) {
+            polis_embed::ProviderKind::AppleContextual | polis_embed::ProviderKind::AppleSentence => Some(polis_embed::ProviderChoice::Apple),
+            polis_embed::ProviderKind::Model2Vec => Some(polis_embed::ProviderChoice::Model2Vec),
+            polis_embed::ProviderKind::FastEmbed => Some(polis_embed::ProviderChoice::FastEmbed),
+            polis_embed::ProviderKind::Remote => Some(polis_embed::ProviderChoice::Remote),
+            _ => None,
+        })
+        .ok_or_else(|| format!("unknown provider `{name}` (apple | model2vec | fastembed | remote | none, or a row model id)"))?;
+    if choice == polis_embed::ProviderChoice::None {
+        return Err("`none` is not a provider to reindex under".into());
+    }
+    polis_embed::select(choice, Some(&home.models_dir()), true)?.ok_or_else(|| format!("provider `{name}` is not available on this machine"))
+}
+
+/// Fetch the default portable model once (C2) so `Auto` finds it: called by
+/// `init` and `serve` — explicit actions, never a read — and skipped under
+/// `POLIS_NO_NETWORK=1`. Returns what happened, for the log.
+pub fn ensure_default_model(home: &Home) -> String {
+    let no_network = std::env::var("POLIS_NO_NETWORK").map(|v| v == "1").unwrap_or(false);
+    match polis_embed::select(polis_embed::ProviderChoice::Model2Vec, Some(&home.models_dir()), !no_network) {
+        Ok(Some(e)) => format!("{} ready", e.model_id()),
+        Ok(None) => "absent".into(),
+        Err(e) if no_network => format!("skipped (POLIS_NO_NETWORK): {e}"),
+        Err(e) => {
+            tracing::warn!(error = %e, "the default embedding model could not be fetched");
+            format!("unavailable: {e}")
+        }
+    }
+}
+
+/// Ask the OS for Apple's contextual embedding assets once (C2): a real
+/// action with a network cost, so only `init` and `serve` call it, and
+/// never under `POLIS_NO_NETWORK=1`. Returns what was done, for the log.
+pub fn request_apple_assets_if_allowed() -> &'static str {
+    if std::env::var("POLIS_NO_NETWORK").map(|v| v == "1").unwrap_or(false) {
+        return "skipped (POLIS_NO_NETWORK)";
+    }
+    match polis_embed::request_apple_assets() {
+        Ok(true) => "requested",
+        Ok(false) => "present or not offered",
+        Err(e) => {
+            tracing::warn!(error = %e, "Apple contextual assets request failed");
+            "failed"
+        }
+    }
 }
 
 /// `which`, without a dependency: the first executable named `name` on PATH.

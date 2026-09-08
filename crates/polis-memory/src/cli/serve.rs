@@ -144,10 +144,12 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
     let activity = Arc::new(Activity::default());
     // C1: the model transport from the environment (an API key, else a
     // CLI on PATH, else none) and this platform's on-device embedder.
+    tracing::info!(model = %super::backend::ensure_default_model(home), "default embedding model");
     let handle = Arc::new(
         PolisHandle::new(store.clone(), super::backend::agent_for(), Arc::new(NoHost), Arc::new(NoopSink))
-            .with_embedder(super::backend::embedder_for()),
+            .with_embedder(super::backend::embedder_for(home)),
     );
+    tracing::info!(assets = super::backend::request_apple_assets_if_allowed(), "apple contextual embedding assets");
     let api: Arc<dyn MemoryApi> = handle.clone();
     // E4: the org node — its identity is the org's principal; its segments
     // live under the home's sync dir; every received segment is imported

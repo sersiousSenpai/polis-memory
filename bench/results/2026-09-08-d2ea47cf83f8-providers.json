@@ -1,0 +1,127 @@
+{
+  "date": "2026-09-08",
+  "machine": "macos aarch64 (16 cpus)",
+  "providers": [
+    {
+      "arm_attribution": {
+        "lexical": 45,
+        "semantic": 31
+      },
+      "available": true,
+      "canary_recall": 0.7661691542288557,
+      "dim": 512,
+      "embed_ms_per_chunk": 77.81827392578126,
+      "filing_best": {
+        "coverage": 0.01765650138258934,
+        "margin": 0.19999998807907104,
+        "precision": 0.8636363744735718,
+        "t1": 0.800000011920929
+      },
+      "filing_chosen": null,
+      "filing_consistency": 0.40418678522109985,
+      "filing_coverable": 2484,
+      "filing_population": 2492,
+      "fused_mrr": 0.5866666666666667,
+      "fused_recall_at": {
+        "10": 0.73,
+        "20": 0.73,
+        "5": 0.69
+      },
+      "index_bytes": 4501584,
+      "index_ms": 5165.377667,
+      "index_rows": 8724,
+      "index_targets": 19,
+      "model": "apple-sentence-en",
+      "pack_p50_ms": 23,
+      "provider": "apple-sentence",
+      "semantic_probes": 50,
+      "semantic_recall_at_10": 0.6
+    },
+    {
+      "available": false,
+      "provider": "apple-contextual"
+    },
+    {
+      "arm_attribution": {
+        "lexical": 45,
+        "semantic": 47
+      },
+      "available": true,
+      "canary_recall": 0.7761194029850746,
+      "dim": 256,
+      "embed_ms_per_chunk": 0.02083756640625,
+      "filing_best": {
+        "coverage": 0.07744783163070679,
+        "margin": 0.17999999225139618,
+        "precision": 0.9274611473083496,
+        "t1": 0.75
+      },
+      "filing_chosen": {
+        "coverage": 0.13523274660110474,
+        "margin": 0.14000000059604645,
+        "precision": 0.9020771384239197,
+        "t1": 0.6500000357627869
+      },
+      "filing_consistency": 0.5362318754196167,
+      "filing_coverable": 2484,
+      "filing_population": 2492,
+      "fused_mrr": 0.6044444444444445,
+      "fused_recall_at": {
+        "10": 0.75,
+        "20": 0.75,
+        "5": 0.7
+      },
+      "index_bytes": 2260440,
+      "index_ms": 7219.491625,
+      "index_rows": 8694,
+      "index_targets": 3012,
+      "model": "model2vec/potion-base-8M",
+      "pack_p50_ms": 7,
+      "provider": "model2vec",
+      "semantic_probes": 50,
+      "semantic_recall_at_10": 0.96
+    },
+    {
+      "arm_attribution": {
+        "lexical": 45,
+        "semantic": 44
+      },
+      "available": true,
+      "canary_recall": 0.7761194029850746,
+      "dim": 384,
+      "embed_ms_per_chunk": 18.008086261718752,
+      "filing_best": {
+        "coverage": 0.030497591942548752,
+        "margin": 0.17999999225139618,
+        "precision": 0.9868420958518982,
+        "t1": 0.6500000357627869
+      },
+      "filing_chosen": {
+        "coverage": 0.1532905250787735,
+        "margin": 0.07999999821186066,
+        "precision": 0.9031413793563843,
+        "t1": 0.550000011920929
+      },
+      "filing_consistency": 0.5970209240913391,
+      "filing_coverable": 2484,
+      "filing_population": 2492,
+      "fused_mrr": 0.5961111111111113,
+      "fused_recall_at": {
+        "10": 0.75,
+        "20": 0.75,
+        "5": 0.7
+      },
+      "index_bytes": 3373272,
+      "index_ms": 357899.116542,
+      "index_rows": 8694,
+      "index_targets": 3012,
+      "model": "fastembed/bge-small-en-v1.5",
+      "pack_p50_ms": 13,
+      "provider": "fastembed",
+      "semantic_probes": 50,
+      "semantic_recall_at_10": 0.86
+    }
+  ],
+  "schema": 1,
+  "sha": "d2ea47cf83f8"
+}
