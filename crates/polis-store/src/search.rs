@@ -470,6 +470,64 @@ impl PolisStore {
     /// ranking — a vector or bm25 hit on a *prompt* can never create, rename,
     /// reparent or reorder a class. The arms decide what you read; the tree
     /// decides what things are.
+    /// The class a question is ABOUT, or none. `match_class_nodes` ranks
+    /// candidates on any single term (its OR stage), and a single loose term
+    /// is how "what repos did I look at for Redline's memory?" answered from
+    /// an astronomy class and then from "Payload CMS lookup" (`look*` →
+    /// `lookup`). This promotes the first candidate the index itself — its
+    /// own tokenizer, stemming included, so "compacting" finds "compaction" —
+    /// says carries one of the query's terms as a whole token, or two of
+    /// them counting prefixes. A prefix alone never resolves. The lexical
+    /// and semantic arms answer regardless (the miss path).
+    pub fn resolve_class_node(
+        &self,
+        q: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Option<polis_core::types::ClassNode>> {
+        use polis_core::query::MIN_PREFIX_LEN;
+        let Some(plan) = polis_core::query::plan_fts_query(q) else {
+            return Ok(None);
+        };
+        let candidates = self.match_class_nodes(q, limit)?;
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn();
+        let mut probe = conn.prepare(
+            "SELECT COUNT(*) FROM class_nodes_fts
+             WHERE rowid = (SELECT rowid FROM class_nodes WHERE id = ?1)
+               AND class_nodes_fts MATCH ?2",
+        )?;
+        let quote = |term: &str| format!("\"{}\"", term.replace('"', "\"\""));
+        for node in candidates {
+            let mut exact = 0usize;
+            let mut prefix = 0usize;
+            for phrase in &plan.phrases {
+                let hit: i64 = probe.query_row(params![node.id, quote(phrase)], |r| r.get(0))?;
+                if hit > 0 {
+                    exact += 1;
+                }
+            }
+            for term in &plan.terms {
+                let hit: i64 = probe.query_row(params![node.id, quote(term)], |r| r.get(0))?;
+                if hit > 0 {
+                    exact += 1;
+                    continue;
+                }
+                if term.chars().count() >= MIN_PREFIX_LEN {
+                    let hit: i64 = probe.query_row(params![node.id, format!("{}*", quote(term))], |r| r.get(0))?;
+                    if hit > 0 {
+                        prefix += 1;
+                    }
+                }
+            }
+            if exact >= 1 || exact + prefix >= 2 {
+                return Ok(Some(node));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn match_class_nodes(
         &self,
         q: &str,

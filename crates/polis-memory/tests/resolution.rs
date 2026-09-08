@@ -61,3 +61,15 @@ fn a_one_term_question_still_resolves_on_its_term() {
     let pack = build_answer_pack(&polis, Some("sqlite"), None, 8);
     assert!(pack.node.map(|n| n.node.title).unwrap_or_default().starts_with("SQLite"));
 }
+
+#[test]
+fn stemming_counts_as_a_whole_token_match() {
+    // The index stems (porter): "compacting" is "compaction" there, and a
+    // plain-token check would have refused this resolution.
+    let store = store_with_classes(&["Memory keeper compaction", "Embedded browser"]);
+    let polis = Polis::new(&store, None, &NoHost, &NoopSink);
+    let pack = build_answer_pack(&polis, Some("compacting cold bodies"), None, 8);
+    assert_eq!(pack.node.map(|n| n.node.title).as_deref(), Some("Memory keeper compaction"));
+    let pack = build_answer_pack(&polis, Some("what did I decide about the browser tab suspension"), None, 8);
+    assert_eq!(pack.node.map(|n| n.node.title).as_deref(), Some("Embedded browser"));
+}

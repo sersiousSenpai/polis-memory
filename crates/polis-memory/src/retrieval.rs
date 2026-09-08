@@ -348,34 +348,19 @@ pub fn build_answer_pack_scoped(
             .map(|term| db.match_class_nodes(term, limit).unwrap_or_default())
             .unwrap_or_default()
     });
-    // The best title match is THE class only when it covers the question
-    // (`polis_core::query::resolves_class`): the cascade's OR stage finds a
-    // node on any single loose term, and that is how a question about
-    // Redline's memory once answered from an astronomy class, then from
-    // "Payload CMS lookup" (`look*` → `lookup`). Weaker matches stay in
+    // The best title match is THE class only when the index says it covers
+    // the question (`PolisStore::resolve_class_node`): the cascade's OR stage
+    // finds a node on any single loose term, and that is how a question
+    // about Redline's memory once answered from an astronomy class, then
+    // from "Payload CMS lookup" (`look*` → `lookup`). Weaker matches stay in
     // `matched` as candidates; the arms below answer regardless.
-    let query_terms: Vec<String> = query
-        .and_then(polis_core::query::plan_fts_query)
-        .map(|p| p.terms)
-        .unwrap_or_default();
     let resolved = node_id
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .and_then(|id| db.get_class_node(id).ok().flatten())
         // A stale `?node=` falls through to the best COVERING match rather
         // than returning nothing — the miss path.
-        .or_else(|| {
-            matched
-                .iter()
-                .find(|n| {
-                    let text = match &n.summary {
-                        Some(sm) => format!("{} {}", n.title, sm),
-                        None => n.title.clone(),
-                    };
-                    polis_core::query::resolves_class(&query_terms, &text)
-                })
-                .cloned()
-        });
+        .or_else(|| query.and_then(|term| db.resolve_class_node(term, limit).ok().flatten()));
     if let Some(r) = &resolved {
         matched.retain(|n| n.id != r.id);
     }

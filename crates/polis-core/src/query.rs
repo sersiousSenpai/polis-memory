@@ -56,7 +56,7 @@ const MAX_TERMS: usize = 12;
 
 /// Minimum length for a term to get a `*` in the OR stage. Shorter prefixes
 /// match too much to be worth the cost.
-const MIN_PREFIX_LEN: usize = 4;
+pub const MIN_PREFIX_LEN: usize = 4;
 
 /// Which stage of the cascade produced a hit. Carried through to the answer
 /// pack so the model — and the user — can see how hard the retrieval had to
@@ -236,44 +236,6 @@ pub fn plan_fts_query(raw: &str) -> Option<FtsPlan> {
     })
 }
 
-/// How many of a plan's `terms` a piece of curated text (a class title and
-/// summary) actually carries, as `(exact, prefix)`: whole-token matches, and
-/// — for terms the planner would prefix-match (≥ `MIN_PREFIX_LEN` chars) — a
-/// token merely starting with the term. Tokenized the way queries are, so
-/// "Redline's" and "redline" agree.
-pub fn term_coverage(terms: &[String], text: &str) -> (usize, usize) {
-    let tokens = tokenize(text);
-    let mut exact = 0;
-    let mut prefix = 0;
-    for term in terms {
-        if tokens.iter().any(|tok| tok == term) {
-            exact += 1;
-        } else if term.chars().count() >= MIN_PREFIX_LEN && tokens.iter().any(|tok| tok.starts_with(term.as_str())) {
-            prefix += 1;
-        }
-    }
-    (exact, prefix)
-}
-
-/// Whether a title match is strong enough to be THE class a question is
-/// about. The OR stage of the cascade finds a node on any single term, and a
-/// single loose term is how "what repos did I look at for Redline's memory?"
-/// resolved to "Payload CMS lookup" (`look*` → `lookup`): one prefix of one
-/// term. A class is claimed when the text carries one of the query's terms
-/// as a whole token (bm25 already ranks the specific word over the common
-/// one — "what did I decide about the browser tab suspension" resolves
-/// "Embedded browser" on `browser`), or covers two terms counting prefixes.
-/// A prefix alone never resolves. Anything weaker is a candidate the pack
-/// may list, never the node it answers from; the lexical and semantic arms
-/// still answer (the miss path).
-pub fn resolves_class(terms: &[String], text: &str) -> bool {
-    if terms.is_empty() {
-        return false;
-    }
-    let (exact, prefix) = term_coverage(terms, text);
-    exact >= 1 || exact + prefix >= 2
-}
-
 /// Plan a follow-up question that is only a fragment ("and the beta?"), by
 /// borrowing terms from the previous turn. A fragment carries its subject
 /// implicitly; without this, turn two of a conversation retrieves against two
@@ -348,30 +310,6 @@ mod tests {
         let p = plan_fts_query("what did I do").unwrap();
         assert!(p.all_stopwords);
         assert_eq!(p.terms, vec!["what", "did", "i", "do"]);
-    }
-
-    /// A class is the answer only when it covers the question, not when one
-    /// loose term happens to prefix a word in its title.
-    #[test]
-    fn a_class_resolves_on_coverage_not_on_one_loose_term() {
-        let p = plan_fts_query("what repos did i look at for Redline's memory?").unwrap();
-        assert!(!resolves_class(&p.terms, "Payload CMS lookup"), "one prefix hit (look → lookup) is not a resolution");
-        assert!(!resolves_class(&p.terms, "AION-1 — Polymathic's astronomy foundation model"));
-        assert!(resolves_class(&p.terms, "Redline memory research — repos compared"));
-        assert_eq!(term_coverage(&p.terms, "Redline memory research — repos compared"), (3, 0));
-        // One exact, specific term resolves a short broad title — bm25 ranks
-        // it; the rule only refuses prefix-only matches.
-        let b = plan_fts_query("what did I decide about the browser tab suspension").unwrap();
-        assert!(resolves_class(&b.terms, "Embedded browser"));
-        assert!(!resolves_class(&b.terms, "Browsing history lookup"), "browser* → browsing is a prefix alone");
-        // One-term queries resolve on their one term.
-        let one = plan_fts_query("sqlite").unwrap();
-        assert!(resolves_class(&one.terms, "SQLite FTS5 and the trigram tokenizer"));
-        assert!(!resolves_class(&one.terms, "Payload CMS lookup"));
-        // Prefixes count only at the planner's threshold.
-        let short = plan_fts_query("tab suspension").unwrap();
-        assert!(resolves_class(&short.terms, "browser tab suspension"));
-        assert!(!resolves_class(&short.terms, "tables and suspense"), "`tab` is too short to prefix `tables`");
     }
 
     /// The possessive and contraction tails. "Redline's memory" must plan to
