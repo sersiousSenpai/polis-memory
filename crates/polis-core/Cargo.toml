@@ -7,6 +7,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["memory", "ledger", "hash-chain", "agents", "mcp"]
+categories = ["data-structures", "algorithms"]
 
 # Deliberately tiny and I/O-free: serde + sha2 and nothing else. This crate is
 # the ONE vocabulary the store, the server, the MCP server and the generated

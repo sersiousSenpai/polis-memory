@@ -7,6 +7,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["memory", "http", "axum", "mcp", "agents"]
+categories = ["web-programming::http-server"]
 
 [features]
 default = []
@@ -32,7 +36,11 @@ tracing = "0.1"
 [dev-dependencies]
 # The real handle over an in-memory store, so the router tests serve real
 # answers rather than a hand-written fake of the whole surface.
-polis-memory = { workspace = true }
+# Path-only on purpose (no `version`): polis-memory depends on this crate,
+# so a versioned dev-dependency back on it is a cycle cargo cannot order at
+# publish time; a path-only dev-dependency is stripped from the published
+# manifest, which is exactly right — the tests never ship.
+polis-memory = { path = "../polis-memory" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

@@ -1,0 +1,41 @@
+# The `polis` binary's byte ceiling (scripts/size-budget.json), checked on
+# every push to main, nightly, and by hand. Not on pull requests: the honest
+# artifact is the `dist`-profile release build (thin LTO, one codegen unit,
+# stripped), which is slower than the PR suite should be. Ratchet the JSON
+# down as levers land; an increase is a reviewed diff of that file.
+name: size
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  size:
+    name: size (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: build the release binary with the dist profile
+        run: cargo build --profile dist --features cli -p polis-memory --locked
+      - name: check the ceiling
+        run: node scripts/check-size.mjs --strict target/dist/polis | tee size-report.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: size-report-${{ matrix.os }}
+          path: size-report.txt

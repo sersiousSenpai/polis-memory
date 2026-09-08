@@ -7,6 +7,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["mcp", "memory", "agents", "model-context-protocol", "claude"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lints]
 workspace = true
@@ -31,5 +35,9 @@ tracing = "0.1"
 ureq = { version = "3", default-features = false, features = ["json"], optional = true }
 
 [dev-dependencies]
-polis-memory = { workspace = true }
+# Path-only on purpose (no `version`): polis-memory depends on this crate,
+# so a versioned dev-dependency back on it is a cycle cargo cannot order at
+# publish time; a path-only dev-dependency is stripped from the published
+# manifest, which is exactly right — the tests never ship.
+polis-memory = { path = "../polis-memory" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util"] }

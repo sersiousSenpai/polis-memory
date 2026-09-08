@@ -1,0 +1,68 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.sersiousSenpai/polis-memory",
+  "title": "Polis Memory",
+  "description": "Local-first memory for coding agents: a hash-chained prompt lake, an organized catalog, MCP tools.",
+  "version": "0.1.0",
+  "websiteUrl": "https://github.com/sersiousSenpai/polis-memory",
+  "repository": {
+    "url": "https://github.com/sersiousSenpai/polis-memory",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "cargo",
+      "registryBaseUrl": "https://crates.io",
+      "identifier": "polis-memory",
+      "version": "0.1.0",
+      "runtimeHint": "polis",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "description": "Serve MCP over stdio (the store is opened in-process; a live `polis serve` is used when present)."
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "POLIS_HOME",
+          "description": "The install's home (store, token, config). Default ~/.polis.",
+          "isRequired": false
+        },
+        {
+          "name": "POLIS_REMOTE",
+          "description": "Force a running daemon's URL as the backend instead of the local store.",
+          "isRequired": false
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "oci",
+      "registryBaseUrl": "https://ghcr.io",
+      "identifier": "sersiousSenpai/polis-memory",
+      "version": "0.1.0",
+      "runtimeHint": "docker",
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "-p",
+          "value": "7677:7677",
+          "description": "Publish the org node's port."
+        },
+        {
+          "type": "named",
+          "name": "-v",
+          "value": "polis-data:/data",
+          "description": "The node's home (store, token, backups)."
+        }
+      ],
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://localhost:7677/mcp"
+      }
+    }
+  ]
+}

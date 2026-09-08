@@ -18,6 +18,14 @@ pub enum Client {
     Codex,
     /// Any client reading a project's `.mcp.json` (cwd).
     Project,
+    /// Cursor: `~/.cursor/mcp.json` → `mcpServers.polis`.
+    Cursor,
+    /// Windsurf: `~/.codeium/windsurf/mcp_config.json` → `mcpServers.polis`.
+    Windsurf,
+    /// Claude Desktop: `claude_desktop_config.json` in the app's config dir
+    /// (macOS `~/Library/Application Support/Claude`, Windows
+    /// `%APPDATA%\Claude`, Linux `~/.config/Claude`) → `mcpServers.polis`.
+    ClaudeDesktop,
 }
 
 impl Client {
@@ -26,6 +34,9 @@ impl Client {
             "claude" | "claude-code" => Some(Client::Claude),
             "codex" => Some(Client::Codex),
             "project" => Some(Client::Project),
+            "cursor" => Some(Client::Cursor),
+            "windsurf" => Some(Client::Windsurf),
+            "claude-desktop" | "desktop" => Some(Client::ClaudeDesktop),
             _ => None,
         }
     }
@@ -35,7 +46,44 @@ impl Client {
             Client::Claude => home_dir().map(|h| h.join(".claude.json")),
             Client::Codex => home_dir().map(|h| h.join(".codex").join("config.toml")),
             Client::Project => std::env::current_dir().ok().map(|d| d.join(".mcp.json")),
+            Client::Cursor => home_dir().map(|h| h.join(".cursor").join("mcp.json")),
+            Client::Windsurf => home_dir().map(|h| h.join(".codeium").join("windsurf").join("mcp_config.json")),
+            Client::ClaudeDesktop => claude_desktop_dir().map(|d| d.join("claude_desktop_config.json")),
         }
+    }
+
+    /// Every client `polis mcp install --client` knows, for `doctor` and docs.
+    pub const ALL: [Client; 6] = [Client::Claude, Client::Codex, Client::Project, Client::Cursor, Client::Windsurf, Client::ClaudeDesktop];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Client::Claude => "claude",
+            Client::Codex => "codex",
+            Client::Project => "project",
+            Client::Cursor => "cursor",
+            Client::Windsurf => "windsurf",
+            Client::ClaudeDesktop => "claude-desktop",
+        }
+    }
+
+    /// JSON `mcpServers` clients share one merge; only codex is TOML.
+    pub fn is_json(self) -> bool {
+        !matches!(self, Client::Codex)
+    }
+}
+
+/// Claude Desktop's config directory per OS. `None` when the platform has
+/// no known location (or no HOME / APPDATA to derive it from).
+pub fn claude_desktop_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        home_dir().map(|h| h.join("Library").join("Application Support").join("Claude"))
+    } else if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Claude"))
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home_dir().map(|h| h.join(".config")))
+            .map(|c| c.join("Claude"))
     }
 }
 
@@ -94,11 +142,18 @@ pub fn install_codex(path: &Path, polis: &Path) -> Result<&'static str, String> 
 pub fn install(client: Client, path: Option<PathBuf>, polis: Option<PathBuf>) -> Result<(PathBuf, &'static str), String> {
     let path = path.or_else(|| client.default_path()).ok_or("cannot resolve the client's config path (no HOME)")?;
     let polis = polis.unwrap_or_else(current_exe);
-    let outcome = match client {
-        Client::Claude | Client::Project => install_json(&path, &polis)?,
-        Client::Codex => install_codex(&path, &polis)?,
-    };
+    let outcome = if client.is_json() { install_json(&path, &polis)? } else { install_codex(&path, &polis)? };
     Ok((path, outcome))
+}
+
+/// Is `polis` configured for a client, at its usual path?
+pub fn client_has_polis(client: Client) -> bool {
+    let Some(path) = client.default_path() else { return false };
+    if client.is_json() {
+        json_has_polis(&path)
+    } else {
+        std::fs::read_to_string(path).is_ok_and(|t| t.contains("[mcp_servers.polis]"))
+    }
 }
 
 /// Is `polis` configured in a JSON client file?
@@ -141,6 +196,29 @@ mod tests {
         assert_eq!(install_codex(&codex, polis).unwrap(), "present (left as is)");
         let text = std::fs::read_to_string(&codex).unwrap();
         assert!(text.starts_with("model = \"x\"\n") && text.contains("[mcp_servers.polis]"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_client_parses_names_itself_and_resolves_a_path_shape() {
+        for c in Client::ALL {
+            assert_eq!(Client::parse(c.name()), Some(c), "{} round-trips", c.name());
+        }
+        assert_eq!(Client::parse("desktop"), Some(Client::ClaudeDesktop));
+        assert_eq!(Client::parse("nope"), None);
+        // The JSON clients end in a JSON file under a client-specific dir;
+        // codex is the one TOML.
+        let dir = std::env::temp_dir().join(format!("polis-clients-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let polis = Path::new("/opt/polis");
+        for c in [Client::Cursor, Client::Windsurf, Client::ClaudeDesktop] {
+            assert!(c.is_json());
+            let path = dir.join(c.name()).join("config.json");
+            assert_eq!(install_json(&path, polis).unwrap(), "added");
+            assert!(json_has_polis(&path));
+        }
+        assert!(!Client::Codex.is_json());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

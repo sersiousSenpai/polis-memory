@@ -33,6 +33,8 @@ rust-version = "1.88"
 license = "Apache-2.0"
 authors = ["Yusuf Al-Bazian"]
 repository = "https://github.com/sersiousSenpai/polis-memory"
+# The project page until polismemory.com is confirmed at the registrar (§11).
+homepage = "https://github.com/sersiousSenpai/polis-memory"
 
 # The intra-workspace edges. `version` beside `path` is what lets each crate
 # publish: cargo strips the path and keeps the version requirement.
@@ -58,3 +60,9 @@ type_complexity = "allow"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# The profile 'dist' builds the release artifacts with: the release profile
+# (thin LTO, one codegen unit, symbols stripped) and nothing more.
+[profile.dist]
+inherits = "release"
+lto = "thin"

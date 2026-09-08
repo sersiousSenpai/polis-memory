@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Polis Memory</title>
+<meta name="description" content="Local-first memory for coding agents: a hash-chained lake of prompts and decisions, an agent-organized catalog, batched retrieval — as Rust crates a host embeds and a polis daemon any harness reaches over MCP.">
+<style>
+  :root { --ink: #1c1b18; --mute: #6b675f; --line: #e6e2da; --bg: #fbfaf7; --accent: #2f5d50; --code: #f1efe9; }
+  @media (prefers-color-scheme: dark) { :root { --ink: #ecebe6; --mute: #a39f96; --line: #2a2926; --bg: #151412; --accent: #8fc7b5; --code: #1f1e1b; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 56px 20px 80px; }
+  h1 { font-size: 2.2rem; letter-spacing: -0.02em; margin: 0 0 8px; }
+  .lede { color: var(--mute); font-size: 1.1rem; margin: 0 0 32px; }
+  h2 { font-size: 1.15rem; margin: 40px 0 10px; }
+  pre, code { font: 0.92rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; margin: 8px 0 14px; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--mute); font-weight: 600; }
+  a { color: var(--accent); }
+  .note { color: var(--mute); font-size: 0.92rem; }
+  footer { margin-top: 56px; color: var(--mute); font-size: 0.9rem; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Polis Memory</h1>
+  <p class="lede">A local-first memory for coding agents: a hash-chained lake of every prompt and decision, an agent-organized class catalog over it, and batched retrieval across both — as Rust crates a host embeds, and as a <code>polis</code> daemon any harness reaches over MCP.</p>
+
+  <h2>Install</h2>
+<pre><code>curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sersiousSenpai/polis-memory/releases/latest/download/polis-memory-installer.sh | sh
+brew install sersiousSenpai/tap/polis-memory
+cargo install polis-memory --features cli</code></pre>
+  <p class="note">Windows: <code>powershell -ExecutionPolicy Bypass -c "irm https://github.com/sersiousSenpai/polis-memory/releases/latest/download/polis-memory-installer.ps1 | iex"</code>. Every artifact is sha256-checked and carries a GitHub attestation.</p>
+
+  <h2>Then</h2>
+<pre><code>polis init                          # ~/.polis: the store, a private token, your key
+polis hook install                  # capture every prompt you submit in Claude Code
+claude mcp add polis -- polis mcp   # answer questions about them, no daemon needed
+polis doctor                        # the install, the chain, the backups, the clients</code></pre>
+  <p class="note">No model, key or network is needed for capture, retrieval or filing. Nothing leaves the machine unless you point it somewhere: no update check, no analytics.</p>
+
+  <h2>Crates</h2>
+  <table>
+    <tr><th>Crate</th><th>What it is</th></tr>
+    <tr><td><code>polis-core</code></td><td>The pure vocabulary: ledger hashing, the proposal grammar, the answer pack, bundle verification, the <code>MemoryApi</code> trait. Verifies a bundle without SQLite.</td></tr>
+    <tr><td><code>polis-store</code></td><td>The SQLite store: attach to a host connection or open standalone; its own migrations; the lexical layer; the cross-process-safe chain append.</td></tr>
+    <tr><td><code>polis-embed</code></td><td>The <code>Embedder</code> trait, on-device and remote backends, brute-force cosine search over an int8 index.</td></tr>
+    <tr><td><code>polis-llm</code></td><td>The <code>Agent</code> trait the gardener speaks: Claude Code and Codex CLI backends, Anthropic and OpenAI-compatible HTTP backends behind features.</td></tr>
+    <tr><td><code>polis-server</code></td><td>The HTTP surface over <code>MemoryApi</code>, the <code>ROUTES</code> table, the capture route, the hook installer; the standalone daemon.</td></tr>
+    <tr><td><code>polis-mcp</code></td><td>The MCP server: read tools (<code>memory_search</code> first), scoped writes, resources and a grounding prompt over stdio or streamable HTTP.</td></tr>
+    <tr><td><code>polis-memory</code></td><td>The crate integrators add: the <code>Polis</code> handle, retrieval, the autonomous gardener, backups and restore, identity and sharing, the <code>polis</code> binary.</td></tr>
+  </table>
+
+  <h2>Read more</h2>
+  <p><a href="https://github.com/sersiousSenpai/polis-memory">Source and docs on GitHub</a> — the architecture, the ledger, identity, sharing, the MCP tools, the benchmarks and how they are measured.</p>
+
+  <footer>Apache-2.0. Polis Memory is a trademark of Yusuf Al-Bazian. Extracted from <a href="https://github.com/sersiousSenpai/redline">Redline</a>, by the same author.</footer>
+</main>
+</body>
+</html>

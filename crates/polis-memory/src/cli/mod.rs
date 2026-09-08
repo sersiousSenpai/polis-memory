@@ -321,6 +321,9 @@ enum ClientArg {
     Claude,
     Codex,
     Project,
+    Cursor,
+    Windsurf,
+    ClaudeDesktop,
 }
 
 #[derive(Subcommand)]
@@ -481,6 +484,9 @@ fn run(cli: Cli) -> Result<(), String> {
                 ClientArg::Claude => install::Client::Claude,
                 ClientArg::Codex => install::Client::Codex,
                 ClientArg::Project => install::Client::Project,
+                ClientArg::Cursor => install::Client::Cursor,
+                ClientArg::Windsurf => install::Client::Windsurf,
+                ClientArg::ClaudeDesktop => install::Client::ClaudeDesktop,
             };
             let (path, outcome) = install::install(client, path, polis)?;
             emit(json, &serde_json::json!({ "path": path, "outcome": outcome }), || format!("{}: polis MCP server {outcome}", path.display()));

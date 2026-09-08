@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use super::backend::{daemon_alive, PROBE_TIMEOUT};
 use super::home::{current_exe, on_path, Home};
-use super::install::{claude_settings_path, json_has_polis, Client};
+use super::install::{claude_settings_path, client_has_polis, Client};
 use crate::backup;
 
 #[derive(Debug, Default, Serialize)]
@@ -40,6 +40,9 @@ pub struct Doctor {
     pub client_claude: bool,
     pub client_codex: bool,
     pub client_project: bool,
+    pub client_cursor: bool,
+    pub client_windsurf: bool,
+    pub client_claude_desktop: bool,
     pub binaries: Vec<(String, bool)>,
     pub backups: usize,
     pub newest_verifying_backup: Option<String>,
@@ -214,9 +217,12 @@ pub fn run(home: &Home) -> Doctor {
             }
         }
     }
-    d.client_claude = Client::Claude.default_path().is_some_and(|p| json_has_polis(&p));
-    d.client_project = Client::Project.default_path().is_some_and(|p| json_has_polis(&p));
-    d.client_codex = Client::Codex.default_path().is_some_and(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains("[mcp_servers.polis]")));
+    d.client_claude = client_has_polis(Client::Claude);
+    d.client_project = client_has_polis(Client::Project);
+    d.client_codex = client_has_polis(Client::Codex);
+    d.client_cursor = client_has_polis(Client::Cursor);
+    d.client_windsurf = client_has_polis(Client::Windsurf);
+    d.client_claude_desktop = client_has_polis(Client::ClaudeDesktop);
 
     let red = d.store_unreadable || d.chain_ok == Some(false) || matches!(d.quick_check, Some(Err(_)));
     if red {
@@ -254,7 +260,15 @@ pub fn render(d: &Doctor) -> String {
         d.embedder.as_deref().unwrap_or("absent")
     ));
     out.push_str(&format!("hook        {}{}{}\n", if d.hook_installed { "installed" } else { "not installed (`polis hook install`)" }, if d.hook_installed && !d.hook_current { " · STALE — run `polis hook install` again" } else { "" }, d.hook_settings.as_deref().map(|s| format!(" · {s}")).unwrap_or_default()));
-    out.push_str(&format!("clients     claude {} · codex {} · project {}\n", yn(d.client_claude), yn(d.client_codex), yn(d.client_project)));
+    out.push_str(&format!(
+        "clients     claude {} · codex {} · project {} · cursor {} · windsurf {} · claude-desktop {}\n",
+        yn(d.client_claude),
+        yn(d.client_codex),
+        yn(d.client_project),
+        yn(d.client_cursor),
+        yn(d.client_windsurf),
+        yn(d.client_claude_desktop)
+    ));
     out.push_str(&format!("binaries    {}\n", d.binaries.iter().map(|(n, b)| format!("{n} {}", if *b { "found" } else { "absent" })).collect::<Vec<_>>().join(" · ")));
     out.push_str(&format!("backups     {} · newest verifying: {}\n", d.backups, d.newest_verifying_backup.as_deref().unwrap_or("none")));
     out.push_str(&format!("disk crypt  {}\n", d.fde));
