@@ -97,6 +97,27 @@ pub trait SegmentTransport: Send + Sync {
     async fn list(&self, chain_id: &str, after_seq: i64) -> Result<Vec<SegmentRef>, SyncError>;
     async fn fetch(&self, r: &SegmentRef) -> Result<Envelope, SyncError>;
     async fn chains(&self, filter: &Subscription) -> Result<Vec<ChainCard>, SyncError>;
+    /// E4: what other peers have reported holding of `chain_id`, as
+    /// `(acker chain, acked seq)` — an org node relays these so an emitter
+    /// learns of an ack from a subscriber whose chain it does not hold. A
+    /// folder or a git remote carries acks inside segments and has nothing
+    /// extra to say.
+    async fn acks_for(&self, _chain_id: &str) -> Result<Vec<(String, i64)>, SyncError> {
+        Ok(Vec::new())
+    }
+    /// E4: tell the transport what we hold after a fetch, signed — an org
+    /// node records it so an emitter learns of the ack now, not on this
+    /// peer's next published segment. A folder or a git remote has no one
+    /// to tell.
+    async fn report_acks(&self, _report: &polis_core::sync::AckReport) -> Result<(), SyncError> {
+        Ok(())
+    }
+    /// E4: the org this transport publishes into (the node's principal id),
+    /// stamped on published envelopes as `org_id`. None for a folder or a
+    /// git remote.
+    async fn org_id(&self) -> Option<String> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -315,5 +336,138 @@ impl SegmentTransport for GitTransport {
     async fn chains(&self, filter: &Subscription) -> Result<Vec<ChainCard>, SyncError> {
         self.pull()?;
         FolderTransport::chains_in(&self.work_dir, filter)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OrgNodeTransport (E4) — feature `orgnode`
+// ---------------------------------------------------------------------------
+
+/// An org node over HTTP: the same four calls against `/v1/sync/*`, with a
+/// bearer token (an org node is never open). `ureq`, as the MCP remote
+/// backend chose: the trait is async but the calls are short and blocking
+/// is honest for a CLI.
+#[cfg(feature = "orgnode")]
+pub struct OrgNodeTransport {
+    pub base: String,
+    pub token: Option<String>,
+    agent: ureq::Agent,
+    node: std::sync::Mutex<Option<polis_core::sync::NodeCard>>,
+}
+
+#[cfg(feature = "orgnode")]
+impl OrgNodeTransport {
+    pub fn new(base: impl Into<String>, token: Option<String>) -> Self {
+        let base = base.into();
+        let base = base.trim_end_matches('/').to_string();
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        OrgNodeTransport { base, token, agent, node: std::sync::Mutex::new(None) }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base, path)
+    }
+
+    fn get(&self, path: &str) -> Result<serde_json::Value, SyncError> {
+        let mut req = self.agent.get(self.url(path));
+        if let Some(t) = &self.token {
+            req = req.header("Authorization", format!("Bearer {t}"));
+        }
+        let mut resp = req.call().map_err(|e| SyncError::Io(format!("org node unreachable at {}: {e}", self.base)))?;
+        let status = resp.status().as_u16();
+        let text = resp.body_mut().read_to_string().map_err(|e| SyncError::Io(e.to_string()))?;
+        if !(200..300).contains(&status) {
+            return Err(SyncError::Io(format!("org node {path}: HTTP {status}: {text}")));
+        }
+        serde_json::from_str(&text).map_err(|e| SyncError::Parse(format!("{path}: {e}")))
+    }
+
+    fn card(&self) -> Result<polis_core::sync::NodeCard, SyncError> {
+        if let Some(c) = self.node.lock().unwrap().clone() {
+            return Ok(c);
+        }
+        let v = self.get("/v1/sync/chains")?;
+        let card: polis_core::sync::NodeCard = serde_json::from_value(v["node"].clone()).map_err(|e| SyncError::Parse(format!("node card: {e}")))?;
+        *self.node.lock().unwrap() = Some(card.clone());
+        Ok(card)
+    }
+}
+
+#[cfg(feature = "orgnode")]
+#[async_trait]
+impl SegmentTransport for OrgNodeTransport {
+    fn key(&self) -> String {
+        format!("org:{}", self.base)
+    }
+    async fn publish(&self, env: &Envelope) -> Result<SegmentRef, SyncError> {
+        let mut req = self.agent.post(self.url("/v1/sync/segments"));
+        if let Some(t) = &self.token {
+            req = req.header("Authorization", format!("Bearer {t}"));
+        }
+        let mut resp = req.send_json(env).map_err(|e| SyncError::Io(format!("org node unreachable at {}: {e}", self.base)))?;
+        let status = resp.status().as_u16();
+        let text = resp.body_mut().read_to_string().map_err(|e| SyncError::Io(e.to_string()))?;
+        if status == 409 {
+            return Err(SyncError::Immutable(format!("the org node refused the segment as forked: {text}")));
+        }
+        if !(200..300).contains(&status) {
+            return Err(SyncError::Io(format!("org node refused the segment: HTTP {status}: {text}")));
+        }
+        Ok(SegmentRef {
+            chain_id: env.header.chain_id.clone(),
+            from_seq: env.header.segment.from_seq,
+            to_seq: env.header.segment.to_seq,
+            locator: self.url(&format!("/v1/sync/segments/{}/{}/{}", env.header.chain_id, env.header.segment.from_seq, env.header.segment.to_seq)),
+        })
+    }
+    async fn list(&self, chain_id: &str, after_seq: i64) -> Result<Vec<SegmentRef>, SyncError> {
+        let v = self.get(&format!("/v1/sync/segments/{chain_id}?after={after_seq}"))?;
+        let segs: Vec<polis_core::sync::SegmentSummary> = serde_json::from_value(v["segments"].clone()).map_err(|e| SyncError::Parse(e.to_string()))?;
+        Ok(segs
+            .into_iter()
+            .map(|s| SegmentRef { locator: self.url(&format!("/v1/sync/segments/{}/{}/{}", s.chain_id, s.from_seq, s.to_seq)), chain_id: s.chain_id, from_seq: s.from_seq, to_seq: s.to_seq })
+            .collect())
+    }
+    async fn fetch(&self, r: &SegmentRef) -> Result<Envelope, SyncError> {
+        let path = r.locator.strip_prefix(&self.base).unwrap_or(&r.locator).to_string();
+        let v = self.get(&path)?;
+        serde_json::from_value(v).map_err(|e| SyncError::Parse(format!("{}: {e}", r.locator)))
+    }
+    async fn chains(&self, filter: &Subscription) -> Result<Vec<ChainCard>, SyncError> {
+        let v = self.get("/v1/sync/chains")?;
+        if let Ok(card) = serde_json::from_value::<polis_core::sync::NodeCard>(v["node"].clone()) {
+            *self.node.lock().unwrap() = Some(card);
+        }
+        let chains: Vec<polis_core::sync::ChainSummary> = serde_json::from_value(v["chains"].clone()).map_err(|e| SyncError::Parse(e.to_string()))?;
+        Ok(chains
+            .into_iter()
+            .map(|c| ChainCard { chain_id: c.chain_id, human_id: c.human_id, display_name: c.display_name, device_name: c.device_name, head_seq: c.head_seq })
+            .filter(|c| filter.matches(c))
+            .collect())
+    }
+    async fn acks_for(&self, chain_id: &str) -> Result<Vec<(String, i64)>, SyncError> {
+        let v = self.get(&format!("/v1/sync/acks?chain={chain_id}"))?;
+        let acks: Vec<polis_core::sync::AckSummary> = serde_json::from_value(v["acks"].clone()).map_err(|e| SyncError::Parse(e.to_string()))?;
+        Ok(acks.into_iter().map(|a| (a.acker_chain, a.acked_seq)).collect())
+    }
+    async fn report_acks(&self, report: &polis_core::sync::AckReport) -> Result<(), SyncError> {
+        let mut req = self.agent.post(self.url("/v1/sync/acks"));
+        if let Some(t) = &self.token {
+            req = req.header("Authorization", format!("Bearer {t}"));
+        }
+        let mut resp = req.send_json(report).map_err(|e| SyncError::Io(format!("org node unreachable at {}: {e}", self.base)))?;
+        let status = resp.status().as_u16();
+        let text = resp.body_mut().read_to_string().map_err(|e| SyncError::Io(e.to_string()))?;
+        if !(200..300).contains(&status) {
+            return Err(SyncError::Io(format!("org node refused the ack report: HTTP {status}: {text}")));
+        }
+        Ok(())
+    }
+    async fn org_id(&self) -> Option<String> {
+        self.card().ok().map(|c| c.principal_id)
     }
 }

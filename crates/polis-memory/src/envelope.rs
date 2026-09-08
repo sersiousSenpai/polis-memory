@@ -169,6 +169,30 @@ impl RedactionPayload {
     }
 }
 
+/// E4: a class node of the exporter's catalog (`policy.tree`). The org node
+/// publishes the firm's catalog this way; a peer keeps it beside the chain
+/// as `foreign_class_*` rows, never merged into its own tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayloadClassNode {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub kind: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+/// E4: a pointer from an exported class into the lake — `target_id` is a
+/// seq on the exporter's own chain, or `chain:seq` on another's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayloadClassLink {
+    pub node_id: String,
+    pub target_kind: String,
+    pub target_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Payload {
@@ -190,6 +214,11 @@ pub struct Payload {
     /// this device has honoured.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub acks: Vec<(String, i64)>,
+    /// E4: the exporter's catalog when `policy.tree` (the org node's).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tree: Vec<PayloadClassNode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tree_links: Vec<PayloadClassLink>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -390,7 +419,18 @@ pub fn build(store: &PolisStore, identity: &Identity, login: &str, opts: &BuildO
         return Err("this device is not bound to the chain — run `polis init`".into());
     }
 
-    let payload = Payload { events, prompts, notes, principals, aliases, binds, vectors, redactions, acks };
+    // E4: the catalog rides only when the policy says so — the org node's
+    // does (the firm's view, signed and attributable); a device's does not.
+    let (mut tree, mut tree_links) = (Vec::new(), Vec::new());
+    if opts.policy.tree {
+        for n in store.list_class_nodes().map_err(|e| e.to_string())? {
+            for l in store.list_class_links_for_node(&n.id).map_err(|e| e.to_string())? {
+                tree_links.push(PayloadClassLink { node_id: n.id.clone(), target_kind: l.target_kind, target_id: l.target_id });
+            }
+            tree.push(PayloadClassNode { id: n.id, parent_id: n.parent_id, kind: n.kind, title: n.title, summary: n.summary });
+        }
+    }
+    let payload = Payload { events, prompts, notes, principals, aliases, binds, vectors, redactions, acks, tree, tree_links };
     let payload_json = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
     let header = Header {
         schema: ENVELOPE_SCHEMA.to_string(),

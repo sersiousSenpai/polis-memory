@@ -49,6 +49,10 @@ pub struct Doctor {
     pub peers: Vec<(String, String, i64, bool)>,
     /// E3: redactions we emitted that a peer has not reported importing.
     pub unacked_redactions: Vec<crate::sharing::UnackedRedaction>,
+    /// E4: this home is an org node (config `org`); per subscriber chain,
+    /// its label and the relayed redactions it has not moved past.
+    pub org: Option<String>,
+    pub org_pending: Vec<(String, String, usize)>,
     pub trusted_keys: usize,
     /// The file could not even be opened as a store (malformed, wrong schema).
     pub store_unreadable: bool,
@@ -113,6 +117,13 @@ pub fn run(home: &Home) -> Doctor {
             }
             d.trusted_keys = store.trust_list().map(|t| t.len()).unwrap_or(0);
             d.unacked_redactions = crate::sharing::unacknowledged_redactions(&store).unwrap_or_default();
+            // E4: an org node reports, per subscriber, what it has not yet
+            // acknowledged — the relay's view of the cooperative limit.
+            if let (Some(org), Some(id)) = (home.config_get("org"), identity.as_ref()) {
+                d.org = Some(org.clone());
+                let node = crate::orgnode::OrgNode::new(std::sync::Arc::new(store), std::sync::Arc::new(id.clone()), org, home.sync_dir().join("org"), false);
+                d.org_pending = crate::orgnode::pending_by_subscriber(&node).unwrap_or_default();
+            }
         }
     }
     for name in ["claude", "codex", "ollama"] {
@@ -256,6 +267,12 @@ pub fn render(d: &Doctor) -> String {
     ));
     for (chain, source, head, forked) in &d.peers {
         out.push_str(&format!("  peer      {} ({source}) · head #{head}{}\n", polis_core::identity::fingerprint(chain), if *forked { " · FORKED" } else { "" }));
+    }
+    if let Some(org) = &d.org {
+        out.push_str(&format!("org node    {org} · {} subscriber chain(s)\n", d.org_pending.len()));
+        for (chain, label, pending) in &d.org_pending {
+            out.push_str(&format!("  subscriber {} ({label}) · {}\n", polis_core::identity::fingerprint(chain), if *pending == 0 { "up to date on redactions".to_string() } else { format!("{pending} redaction(s) not yet acknowledged") }));
+        }
     }
     if !d.unacked_redactions.is_empty() {
         out.push_str(&format!("redactions  {} not yet acknowledged by a peer:\n", d.unacked_redactions.len()));

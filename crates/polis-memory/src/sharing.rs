@@ -12,7 +12,7 @@
 
 use polis_core::identity::{fingerprint, principal_id, PrincipalKind};
 use polis_core::ledger::{EventKind, LedgerAppend, LedgerEventRow};
-use polis_store::foreign::{ForeignChain, ForeignNoteInput, ForeignPromptInput, ForeignRedactionInput, ImportedRows, TrustEntry};
+use polis_store::foreign::{ForeignClassLink, ForeignClassNode, ForeignChain, ForeignNoteInput, ForeignPromptInput, ForeignRedactionInput, ImportedRows, TrustEntry};
 use polis_store::PolisStore;
 use serde::Serialize;
 
@@ -59,6 +59,9 @@ pub struct ImportReport {
     /// The fingerprint trusted on first use by this import, if any.
     pub trusted_now: Option<String>,
     pub verified: Verified,
+    /// E4: the peer's published catalog carried by this segment (nodes, links).
+    #[serde(default)]
+    pub tree: (usize, usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -149,6 +152,7 @@ pub fn import(store: &PolisStore, env: &Envelope, opts: &ImportOptions) -> Resul
             vectors_discarded: 0,
             trusted_now: None,
             verified: v,
+            tree: (0, 0),
         });
     }
 
@@ -242,6 +246,7 @@ pub fn import(store: &PolisStore, env: &Envelope, opts: &ImportOptions) -> Resul
             vectors_discarded: 0,
             trusted_now,
             verified: v,
+            tree: (0, 0),
         });
     }
 
@@ -326,6 +331,29 @@ pub fn import(store: &PolisStore, env: &Envelope, opts: &ImportOptions) -> Resul
         if store.known_principal_kind(chain_id).map_err(store_err)? == Some(PrincipalKind::Device) {
             store.set_foreign_ack(&h.chain_id, *seq).map_err(store_err)?;
         }
+        // E4: the relay's bookkeeping — every ack, of every chain, so an org
+        // node can serve "who has moved past what" to emitters that do not
+        // hold the acker's chain. Harmless on a peer.
+        store.record_org_ack(&h.chain_id, chain_id, *seq).map_err(store_err)?;
+    }
+
+    // E4: the peer's published catalog, if the segment carries one — a
+    // snapshot kept beside the chain (the latest wins), never merged.
+    let mut tree = (0usize, 0usize);
+    if !env.payload.tree.is_empty() {
+        let nodes: Vec<ForeignClassNode> = env
+            .payload
+            .tree
+            .iter()
+            .map(|n| ForeignClassNode { chain_id: h.chain_id.clone(), node_id: n.id.clone(), parent_id: n.parent_id.clone(), kind: n.kind.clone(), title: n.title.clone(), summary: n.summary.clone() })
+            .collect();
+        let links: Vec<ForeignClassLink> = env
+            .payload
+            .tree_links
+            .iter()
+            .map(|l| ForeignClassLink { chain_id: h.chain_id.clone(), node_id: l.node_id.clone(), target_kind: l.target_kind.clone(), target_id: l.target_id.clone() })
+            .collect();
+        tree = store.import_foreign_tree(&h.chain_id, &nodes, &links).map_err(store_err)?;
     }
 
     Ok(ImportReport {
@@ -340,6 +368,7 @@ pub fn import(store: &PolisStore, env: &Envelope, opts: &ImportOptions) -> Resul
         vectors_discarded: discarded,
         trusted_now,
         verified: v,
+        tree,
     })
 }
 
