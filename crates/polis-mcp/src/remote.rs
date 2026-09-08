@@ -153,6 +153,14 @@ struct Hits {
     hits: Vec<GrepHit>,
 }
 
+fn to_value<T: serde::Serialize>(v: &T) -> Value {
+    serde_json::to_value(v).unwrap_or(Value::Null)
+}
+
+fn from_value<T: DeserializeOwned>(v: Value, route: &str) -> Result<T, MemoryError> {
+    serde_json::from_value(v).map_err(|e| MemoryError::Store(format!("{route}: unexpected body: {e}")))
+}
+
 fn unavailable<T>() -> Result<T, MemoryError> {
     Err(MemoryError::Unavailable("remote writes land in E2 (identity); use the daemon's routes with its token".into()))
 }
@@ -337,20 +345,28 @@ impl MemoryApi for RemoteApi {
         Ok(v.get("seq").and_then(Value::as_i64))
     }
 
-    fn remember(&self, _req: &RememberRequest) -> Result<WriteReceipt, MemoryError> {
-        unavailable()
+    // The writes (E2): the daemon's routes, with the daemon's token. Each
+    // route answers the receipt type as JSON (201/200); a refusal is 400 with
+    // a reason, mapped to `Rejected` by `map_status`.
+    fn remember(&self, req: &RememberRequest) -> Result<WriteReceipt, MemoryError> {
+        let (_, v) = self.post_json("/v1/memory/remember", &to_value(req))?;
+        from_value(v, "remember")
     }
-    fn ingest(&self, _req: &IngestRequest) -> Result<IngestReceipt, MemoryError> {
-        unavailable()
+    fn ingest(&self, req: &IngestRequest) -> Result<IngestReceipt, MemoryError> {
+        let (_, v) = self.post_json("/v1/memory/events", &to_value(req))?;
+        from_value(v, "events")
     }
-    fn annotate(&self, _req: &AnnotateRequest) -> Result<WriteReceipt, MemoryError> {
-        unavailable()
+    fn annotate(&self, req: &AnnotateRequest) -> Result<WriteReceipt, MemoryError> {
+        let (_, v) = self.post_json("/v1/memory/annotate", &to_value(req))?;
+        from_value(v, "annotate")
     }
-    fn forget(&self, _req: &ForgetRequest) -> Result<ForgetReceipt, MemoryError> {
-        unavailable()
+    fn forget(&self, req: &ForgetRequest) -> Result<ForgetReceipt, MemoryError> {
+        let (_, v) = self.post_json("/v1/memory/forget", &to_value(req))?;
+        from_value(v, "forget")
     }
-    fn supersede(&self, _req: &SupersedeRequest) -> Result<SupersedeReceipt, MemoryError> {
-        unavailable()
+    fn supersede(&self, req: &SupersedeRequest) -> Result<SupersedeReceipt, MemoryError> {
+        let (_, v) = self.post_json("/v1/memory/supersede", &to_value(req))?;
+        from_value(v, "supersede")
     }
     fn stage_proposals(&self, _proposals: &[Proposal], _actor: &str) -> Result<StageResult, MemoryError> {
         unavailable()

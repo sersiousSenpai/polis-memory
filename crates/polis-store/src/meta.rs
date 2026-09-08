@@ -28,6 +28,9 @@ pub const CORPUS_ROLE_VERSION_KEY: &str = "corpus_role_version";
 /// canary_before / canary_after / error.
 /// 3 (B2): retire-marks on class_nodes / class_links / class_observations,
 /// the `class_run_ops` journal, and `class_runs`' mode / cost columns.
+/// "3" since Session E2 (identity: `principals`, `principal_aliases`, the
+/// scope columns) — the same "3" B2's journal tables land on; both additive
+/// blocks are idempotent, so the merged block runs once.
 pub const STORE_SCHEMA_VERSION: &str = "3";
 
 /// The host's legacy `app_settings` keys, read once at adoption.

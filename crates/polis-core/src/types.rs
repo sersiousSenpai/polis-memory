@@ -188,6 +188,10 @@ pub struct LedgerFilters {
     /// Map focus (Second Brain P5): prompts recorded on one agent thread
     /// (`prompts.thread_id` — a linked/drafter/mission/memchat conversation).
     pub thread_id: Option<String>,
+    /// Identity scope (E2): the human, device or agent id an event's author
+    /// resolves to through `principal_aliases` (`COALESCE(alias, author)`),
+    /// or — for a legacy author string — the string itself.
+    pub principal: Option<String>,
     /// Map focus: one browse tab's trail (`browse_events.browse_id`).
     pub browse_id: Option<String>,
     /// Corpus-role facet (`user` | `agent` | `system`). The UI defaults it to
@@ -567,6 +571,15 @@ pub struct PromptFilters {
     /// question, so a caller has to ask for them on purpose. An explicit
     /// `role=agent` overrides this, because then the caller HAS asked.
     pub include_agent: bool,
+    /// Identity scope (E2, plan §4.5), over the non-hashed scope columns.
+    /// `principal` matches the human, one of their devices or one of their
+    /// agents (any id on the row); `agent` an agent id or a bare seat name
+    /// resolved through the alias table; `run` the run/session id; `org` the
+    /// org id. All bound, never spliced.
+    pub principal: Option<String>,
+    pub agent: Option<String>,
+    pub run: Option<String>,
+    pub org: Option<String>,
 }
 
 /// One note-write act from the surface. Exactly ONE of `text` / `starred` per

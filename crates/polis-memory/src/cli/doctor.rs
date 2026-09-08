@@ -80,7 +80,18 @@ pub fn run(home: &Home) -> Doctor {
     d.token_present = home.read_token().is_some();
     d.config_present = home.config_path().is_file();
     d.daemon = daemon_alive(home);
-    d.identity = "keys and device chains land in E2 (identity); the author is the local user name today".into();
+    // Identity (E2): the key, this device, whether the chain is bound to it.
+    let identity = crate::identity::Identity::load(&home.identity_dir(), home.device_name()).ok().flatten();
+    d.identity = match &identity {
+        Some(id) => format!(
+            "principal {} · device {} ({}) · key {}",
+            id.fingerprint(),
+            polis_core::identity::fingerprint(&id.device_id()),
+            id.device_name,
+            home.identity_dir().join(crate::identity::KEY_FILE).display()
+        ),
+        None => "no key — run `polis init` (writes carry the login name until then)".into(),
+    };
     d.fde = fde_status();
     for name in ["claude", "codex", "ollama"] {
         d.binaries.push((name.into(), on_path(name).is_some()));
@@ -121,6 +132,22 @@ pub fn run(home: &Home) -> Doctor {
                     }
                     d.head_seq = store.max_ledger_seq().ok();
                     d.total_prompts = store.prompt_counts_by_surface().ok().map(|v| v.iter().map(|(_, c)| c).sum());
+                    if let Some(id) = &identity {
+                        match store.bind_seq_for(&id.device_id()) {
+                            Ok(Some(seq)) => d.identity.push_str(&format!(" · bound #{seq}")),
+                            Ok(None) => {
+                                d.identity.push_str(" · UNBOUND");
+                                d.problems.push("this device's key is not bound to the chain — run `polis init` again".into());
+                            }
+                            Err(e) => d.problems.push(format!("bind lookup: {e}")),
+                        }
+                        if let Ok(u) = store.unscoped_counts() {
+                            let left = u.total();
+                            if left > 0 {
+                                d.identity.push_str(&format!(" · {left} rows unscoped"));
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     d.store_unreadable = true;

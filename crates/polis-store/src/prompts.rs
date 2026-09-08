@@ -419,6 +419,15 @@ impl PolisStore {
                 }
             }
         }
+        // Identity scope (E2): the human / device / agent / run / org columns,
+        // every value bound. `principal` resolves to the id set below it.
+        let scope = Self::scope_clause_locked(
+            &conn,
+            "p",
+            &crate::principals::ScopeFilter { principal: f.principal.clone(), agent: f.agent.clone(), run: f.run.clone(), org: f.org.clone() },
+        )?;
+        sql.push_str(&scope.sql);
+        binds.extend(scope.binds);
         sql.push_str(" ORDER BY le.seq ASC LIMIT ?");
         binds.push(Box::new(f.limit.max(1)));
 

@@ -28,6 +28,7 @@ pub mod coldness;
 pub mod dedup;
 pub mod gist;
 pub mod host;
+pub mod identity;
 pub mod json;
 pub mod latency;
 pub mod ledger;
@@ -70,6 +71,7 @@ mod guards {
             ("dedup.rs", include_str!("dedup.rs")),
             ("gist.rs", include_str!("gist.rs")),
             ("host.rs", include_str!("host.rs")),
+            ("identity.rs", include_str!("identity.rs")),
             ("json.rs", include_str!("json.rs")),
             ("latency.rs", include_str!("latency.rs")),
             ("ledger.rs", include_str!("ledger.rs")),

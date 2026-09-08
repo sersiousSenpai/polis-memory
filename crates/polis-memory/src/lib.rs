@@ -24,9 +24,11 @@ pub mod bundle;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod canary;
+pub mod envelope;
 pub mod corpus;
 pub mod eval;
 pub mod gardener;
+pub mod identity;
 pub mod latency;
 pub mod mirror;
 pub mod organize;
@@ -189,16 +191,50 @@ pub struct PolisHandle {
     pub host: Arc<dyn HostResolver>,
     pub sink: Arc<dyn UsageSink>,
     pub embedder: Option<Arc<dyn Embedder>>,
+    /// The key this process writes as (E2). `None` = a store nobody has
+    /// adopted yet: writes carry the store's legacy author string.
+    pub identity: Option<Arc<identity::Identity>>,
 }
 
 impl PolisHandle {
     pub fn new(store: Arc<PolisStore>, agent: Option<Arc<dyn Agent>>, host: Arc<dyn HostResolver>, sink: Arc<dyn UsageSink>) -> Self {
-        Self { store, agent, host, sink, embedder: None }
+        Self { store, agent, host, sink, embedder: None, identity: None }
     }
 
     pub fn with_embedder(mut self, embedder: Option<Arc<dyn Embedder>>) -> Self {
         self.embedder = embedder;
         self
+    }
+
+    /// Write as this identity: the device id, or the agent id the request's
+    /// scope names (`scope.agent`), never a chosen name.
+    pub fn with_identity(mut self, identity: Option<Arc<identity::Identity>>) -> Self {
+        self.identity = identity;
+        self
+    }
+
+    /// The author a write is stamped with. A named agent becomes a principal
+    /// on first sight, so the scope stamp can resolve the id it writes.
+    fn actor(&self, scope: &Scope) -> String {
+        if let (Some(id), Some(agent)) = (self.identity.as_ref(), scope.agent.as_deref().map(str::trim).filter(|a| !a.is_empty())) {
+            if let Err(e) = identity::ensure_agent(&self.store, id, agent) {
+                tracing::warn!(error = %e, agent, "could not register the agent principal");
+            }
+        }
+        identity::actor_for(self.identity.as_ref(), scope.agent.as_deref(), self.store.author())
+    }
+
+    /// The identity half of a request scope, for the store's clauses.
+    fn filter(scope: &Scope) -> polis_store::principals::ScopeFilter {
+        polis_store::principals::ScopeFilter::from_scope(scope)
+    }
+
+    /// After a write: stamp the new rows' scope columns from their author.
+    /// Cheap (a partial index over the unstamped rows) and never fatal.
+    fn stamp(&self) {
+        if let Err(e) = self.store.stamp_unscoped() {
+            tracing::warn!(error = %e, "scope stamp failed");
+        }
     }
 
     /// The borrowed view every memory function takes.
@@ -219,11 +255,12 @@ fn store_err(e: rusqlite::Error) -> MemoryError {
 
 impl MemoryApi for PolisHandle {
     fn search(&self, req: &SearchRequest) -> Result<AnswerPack, MemoryError> {
-        Ok(retrieval::build_answer_pack(
+        Ok(retrieval::build_answer_pack_scoped(
             &self.view(),
             req.q.as_deref(),
             req.node.as_deref(),
             clamp_answer_pack_limit(req.limit),
+            &Self::filter(&req.scope),
         ))
     }
 
@@ -252,8 +289,12 @@ impl MemoryApi for PolisHandle {
         self.store.list_lake_items_since(req.since_seq, limit).map_err(store_err)
     }
 
-    fn timeline(&self, filters: &LedgerFilters, _scope: &Scope) -> Result<Vec<TimelineItem>, MemoryError> {
-        retrieval::query_ledger(&self.view(), filters).map_err(MemoryError::Store)
+    fn timeline(&self, filters: &LedgerFilters, scope: &Scope) -> Result<Vec<TimelineItem>, MemoryError> {
+        let mut f = filters.clone();
+        if f.principal.is_none() {
+            f.principal = scope.principal.clone();
+        }
+        retrieval::query_ledger(&self.view(), &f).map_err(MemoryError::Store)
     }
 
     fn stats(&self, _scope: &Scope) -> Result<ContextStats, MemoryError> {
@@ -271,12 +312,18 @@ impl MemoryApi for PolisHandle {
         self.store.verify_ledger_chain().map_err(store_err)
     }
 
-    fn list_prompts(&self, filters: &PromptFilters, _scope: &Scope) -> Result<Vec<LakeItem>, MemoryError> {
-        retrieval::list_prompts(&self.view(), filters).map_err(MemoryError::Store)
+    fn list_prompts(&self, filters: &PromptFilters, scope: &Scope) -> Result<Vec<LakeItem>, MemoryError> {
+        let mut f = filters.clone();
+        f.principal = f.principal.or_else(|| scope.principal.clone());
+        f.agent = f.agent.or_else(|| scope.agent.clone());
+        f.run = f.run.or_else(|| scope.run.clone());
+        f.org = f.org.or_else(|| scope.org.clone());
+        f.project = f.project.or_else(|| scope.project.clone());
+        retrieval::list_prompts(&self.view(), &f).map_err(MemoryError::Store)
     }
 
-    fn browse_search(&self, q: &str, limit: i64, _scope: &Scope) -> Result<Vec<BrowseHit>, MemoryError> {
-        self.store.search_browse_events(q, limit.clamp(1, 100)).map_err(store_err)
+    fn browse_search(&self, q: &str, limit: i64, scope: &Scope) -> Result<Vec<BrowseHit>, MemoryError> {
+        self.store.search_browse_events_scoped(q, limit.clamp(1, 100), &Self::filter(scope)).map_err(store_err)
     }
 
     fn thread_tree(&self, kind: &str, id: &str, _scope: &Scope) -> Result<serde_json::Value, MemoryError> {
@@ -290,7 +337,7 @@ impl MemoryApi for PolisHandle {
     fn context(&self, req: &ContextRequest) -> Result<ContextBlock, MemoryError> {
         // ~4 bytes a token; the prefetch's own ceiling bounds a runaway ask.
         let max_bytes = req.max_tokens.unwrap_or(2_000).clamp(50, 25_000) * 4;
-        Ok(retrieval::context_block(&self.view(), &req.q, req.node.as_deref(), max_bytes))
+        Ok(retrieval::context_block_scoped(&self.view(), &req.q, req.node.as_deref(), max_bytes, &Self::filter(&req.scope)))
     }
 
     fn health(&self) -> Result<HealthReport, MemoryError> {
@@ -332,11 +379,18 @@ impl MemoryApi for PolisHandle {
             project_path: req.project.clone(),
             body: req.body.clone(),
             thread: None,
-            author: None,
+            // The hook fires inside a harness session: the writer is the
+            // `claude-code` agent under this device (E2). Without an identity
+            // the legacy author stays.
+            author: self.identity.as_ref().map(|id| id.agent_id("claude-code")),
             model: None,
             model_source: None,
         };
-        latency::timed("ingest.capture", || record_prompt(&self.store, input).map_err(MemoryError::Store))
+        let seq = latency::timed("ingest.capture", || record_prompt(&self.store, input).map_err(MemoryError::Store))?;
+        if seq.is_some() {
+            self.stamp();
+        }
+        Ok(seq)
     }
 
     fn remember(&self, req: &RememberRequest) -> Result<WriteReceipt, MemoryError> {
@@ -344,6 +398,7 @@ impl MemoryApi for PolisHandle {
             return Err(MemoryError::Rejected("nothing to remember".into()));
         }
         let _timer = latency::Timer::start("remember");
+        let actor = self.actor(&req.scope);
         if req.as_user {
             let seq = record_prompt(
                 &self.store,
@@ -353,26 +408,30 @@ impl MemoryApi for PolisHandle {
                     surface: "api".to_string(),
                     role: CorpusRole::User,
                     session_id: None,
-                    claude_session_id: None,
+                    claude_session_id: req.scope.run.clone(),
                     mission_id: None,
-                    project_path: req.project.clone(),
+                    project_path: req.project.clone().or_else(|| req.scope.project.clone()),
                     body: req.text.clone(),
                     thread: None,
-                    author: None,
+                    author: Some(actor),
                     model: None,
                     model_source: None,
                     user_text: None,
                 },
             )
             .map_err(MemoryError::Store)?;
+            self.stamp();
             return Ok(WriteReceipt { seq, id: None });
         }
         let write = NoteWrite { target_kind: Some("none".to_string()), text: Some(req.text.clone()), ..Default::default() };
-        note_receipt(self.store.write_user_note(&write, self.store.author()).map_err(store_err)?)
+        let out = note_receipt(self.store.write_user_note(&write, &actor).map_err(store_err)?);
+        self.stamp();
+        out
     }
 
     fn ingest(&self, req: &IngestRequest) -> Result<IngestReceipt, MemoryError> {
         let _timer = latency::Timer::start("ingest");
+        let actor = self.actor(&req.scope);
         let mut receipt = IngestReceipt::default();
         for item in &req.items {
             let _item_timer = latency::Timer::start("ingest.item");
@@ -391,12 +450,12 @@ impl MemoryApi for PolisHandle {
                 surface: "import".to_string(),
                 role,
                 session_id: item.session.clone(),
-                claude_session_id: item.run.clone(),
+                claude_session_id: item.run.clone().or_else(|| req.scope.run.clone()),
                 mission_id: None,
-                project_path: item.project.clone(),
+                project_path: item.project.clone().or_else(|| req.scope.project.clone()),
                 body: item.body.clone(),
                 thread: None,
-                author: None,
+                author: Some(actor.clone()),
                 model: None,
                 model_source: None,
                 user_text: None,
@@ -406,6 +465,9 @@ impl MemoryApi for PolisHandle {
                 Some(seq) => receipt.recorded.push(seq),
                 None => receipt.skipped += 1, // dedup on (body_hash, run)
             }
+        }
+        if !receipt.recorded.is_empty() {
+            self.stamp();
         }
         Ok(receipt)
     }
@@ -417,7 +479,9 @@ impl MemoryApi for PolisHandle {
             text: Some(req.text.clone()),
             ..Default::default()
         };
-        note_receipt(self.store.write_user_note(&write, self.store.author()).map_err(store_err)?)
+        let out = note_receipt(self.store.write_user_note(&write, &self.actor(&req.scope)).map_err(store_err)?);
+        self.stamp();
+        out
     }
 
     fn forget(&self, req: &ForgetRequest) -> Result<ForgetReceipt, MemoryError> {
@@ -433,7 +497,7 @@ impl MemoryApi for PolisHandle {
                     .map_err(|_| MemoryError::Rejected("target_id must be a prompt id".into()))?;
                 let seq = self
                     .store
-                    .compact_prompt_body(id, "[forgotten]", "forget", gardener::GIST_SOURCE_DETERMINISTIC, self.store.author())
+                    .compact_prompt_body(id, "[forgotten]", "forget", gardener::GIST_SOURCE_DETERMINISTIC, &self.actor(&req.scope))
                     .map_err(store_err)?;
                 Ok(ForgetReceipt { forgotten: true, seq })
             }
@@ -444,7 +508,7 @@ impl MemoryApi for PolisHandle {
     fn supersede(&self, req: &SupersedeRequest) -> Result<SupersedeReceipt, MemoryError> {
         match self
             .store
-            .apply_supersession(req.old_seq, req.new_seq, req.rationale.as_deref().unwrap_or(""), self.store.author())
+            .apply_supersession(req.old_seq, req.new_seq, req.rationale.as_deref().unwrap_or(""), &self.actor(&req.scope))
             .map_err(store_err)?
         {
             SupersessionOutcome::Applied { effective_old, new_seq: _, event_seq } => Ok(SupersedeReceipt {
@@ -463,7 +527,9 @@ impl MemoryApi for PolisHandle {
     }
 
     fn stage_proposals(&self, proposals: &[Proposal], _actor: &str) -> Result<StageResult, MemoryError> {
-        organize::stage_proposals(&self.view(), None, proposals).map_err(|e| MemoryError::Store(e.to_string()))
+        let out = organize::stage_proposals(&self.view(), None, proposals).map_err(|e| MemoryError::Store(e.to_string()));
+        self.stamp();
+        out
     }
 
     fn browse(&self, req: &BrowseRequest) -> Result<WriteReceipt, MemoryError> {
@@ -486,10 +552,11 @@ impl MemoryApi for PolisHandle {
                 title: req.title.clone(),
                 text: req.text.clone(),
                 from_event_id: None,
-                author: req.author.clone(),
+                author: req.author.clone().or_else(|| Some(self.actor(&req.scope))),
             },
         )
         .map_err(MemoryError::Store)?;
+        self.stamp();
         Ok(WriteReceipt { seq, id: None })
     }
 
@@ -497,14 +564,17 @@ impl MemoryApi for PolisHandle {
         Box::pin(async move {
             let view = self.view();
             match organize::organize_once(&view).await {
-                Ok(o) => Ok(OrganizeReceipt {
-                    ran: o.ran,
-                    auto_applied: o.auto_applied,
-                    summary: o.summary,
-                    seq_from: o.seq_from,
-                    seq_to: o.seq_to,
-                    staged: o.staged,
-                }),
+                Ok(o) => {
+                    self.stamp();
+                    Ok(OrganizeReceipt {
+                        ran: o.ran,
+                        auto_applied: o.auto_applied,
+                        summary: o.summary,
+                        seq_from: o.seq_from,
+                        seq_to: o.seq_to,
+                        staged: o.staged,
+                    })
+                }
                 Err(e) if e == agent::NO_MODEL => Err(MemoryError::Unavailable(e)),
                 Err(e) => Err(MemoryError::Store(e)),
             }

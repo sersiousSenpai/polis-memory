@@ -33,6 +33,7 @@ pub mod compaction;
 pub mod prompts;
 pub mod record;
 pub mod runs;
+pub mod principals;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};

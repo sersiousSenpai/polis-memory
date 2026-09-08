@@ -52,8 +52,53 @@ impl Home {
             .ok_or_else(|| "neither POLIS_HOME nor HOME/USERPROFILE is set".to_string())
     }
 
+    /// `POLIS_DB`, else config.toml `db` (an adopted Redline store), else
+    /// `polis.db` in the home.
     pub fn db_path(&self) -> PathBuf {
-        env_nonempty("POLIS_DB").map(PathBuf::from).unwrap_or_else(|| self.root.join("polis.db"))
+        env_nonempty("POLIS_DB")
+            .or_else(|| self.config_get("db"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.root.join("polis.db"))
+    }
+
+    /// Where `identity.key` lives: config.toml `identity_dir` (an adopted
+    /// Redline install shares its key), else the home.
+    pub fn identity_dir(&self) -> PathBuf {
+        self.config_get("identity_dir").map(PathBuf::from).unwrap_or_else(|| self.root.clone())
+    }
+
+    /// The device name: config.toml `device`, else the hostname.
+    pub fn device_name(&self) -> String {
+        self.config_get("device").unwrap_or_else(crate::identity::default_device_name)
+    }
+
+    pub fn config_get(&self, key: &str) -> Option<String> {
+        std::fs::read_to_string(self.config_path()).ok().and_then(|t| config_value(&t, key))
+    }
+
+    /// Set one `key = "value"` line in config.toml (replacing an existing
+    /// line for the key, else appending). Creates the file if needed.
+    pub fn config_set(&self, key: &str, value: &str) -> Result<(), String> {
+        let path = self.config_path();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut out = String::new();
+        let mut replaced = false;
+        for line in text.lines() {
+            let is_key = line.trim().split_once('=').map(|(k, _)| k.trim() == key).unwrap_or(false) && !line.trim().starts_with('#');
+            if is_key {
+                if !replaced {
+                    out.push_str(&format!("{key} = \"{value}\"\n"));
+                    replaced = true;
+                }
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        if !replaced {
+            out.push_str(&format!("{key} = \"{value}\"\n"));
+        }
+        std::fs::write(&path, out).map_err(|e| format!("write {}: {e}", path.display()))
     }
     pub fn token_path(&self) -> PathBuf {
         self.root.join("token")

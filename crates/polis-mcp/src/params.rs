@@ -155,6 +155,8 @@ impl TimelineParams {
             thread_id: self.thread_id.clone(),
             browse_id: self.browse_id.clone(),
             role: self.role.clone(),
+            // the identity scope rides in `scope`, merged by the handle
+            principal: None,
         }
     }
 }
@@ -231,6 +233,10 @@ impl QueryPromptsParams {
             model: None,
             role: self.role.clone(),
             include_agent: self.include_agent.unwrap_or(false),
+            principal: None,
+            agent: None,
+            run: None,
+            org: None,
         }
     }
 }
@@ -252,4 +258,74 @@ pub struct SearchBrowsingParams {
 
 pub fn grep_scope(s: Option<&str>) -> GrepScope {
     GrepScope::parse(s)
+}
+
+// ---------------------------------------------------------------------------
+// The writes (E2). Every one takes the same optional `scope`; the server
+// stamps `scope.agent = mcp:<client>` when the caller names no agent.
+// ---------------------------------------------------------------------------
+
+/// `memory_remember`.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct RememberParams {
+    /// The memory to keep.
+    pub text: String,
+    /// Record as the user's own words (a prompt row). Default `false`: a
+    /// standalone note, filed as agent text.
+    pub as_user: Option<bool>,
+    /// The project it belongs to (a path or a name).
+    pub project: Option<String>,
+    pub scope: Option<ScopeArg>,
+}
+
+/// One episode / message in a `memory_ingest` batch.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct IngestItemArg {
+    pub body: String,
+    /// Unix milliseconds when it happened (default: now).
+    pub ts: Option<i64>,
+    /// `user` | `agent` | `system` (default `user`).
+    pub role: Option<String>,
+    pub session: Option<String>,
+    /// The run/thread id; dedup is on (body hash, run).
+    pub run: Option<String>,
+    pub project: Option<String>,
+}
+
+/// `memory_ingest`.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct IngestParams {
+    pub items: Vec<IngestItemArg>,
+    pub scope: Option<ScopeArg>,
+}
+
+/// `memory_annotate`.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct AnnotateParams {
+    /// `ledger_event` | `class_node` | `session` | `none` (a standalone note).
+    pub target_kind: String,
+    /// The event seq / node id / session id; omit for `none`.
+    pub target_id: Option<String>,
+    pub text: String,
+    pub scope: Option<ScopeArg>,
+}
+
+/// `memory_forget`.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct ForgetParams {
+    /// `prompt` (today); `browse_event` | `note` | `claim` land with sharing.
+    pub target_kind: String,
+    pub target_id: String,
+    /// Must be the literal `forget`.
+    pub confirm: String,
+    pub scope: Option<ScopeArg>,
+}
+
+/// `memory_supersede`.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct SupersedeParams {
+    pub old_seq: i64,
+    pub new_seq: i64,
+    pub rationale: Option<String>,
+    pub scope: Option<ScopeArg>,
 }
