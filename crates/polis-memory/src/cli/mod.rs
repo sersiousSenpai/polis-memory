@@ -138,6 +138,40 @@ enum Cmd {
     },
     /// Write one snapshot now (verified, pruned to keep 7).
     Backup,
+    /// Export this device's chain as a signed `polis.bundle/2` envelope (E2):
+    /// the events from --from-seq to the head, prompt bodies at the policy's
+    /// redaction (default: full only for org-visible user prompts, stubs
+    /// otherwise), notes, principals, aliases and the bind — signed by your key.
+    Export {
+        /// Kept for the docs: exports are always signed.
+        #[arg(long, default_value_t = true)]
+        signed: bool,
+        /// First seq to include (default 1, the whole chain).
+        #[arg(long)]
+        from_seq: Option<i64>,
+        /// Write here instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Print the full/gist/stub decision per prompt and export nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// auto | full | gist | stub (default auto).
+        #[arg(long)]
+        bodies: Option<String>,
+        /// Corpus roles whose bodies may ship, comma-separated (default: user).
+        #[arg(long)]
+        roles: Option<String>,
+    },
+    /// Verify a `polis.bundle/2` envelope: the key hashes to its principal,
+    /// the device derives from it, the header signature, the payload hash,
+    /// the bind, every event hash and link, and — for this device's own
+    /// chain — continuity with the local rows. Stores nothing (E3).
+    Import {
+        file: PathBuf,
+        /// Required until E3: verify and report, never store.
+        #[arg(long)]
+        verify_only: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -409,6 +443,75 @@ fn run(cli: Cli) -> Result<(), String> {
                 format!("restored {} → {}\n  snapshot chain: {} events, ok\n  previous file kept as {}", r.from.display(), home.db_path().display(), r.verdict.checked, r.kept_as.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "(none)".into()))
             });
             Ok(())
+        }
+        Cmd::Export { signed: _, from_seq, out, dry_run, bodies, roles } => {
+            let db = home.db_path();
+            let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
+            let mut policy = crate::envelope::Policy::default();
+            if let Some(b) = bodies.as_deref() {
+                policy.bodies = crate::envelope::Bodies::parse(b).ok_or_else(|| format!("--bodies must be auto|full|gist|stub, not `{b}`"))?;
+            }
+            if let Some(r) = roles.as_deref() {
+                policy.roles = r.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            }
+            let opts = crate::envelope::BuildOptions { from_seq, policy, org_id: None };
+            if dry_run {
+                let d = crate::envelope::decisions(&store, &opts)?;
+                emit(json, &d, || {
+                    let mut s = String::new();
+                    for x in &d {
+                        s.push_str(&format!("#{:<6} prompt {:<6} {:<6} {:<8} {:?} ({} bytes)\n", x.seq, x.prompt_id, x.role, x.visibility, x.redaction, x.bytes));
+                    }
+                    let count = |r: crate::envelope::Redaction| d.iter().filter(|x| x.redaction == r).count();
+                    s.push_str(&format!("{} prompts; full {} · gist {} · stub {}", d.len(), count(crate::envelope::Redaction::Full), count(crate::envelope::Redaction::Gist), count(crate::envelope::Redaction::Stub)));
+                    s
+                });
+                return Ok(());
+            }
+            let identity = crate::identity::Identity::load(&home.identity_dir(), home.device_name())?
+                .ok_or_else(|| "no identity — run `polis init` first".to_string())?;
+            let env = crate::envelope::build(&store, &identity, &crate::identity::login_name(), &opts)?;
+            let text = serde_json::to_string_pretty(&env).map_err(|e| e.to_string())?;
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+                    let s = &env.header.segment;
+                    emit(json, &serde_json::json!({ "out": path, "chainId": env.header.chain_id, "fromSeq": s.from_seq, "toSeq": s.to_seq, "headHash": s.head_hash, "events": env.payload.events.len(), "prompts": env.payload.prompts.len() }), || {
+                        format!("wrote {} · chain {} · seq {}..{} · {} events, {} prompts", path.display(), polis_core::identity::fingerprint(&env.header.chain_id), s.from_seq, s.to_seq, env.payload.events.len(), env.payload.prompts.len())
+                    });
+                }
+                None => println!("{text}"),
+            }
+            Ok(())
+        }
+        Cmd::Import { file, verify_only } => {
+            if !verify_only {
+                return Err("importing a foreign chain lands with the sharing layer (E3); pass --verify-only to verify and report".into());
+            }
+            let text = std::fs::read_to_string(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
+            let env: crate::envelope::Envelope = serde_json::from_str(&text).map_err(|e| format!("{} is not a polis.bundle/2 envelope: {e}", file.display()))?;
+            let db = home.db_path();
+            let result = if db.exists() {
+                let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
+                crate::envelope::verify_against(&store, &env)
+            } else {
+                crate::envelope::verify(&env)
+            };
+            match result {
+                Ok(v) => {
+                    emit(json, &serde_json::json!({ "ok": true, "verified": v }), || {
+                        format!(
+                            "ok · chain {} ({}) of human {} · seq {}..{} · {} events, {} prompts ({} full bodies), {} bind(s)",
+                            polis_core::identity::fingerprint(&v.chain_id), v.device_name, polis_core::identity::fingerprint(&v.human), v.from_seq, v.to_seq, v.events, v.prompts, v.full_bodies, v.binds
+                        )
+                    });
+                    Ok(())
+                }
+                Err(e) => {
+                    emit(json, &serde_json::json!({ "ok": false, "error": e }), || format!("REFUSED · {e}"));
+                    Err(format!("envelope refused: {e}"))
+                }
+            }
         }
         Cmd::Backup => {
             let db = home.db_path();

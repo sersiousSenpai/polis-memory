@@ -324,6 +324,15 @@ pub fn health(h: &HealthReport) -> String {
     )
 }
 
+/// One line for a write: what happened and the seq to cite.
+pub fn write_receipt(verb: &str, r: &polis_core::api::WriteReceipt) -> String {
+    match (r.seq, r.id) {
+        (Some(seq), _) => format!("{verb} (event #{seq})"),
+        (None, Some(id)) => format!("{verb} (row {id}, no new event)"),
+        (None, None) => format!("{verb} (nothing new)"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,14 +349,5 @@ mod tests {
     fn heads_clip_on_char_boundaries() {
         assert_eq!(head("héllo wörld", 5), "héllo…");
         assert_eq!(head("a  b\nc", 10), "a b c");
-    }
-}
-
-/// One line for a write: what happened and the seq to cite.
-pub fn write_receipt(verb: &str, r: &polis_core::api::WriteReceipt) -> String {
-    match (r.seq, r.id) {
-        (Some(seq), _) => format!("{verb} (event #{seq})"),
-        (None, Some(id)) => format!("{verb} (row {id}, no new event)"),
-        (None, None) => format!("{verb} (nothing new)"),
     }
 }

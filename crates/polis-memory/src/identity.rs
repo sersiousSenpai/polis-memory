@@ -551,4 +551,93 @@ mod tests {
         assert_eq!(actor_for(Some(&id), Some("agent:keeper"), "x"), id.agent_id("keeper"));
         assert_eq!(actor_for(None, Some("keeper"), "legacy"), "legacy");
     }
+
+    /// Plan gate (b): one key copied to a second home with a different
+    /// device name is two devices under one human — two chains, never one
+    /// id with two heads.
+    #[test]
+    fn two_homes_with_one_copied_key_are_two_devices_of_one_human_never_two_heads() {
+        let a = tmpdir("home-a");
+        let b = tmpdir("home-b");
+        let (ida, _) = Identity::load_or_create(&a, "laptop").unwrap();
+        std::fs::copy(a.join(KEY_FILE), b.join(KEY_FILE)).unwrap();
+        let (idb, created) = Identity::load_or_create(&b, "desk").unwrap();
+        assert!(!created, "the copied key is loaded, not replaced");
+        assert_eq!(ida.principal_id(), idb.principal_id(), "one human");
+        assert_ne!(ida.device_id(), idb.device_id(), "two devices");
+        let sa = PolisStore::open_in_memory().unwrap();
+        let sb = PolisStore::open_in_memory().unwrap();
+        let ra = adopt(&sa, &ida, "yusuf").unwrap();
+        let rb = adopt(&sb, &idb, "yusuf").unwrap();
+        assert_eq!(ra.human, rb.human);
+        assert_ne!(ra.device, rb.device);
+        // each chain has exactly one bind, for its own device; the chain ids differ
+        assert_eq!(sa.bind_seq_for(&ida.device_id()).unwrap(), ra.bind_seq);
+        assert_eq!(sb.bind_seq_for(&idb.device_id()).unwrap(), rb.bind_seq);
+        assert!(sa.bind_seq_for(&idb.device_id()).unwrap().is_none(), "home A knows nothing of device B's chain");
+        // both devices sit under the same human in each store that adopted them
+        for (store, id) in [(&sa, &ida), (&sb, &idb)] {
+            let d = store.get_principal(&id.device_id()).unwrap().unwrap();
+            assert_eq!(d.parent_id.as_deref(), Some(id.principal_id().as_str()));
+            let children = store.list_children(&id.principal_id()).unwrap();
+            assert_eq!(children.len(), 1, "one device per home");
+        }
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// Plan gate (a), on a COPY of the real Redline database
+    /// (`POLIS_REAL_DB=<copy>`): adoption leaves the chain green with the
+    /// bind as its head, aliases every author string the lake has ever seen,
+    /// stamps every row, and a signed export of the whole chain verifies
+    /// against the store it came from.
+    #[test]
+    #[ignore]
+    fn real_db_adoption_binds_aliases_every_author_and_exports_verifiably() {
+        let Some(src) = std::env::var_os("POLIS_REAL_DB") else {
+            eprintln!("POLIS_REAL_DB unset; skipping");
+            return;
+        };
+        let dir = tmpdir("real");
+        let db = dir.join("real.db");
+        std::fs::copy(&src, &db).unwrap();
+        let store = PolisStore::open(&db).unwrap();
+        let authors = store.distinct_authors().unwrap();
+        let events_before = store.chain_head().unwrap().0;
+        let id = Identity::from_seed([42u8; 32], "laptop");
+        let t0 = std::time::Instant::now();
+        let r = adopt(&store, &id, "yusufalbazian").unwrap();
+        let adopt_ms = t0.elapsed().as_millis();
+        assert!(!r.already_bound);
+        let (head_seq, _) = store.chain_head().unwrap();
+        assert_eq!(head_seq, events_before + 1, "exactly one event appended: the bind");
+        let head = store.list_ledger_events_asc(head_seq - 1, 1).unwrap().remove(0);
+        assert_eq!(head.kind, "principal_bind");
+        assert_eq!(head.author, id.device_id());
+        let verdict = store.verify_ledger_chain().unwrap();
+        assert!(verdict.ok, "chain green after adoption");
+        let mut unresolved = Vec::new();
+        for a in &authors {
+            if store.resolve_author(a).unwrap().is_none() {
+                unresolved.push(a.clone());
+            }
+        }
+        assert!(unresolved.is_empty(), "authors without an alias: {unresolved:?}");
+        let unscoped = store.unscoped_counts().unwrap();
+        let t1 = std::time::Instant::now();
+        let env = crate::envelope::build(&store, &id, "yusufalbazian", &crate::envelope::BuildOptions::default()).unwrap();
+        let build_ms = t1.elapsed().as_millis();
+        let t2 = std::time::Instant::now();
+        let v = crate::envelope::verify_against(&store, &env).unwrap();
+        let verify_ms = t2.elapsed().as_millis();
+        assert_eq!(v.to_seq, head_seq);
+        assert_eq!(v.full_bodies, 0, "the default policy ships no private body");
+        let again = adopt(&store, &id, "yusufalbazian").unwrap();
+        assert!(again.already_bound && again.aliases_seeded.is_empty() && again.stamped == 0);
+        eprintln!(
+            "real_db_adoption: events {} → {} · authors {} all aliased ({} new) · principals +{} · stamped {} rows · unscoped {:?} · adopt {} ms · export {} events / {} prompts in {} ms · verify {} ms · envelope {} bytes",
+            events_before, head_seq, authors.len(), r.aliases_seeded.len(), r.principals_seeded, r.stamped, unscoped, adopt_ms, env.payload.events.len(), env.payload.prompts.len(), build_ms, verify_ms, serde_json::to_string(&env).unwrap().len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

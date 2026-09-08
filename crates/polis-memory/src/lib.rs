@@ -24,6 +24,7 @@ pub mod bundle;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod canary;
+pub mod envelope;
 pub mod corpus;
 pub mod eval;
 pub mod gardener;

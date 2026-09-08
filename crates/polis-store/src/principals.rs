@@ -324,7 +324,7 @@ impl PolisStore {
     }
 
     pub fn principal_id_set_locked(conn: &Connection, id_or_alias: &str) -> rusqlite::Result<Vec<String>> {
-        let root = Self::resolve_author_locked(&conn, id_or_alias)?.unwrap_or_else(|| id_or_alias.to_string());
+        let root = Self::resolve_author_locked(conn, id_or_alias)?.unwrap_or_else(|| id_or_alias.to_string());
         let mut out = vec![root.clone()];
         let mut stmt = conn.prepare("SELECT principal_id FROM principals WHERE parent_id = ?1")?;
         let children: Vec<String> = stmt.query_map(params![root], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
