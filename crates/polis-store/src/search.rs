@@ -499,6 +499,8 @@ impl PolisStore {
                AND class_nodes_fts MATCH ?2",
         )?;
         let quote = |term: &str| format!("\"{}\"", term.replace('"', "\"\""));
+        // (exact, prefix, node), in the cascade's bm25 order.
+        let mut scored: Vec<(usize, usize, polis_core::types::ClassNode)> = Vec::new();
         for node in candidates {
             let mut exact = 0usize;
             let mut prefix = 0usize;
@@ -521,11 +523,25 @@ impl PolisStore {
                     }
                 }
             }
-            if exact >= 1 || exact + prefix >= 2 {
-                return Ok(Some(node));
-            }
+            scored.push((exact, prefix, node));
         }
-        Ok(None)
+        // A class needs at least one whole-token term to be in the running.
+        // Among those, the widest cover wins (bm25 order breaks ties). When
+        // the widest cover is a single term and more than one class has one
+        // — "repos" for a repo-comparison class, "memory" for the memory
+        // class — the question is ambiguous and no class is claimed: the
+        // candidates are listed and the arms answer.
+        let strong: Vec<&(usize, usize, polis_core::types::ClassNode)> = scored.iter().filter(|(e, _, _)| *e >= 1).collect();
+        let Some(best) = strong.iter().max_by_key(|(e, p, _)| (e + p, *e)).copied() else {
+            return Ok(None);
+        };
+        // `max_by_key` returns the LAST maximum; prefer the first (bm25) one.
+        let best_total = best.0 + best.1;
+        let best = strong.iter().find(|(e, p, _)| e + p == best_total).copied().unwrap_or(best);
+        if best_total == 1 && strong.len() > 1 {
+            return Ok(None);
+        }
+        Ok(Some(best.2.clone()))
     }
 
     pub fn match_class_nodes(

@@ -73,3 +73,31 @@ fn stemming_counts_as_a_whole_token_match() {
     let pack = build_answer_pack(&polis, Some("what did I decide about the browser tab suspension"), None, 8);
     assert_eq!(pack.node.map(|n| n.node.title).as_deref(), Some("Embedded browser"));
 }
+
+#[test]
+fn several_single_term_matches_are_ambiguous_and_resolve_nothing() {
+    // On the live lake the question matched "repos" (stemmed: repo) in a
+    // repo-comparison class and "memory" in the memory class — one term
+    // each. Neither is the answer; the candidates are listed instead.
+    let store = store_with_classes(&[
+        "Payload CMS lookup",
+        "SecuritiesList MVP — repo comparison & where to build",
+        "Polis Memory extraction — standalone cross-model memory server & MCP",
+    ]);
+    let polis = Polis::new(&store, None, &NoHost, &NoopSink);
+    let pack = build_answer_pack(&polis, Some(Q), None, 8);
+    assert!(pack.node.is_none(), "ambiguous single-term matches resolved {:?}", pack.node.map(|n| n.node.title));
+    assert!(pack.matched_nodes.len() >= 2, "the candidates are still listed: {:?}", pack.matched_nodes.len());
+}
+
+#[test]
+fn the_widest_cover_beats_single_term_matches() {
+    let store = store_with_classes(&[
+        "SecuritiesList MVP — repo comparison & where to build",
+        "Polis Memory extraction — standalone cross-model memory server & MCP",
+        "Redline memory research — repos compared",
+    ]);
+    let polis = Polis::new(&store, None, &NoHost, &NoopSink);
+    let pack = build_answer_pack(&polis, Some(Q), None, 8);
+    assert_eq!(pack.node.map(|n| n.node.title).as_deref(), Some("Redline memory research — repos compared"));
+}
