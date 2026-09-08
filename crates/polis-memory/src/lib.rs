@@ -36,6 +36,7 @@ pub mod identity;
 pub mod latency;
 pub mod mirror;
 pub mod organize;
+pub mod orgnode;
 pub mod retrieval;
 pub mod scripted;
 pub mod revert;

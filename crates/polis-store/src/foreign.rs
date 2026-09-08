@@ -112,6 +112,39 @@ pub struct ForeignRedactionInput<'a> {
     pub target_seq: i64,
 }
 
+/// E4: a class node a peer published (its catalog rides its segments).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignClassNode {
+    pub chain_id: String,
+    pub node_id: String,
+    pub parent_id: Option<String>,
+    pub kind: String,
+    pub title: String,
+    pub summary: Option<String>,
+}
+
+/// E4: a pointer from a peer's class into the lake — a seq on its own chain,
+/// or `chain:seq` on another's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignClassLink {
+    pub chain_id: String,
+    pub node_id: String,
+    pub target_kind: String,
+    pub target_id: String,
+}
+
+/// E4: a redaction some chain emitted, as the relay holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignRedactionRow {
+    pub chain_id: String,
+    pub event_seq: i64,
+    pub target_chain: String,
+    pub target_seq: i64,
+}
+
 fn row_to_chain(r: &rusqlite::Row) -> rusqlite::Result<ForeignChain> {
     Ok(ForeignChain {
         chain_id: r.get(0)?,
@@ -564,3 +597,105 @@ impl PolisStore {
             .optional()
     }
 }
+
+// ---------------------------------------------------------------------------
+// E4: a peer's published catalog and the relayed acks
+// ---------------------------------------------------------------------------
+impl PolisStore {
+    /// Replace a peer's published catalog with the one its newest segment
+    /// carries (a catalog is a snapshot, not a log: the latest wins).
+    pub fn import_foreign_tree(&self, chain_id: &str, nodes: &[ForeignClassNode], links: &[ForeignClassLink]) -> rusqlite::Result<(usize, usize)> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM foreign_class_nodes WHERE chain_id = ?1", params![chain_id])?;
+        tx.execute("DELETE FROM foreign_class_links WHERE chain_id = ?1", params![chain_id])?;
+        let now = polis_core::ledger::now_millis();
+        for n in nodes {
+            tx.execute(
+                "INSERT OR REPLACE INTO foreign_class_nodes (chain_id, node_id, parent_id, kind, title, summary, imported_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![chain_id, n.node_id, n.parent_id, n.kind, n.title, n.summary, now],
+            )?;
+        }
+        for l in links {
+            tx.execute(
+                "INSERT OR IGNORE INTO foreign_class_links (chain_id, node_id, target_kind, target_id) VALUES (?1, ?2, ?3, ?4)",
+                params![chain_id, l.node_id, l.target_kind, l.target_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok((nodes.len(), links.len()))
+    }
+
+    pub fn list_foreign_class_nodes(&self, chain_id: &str) -> rusqlite::Result<Vec<ForeignClassNode>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT chain_id, node_id, parent_id, kind, title, summary FROM foreign_class_nodes WHERE chain_id = ?1 ORDER BY title")?;
+        let rows = stmt.query_map(params![chain_id], |r| {
+            Ok(ForeignClassNode { chain_id: r.get(0)?, node_id: r.get(1)?, parent_id: r.get(2)?, kind: r.get(3)?, title: r.get(4)?, summary: r.get(5)? })
+        })?;
+        rows.collect()
+    }
+
+    pub fn list_foreign_class_links(&self, chain_id: &str, node_id: &str) -> rusqlite::Result<Vec<ForeignClassLink>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT chain_id, node_id, target_kind, target_id FROM foreign_class_links WHERE chain_id = ?1 AND node_id = ?2 ORDER BY target_id")?;
+        let rows = stmt.query_map(params![chain_id, node_id], |r| Ok(ForeignClassLink { chain_id: r.get(0)?, node_id: r.get(1)?, target_kind: r.get(2)?, target_id: r.get(3)? }))?;
+        rows.collect()
+    }
+
+    /// The titles of a peer's classes that point at `(chain, seq)` — the
+    /// label a shared hit carries ("the firm files this under …").
+    pub fn foreign_class_titles_for(&self, chain_id: &str, seq: i64) -> rusqlite::Result<Vec<(String, String)>> {
+        let conn = self.conn();
+        let target = format!("{chain_id}:{seq}");
+        let mut stmt = conn.prepare(
+            "SELECT l.chain_id, n.title FROM foreign_class_links l
+             JOIN foreign_class_nodes n ON n.chain_id = l.chain_id AND n.node_id = l.node_id
+             WHERE (l.chain_id = ?1 AND l.target_id = ?2) OR l.target_id = ?3
+             ORDER BY n.title",
+        )?;
+        let rows = stmt.query_map(params![chain_id, seq.to_string(), target], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// "`acker` has imported `chain` up to `seq`" — monotone.
+    pub fn record_org_ack(&self, acker_chain: &str, chain_id: &str, acked_seq: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO org_acks (acker_chain, chain_id, acked_seq, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(acker_chain, chain_id) DO UPDATE SET acked_seq = MAX(acked_seq, excluded.acked_seq), updated_at = excluded.updated_at",
+            params![acker_chain, chain_id, acked_seq, polis_core::ledger::now_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// `(acker, chain, acked_seq)`, optionally narrowed to acks OF one chain.
+    pub fn org_acks(&self, chain_id: Option<&str>) -> rusqlite::Result<Vec<(String, String, i64)>> {
+        let conn = self.conn();
+        let mut out = Vec::new();
+        match chain_id {
+            Some(c) => {
+                let mut stmt = conn.prepare("SELECT acker_chain, chain_id, acked_seq FROM org_acks WHERE chain_id = ?1 ORDER BY acker_chain")?;
+                for r in stmt.query_map(params![c], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
+                    out.push(r?);
+                }
+            }
+            None => {
+                let mut stmt = conn.prepare("SELECT acker_chain, chain_id, acked_seq FROM org_acks ORDER BY chain_id, acker_chain")?;
+                for r in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
+                    out.push(r?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every redaction held from any peer chain, newest first.
+    pub fn list_foreign_redactions(&self) -> rusqlite::Result<Vec<ForeignRedactionRow>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT chain_id, event_seq, target_chain, target_seq FROM foreign_redactions ORDER BY event_seq DESC")?;
+        let rows = stmt.query_map([], |r| Ok(ForeignRedactionRow { chain_id: r.get(0)?, event_seq: r.get(1)?, target_chain: r.get(2)?, target_seq: r.get(3)? }))?;
+        rows.collect()
+    }
+}
+

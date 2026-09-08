@@ -17,7 +17,12 @@ apple = ["polis-embed/apple"]
 # NEVER enabled by a host: it pulls clap, the standalone server, the MCP
 # transports and their runtime into the graph (the documented feature-
 # unification hazard; Redline's `polis_deps_stay_lean` pins it off).
+# E4: the org node's HTTP transport (`polis sync --org URL`). Behind a
+# feature because it is the library's one HTTP client; `cli` turns it on, a
+# host never does.
+orgnode = ["dep:ureq"]
 cli = [
+    "orgnode",
     # C1: the HTTP model backends (an API key skips the 5–10 s CLI startup)
     # and the on-device embedder the deterministic filer needs. A host never
     # enables `cli`, so its graph is unchanged (`polis_deps_stay_lean`).
@@ -39,6 +44,12 @@ cli = [
 # gate, the real-DB instrument and the canary calibration. Tests only; the
 # library carries the corpus, canary and eval modules regardless.
 eval = []
+
+# E4: three peers and an org node in one process, over a loopback port —
+# needs the standalone server and the HTTP transport, i.e. `cli`.
+[[test]]
+name = "orgnode"
+required-features = ["cli"]
 
 [[bin]]
 name = "polis"
@@ -74,6 +85,8 @@ axum = { version = "0.7", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "io-std"], optional = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"], optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
+# E4 (`orgnode`): the same ureq polis-mcp's remote backend uses.
+ureq = { version = "3", default-features = false, features = ["json"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

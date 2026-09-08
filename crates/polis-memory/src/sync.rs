@@ -37,6 +37,9 @@ pub struct SyncReport {
     /// `(chain, reason)` — chains listed but not imported.
     pub skipped: Vec<(String, String)>,
     pub errors: Vec<(String, String)>,
+    /// E4: acks of our chain the transport relayed (an org node's).
+    #[serde(default)]
+    pub acks_relayed: usize,
 }
 
 fn published_key(transport_key: &str) -> String {
@@ -64,7 +67,10 @@ pub async fn sync(store: &PolisStore, identity: &Identity, login: &str, transpor
         let (head, _) = store.chain_head().unwrap_or((0, String::new()));
         let done = published_up_to(store, transport);
         if head > done {
-            let build = BuildOptions { from_seq: Some(done + 1), policy: opts.policy.clone(), org_id: None, include_vectors: opts.include_vectors };
+            // E4: an org node stamps the org it relays for; a folder or a
+            // git remote has none.
+            let org_id = transport.org_id().await;
+            let build = BuildOptions { from_seq: Some(done + 1), policy: opts.policy.clone(), org_id, include_vectors: opts.include_vectors };
             match envelope::build(store, identity, login, &build) {
                 Ok(env) => match transport.publish(&env).await {
                     Ok(r) => {
@@ -117,6 +123,30 @@ pub async fn sync(store: &PolisStore, identity: &Identity, login: &str, transpor
                 }
             }
             Err(e) => report.errors.push(("chains".into(), e.to_string())),
+        }
+        // E4: tell an org node what we hold now — signed, so the node can
+        // attribute it — rather than waiting for our next published segment.
+        let held: Vec<(String, i64)> = store.list_foreign_chains().map(|cs| cs.into_iter().map(|c| (c.chain_id, c.head_seq)).collect()).unwrap_or_default();
+        if !held.is_empty() {
+            let mut rep = polis_core::sync::AckReport { acker_chain: own.clone(), acks: held, at: polis_core::ledger::now_millis(), signature: String::new() };
+            rep.signature = identity.sign_hex(rep.signed_line().as_bytes());
+            if let Err(e) = transport.report_acks(&rep).await {
+                report.errors.push(("acks".into(), e.to_string()));
+            }
+        }
+        // E4: acks the transport relays for our chain (an org node's), so a
+        // subscriber we do not hold still counts as having moved past a
+        // redaction. Recorded like an ack carried in a peer's own segment.
+        match transport.acks_for(&own).await {
+            Ok(acks) => {
+                for (acker, seq) in acks {
+                    if acker != own {
+                        let _ = store.set_foreign_ack(&acker, seq);
+                        report.acks_relayed += 1;
+                    }
+                }
+            }
+            Err(e) => report.errors.push(("acks".into(), e.to_string())),
         }
     }
     report

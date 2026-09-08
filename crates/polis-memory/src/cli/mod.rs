@@ -59,6 +59,11 @@ enum Cmd {
         /// recorded, and bind.
         #[arg(long, value_name = "REDLINE_DATA_DIR")]
         from_redline: Option<PathBuf>,
+        /// Make this home an ORG NODE (E4): its identity is the org's
+        /// principal, its device chain the firm's, and `polis serve --org`
+        /// relays segments between the peers under it.
+        #[arg(long, value_name = "NAME", conflicts_with = "from_redline")]
+        org: Option<String>,
     },
     /// Run the daemon: HTTP routes, MCP at /mcp, the gardener, rotating backups.
     Serve {
@@ -74,6 +79,15 @@ enum Cmd {
         /// Gardener tick in seconds.
         #[arg(long, default_value_t = 30)]
         tick: u64,
+        /// Run as an org node (E4): relay signed segments over /v1/sync/*,
+        /// publish this node's chain and catalog, keep the union. A
+        /// non-loopback bind then needs `--token-file`.
+        #[arg(long)]
+        org: bool,
+        /// Org node: trust a peer's key on first use (the fingerprint is
+        /// logged); otherwise unknown keys are refused until `polis trust add`.
+        #[arg(long, requires = "org")]
+        tofu: bool,
     },
     /// Serve MCP over stdio (what `claude mcp add polis -- polis mcp` runs),
     /// or write a client's config.
@@ -203,6 +217,13 @@ enum Cmd {
         folder: Option<PathBuf>,
         #[arg(long, value_name = "URL")]
         git: Option<String>,
+        /// An org node's base URL (E4), e.g. http://node.example:7677. Needs
+        /// the node's token: `--token-file`, else `POLIS_ORG_TOKEN`.
+        #[arg(long, value_name = "URL")]
+        org: Option<String>,
+        /// The org node's bearer token, in a file.
+        #[arg(long, value_name = "FILE", requires = "org")]
+        token_file: Option<PathBuf>,
         /// Only publish.
         #[arg(long)]
         publish_only: bool,
@@ -235,7 +256,13 @@ enum Cmd {
         cmd: TrustCmd,
     },
     /// The peer chains held here: source, head, forked.
-    Peers,
+    Peers {
+        /// E4: clear a chain's FORKED mark (a chain id or fingerprint prefix)
+        /// after the operator has looked — the held history stays, newer
+        /// segments that link onto it land again. Nothing is deleted.
+        #[arg(long, value_name = "CHAIN")]
+        unfork: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -366,10 +393,18 @@ fn run(cli: Cli) -> Result<(), String> {
     let home = Home::resolve()?;
     let json = cli.json;
     match cli.cmd {
-        Cmd::Init { device, from_redline } => {
+        Cmd::Init { device, from_redline, org } => {
             let fresh = !home.exists();
             home.ensure()?;
             let wrote_config = home.ensure_config()?;
+            if let Some(name) = &org {
+                // The node is just another principal: its own key, its own
+                // device chain named for the org, its card carrying the name.
+                home.config_set("org", name)?;
+                if device.is_none() {
+                    home.config_set("device", &format!("org:{name}"))?;
+                }
+            }
             if let Some(dir) = &from_redline {
                 let redline_db = dir.join("redline.db");
                 if !redline_db.exists() {
@@ -390,7 +425,8 @@ fn run(cli: Cli) -> Result<(), String> {
             home.ensure_token()?;
             let identity_dir = home.identity_dir();
             let (identity, created_key) = crate::identity::Identity::load_or_create(&identity_dir, home.device_name())?;
-            let login = crate::identity::login_name();
+            // An org node's human card carries the org's name, not a login.
+            let login = home.config_get("org").unwrap_or_else(crate::identity::login_name);
             let report = crate::identity::adopt(&store, &identity, &login)?;
             emit(
                 json,
@@ -429,9 +465,9 @@ fn run(cli: Cli) -> Result<(), String> {
             );
             Ok(())
         }
-        Cmd::Serve { listen, token_file, no_gardener, tick } => {
+        Cmd::Serve { listen, token_file, no_gardener, tick, org, tofu } => {
             let rt = runtime()?;
-            rt.block_on(serve::run(&home, serve::ServeOptions { listen, token_file, no_gardener, tick_secs: tick }))
+            rt.block_on(serve::run(&home, serve::ServeOptions { listen, token_file, no_gardener, tick_secs: tick, org, tofu }))
         }
         Cmd::Mcp { cmd: None } => {
             let backend = backend::choose(&home, cli.remote);
@@ -637,11 +673,23 @@ fn run(cli: Cli) -> Result<(), String> {
                 }
             }
         }
-        Cmd::Sync { folder, git, publish_only, fetch_only, tofu, force, include_vectors, bodies } => {
-            let transport: Box<dyn crate::transport::SegmentTransport> = match (folder, git) {
-                (Some(dir), None) => Box::new(crate::transport::FolderTransport::new(dir)),
-                (None, Some(url)) => Box::new(crate::transport::GitTransport::new(url.clone(), home.sync_dir().join("git").join(short_hash(&url)))),
-                _ => return Err("pass exactly one of --folder DIR or --git URL".into()),
+        Cmd::Sync { folder, git, org, token_file, publish_only, fetch_only, tofu, force, include_vectors, bodies } => {
+            let transport: Box<dyn crate::transport::SegmentTransport> = match (folder, git, org) {
+                (Some(dir), None, None) => Box::new(crate::transport::FolderTransport::new(dir)),
+                (None, Some(url), None) => Box::new(crate::transport::GitTransport::new(url.clone(), home.sync_dir().join("git").join(short_hash(&url)))),
+                (None, None, Some(url)) => {
+                    // The node's token, never this home's: `--token-file`,
+                    // else POLIS_ORG_TOKEN.
+                    let token = match &token_file {
+                        Some(p) => Some(std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?.trim().to_string()),
+                        None => std::env::var("POLIS_ORG_TOKEN").ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
+                    };
+                    if token.is_none() {
+                        return Err("an org node requires its token: pass --token-file FILE or set POLIS_ORG_TOKEN".into());
+                    }
+                    Box::new(crate::transport::OrgNodeTransport::new(url, token))
+                }
+                _ => return Err("pass exactly one of --folder DIR, --git URL or --org URL".into()),
             };
             let db = home.db_path();
             let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
@@ -652,8 +700,9 @@ fn run(cli: Cli) -> Result<(), String> {
                 policy.bodies = crate::envelope::Bodies::parse(b).ok_or_else(|| format!("--bodies must be auto|full|gist|stub, not `{b}`"))?;
             }
             let opts = crate::sync::SyncOptions { publish: !fetch_only, fetch: !publish_only, tofu, force, policy, include_vectors, local_model: None };
+            let login = home.config_get("org").unwrap_or_else(crate::identity::login_name);
             let rt = runtime()?;
-            let report = rt.block_on(crate::sync::sync(&store, &identity, &crate::identity::login_name(), transport.as_ref(), &opts));
+            let report = rt.block_on(crate::sync::sync(&store, &identity, &login, transport.as_ref(), &opts));
             emit(json, &report, || render_sync(&report));
             if report.errors.is_empty() {
                 Ok(())
@@ -751,9 +800,23 @@ fn run(cli: Cli) -> Result<(), String> {
                 }
             }
         }
-        Cmd::Peers => {
+        Cmd::Peers { unfork } => {
             let db = home.db_path();
             let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
+            if let Some(prefix) = unfork {
+                let p = prefix.trim().to_ascii_lowercase();
+                let chains = store.list_foreign_chains().map_err(|e| e.to_string())?;
+                let matches: Vec<_> = chains.iter().filter(|c| c.chain_id == p || c.chain_id.starts_with(&p) || polis_core::identity::fingerprint(&c.chain_id) == p).collect();
+                let Some(c) = matches.first() else { return Err(format!("no held chain matches `{prefix}`")) };
+                if matches.len() > 1 {
+                    return Err(format!("`{prefix}` matches {} chains — give more of the id", matches.len()));
+                }
+                let cleared = store.clear_foreign_fork(&c.chain_id).map_err(|e| e.to_string())?;
+                emit(json, &serde_json::json!({ "chain": c.chain_id, "cleared": cleared }), || {
+                    format!("{} ({}) · fork mark {}", polis_core::identity::fingerprint(&c.chain_id), c.display_name.as_deref().unwrap_or("unnamed"), if cleared { "cleared — segments linking onto the held head land again" } else { "was not set" })
+                });
+                return Ok(());
+            }
             let chains = store.list_foreign_chains().map_err(|e| e.to_string())?;
             emit(json, &chains, || {
                 if chains.is_empty() {

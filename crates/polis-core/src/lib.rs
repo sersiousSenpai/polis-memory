@@ -35,6 +35,8 @@ pub mod ledger;
 pub mod pack;
 pub mod proposal;
 pub mod query;
+// --- E4 ---
+pub mod sync;
 pub mod types;
 pub mod vec;
 
@@ -78,6 +80,7 @@ mod guards {
             ("pack.rs", include_str!("pack.rs")),
             ("proposal.rs", include_str!("proposal.rs")),
             ("query.rs", include_str!("query.rs")),
+            ("sync.rs", include_str!("sync.rs")),
             ("types.rs", include_str!("types.rs")),
             ("vec.rs", include_str!("vec.rs")),
         ];

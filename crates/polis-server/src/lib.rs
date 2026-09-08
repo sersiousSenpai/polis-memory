@@ -26,6 +26,7 @@
 pub mod hook;
 pub mod ingest;
 pub mod routes;
+pub mod sync;
 #[cfg(feature = "standalone")]
 pub mod standalone;
 
@@ -47,6 +48,11 @@ pub struct PolisState {
     pub api: Arc<dyn MemoryApi>,
     pub ingest: Arc<dyn IngestObserver>,
     pub events: Arc<dyn GardenerEvents>,
+    /// E4: what `/v1/sync/*` is served from. [`polis_core::sync::NoSyncRelay`]
+    /// for every daemon that is not an org node (the routes then answer 503
+    /// "not an org node"); the standalone `polis serve --org` installs the
+    /// real relay.
+    pub sync: Arc<dyn polis_core::sync::SyncRelay>,
 }
 
 impl PolisState {
@@ -57,7 +63,14 @@ impl PolisState {
             api,
             ingest: Arc::new(NoIngestObserver),
             events: Arc::new(polis_core::host::NoHost),
+            sync: Arc::new(polis_core::sync::NoSyncRelay),
         }
+    }
+
+    /// The org node's relay behind `/v1/sync/*` (E4).
+    pub fn with_sync(mut self, relay: Arc<dyn polis_core::sync::SyncRelay>) -> Self {
+        self.sync = relay;
+        self
     }
 }
 
@@ -335,6 +348,66 @@ pub const ROUTES: &[RouteSpec] = &[
         request: "JSON {oldSeq, newSeq, rationale?, scope?}",
         response: "JSON {applied, effectiveOld, eventSeq, rejected}",
     },
+    // --- E4 --- the org node's relay (plan §4.6). Token-gated in BOTH
+    // directions: a segment carries bodies, and an org node listens on a
+    // network; there is no open row here. A daemon that is not an org node
+    // answers 503 "not an org node".
+    RouteSpec {
+        method: "GET",
+        path: "/v1/sync/chains",
+        class: RouteClass::Write(MEMORY_WRITE),
+        purpose: "The org node's card and every chain it relays (org node only)",
+        request: "-",
+        response: "JSON {node, chains}",
+    },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/sync/segments/:chain",
+        class: RouteClass::Write(MEMORY_WRITE),
+        purpose: "One chain's segments past a seq, oldest first (org node only)",
+        request: "chain in path; ?after=",
+        response: "JSON {segments: [{chainId, fromSeq, toSeq}]}",
+    },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/sync/segments/:chain/:from/:to",
+        class: RouteClass::Write(MEMORY_WRITE),
+        purpose: "One segment's envelope, verbatim — the peer re-verifies it (org node only)",
+        request: "chain, from, to in path",
+        response: "JSON polis.bundle/2 envelope; 404 unknown",
+    },
+    RouteSpec {
+        method: "POST",
+        path: "/v1/sync/segments",
+        class: RouteClass::Write(MEMORY_WRITE),
+        purpose: "Publish a signed segment to the org node; verified on receipt exactly as an import (org node only)",
+        request: "JSON polis.bundle/2 envelope",
+        response: "201 JSON {chainId, fromSeq, toSeq, outcome, appended, trustedNow}; 400 refused with the reason; 409 forked",
+    },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/sync/redactions",
+        class: RouteClass::Write(MEMORY_WRITE),
+        purpose: "Every redaction relayed, with the subscribers that have and have not moved past it (org node only)",
+        request: "-",
+        response: "JSON {redactions: [{chainId, eventSeq, targetSeq, ackedBy, pending}]}",
+    },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/sync/acks",
+        class: RouteClass::Write(MEMORY_WRITE),
+        purpose: "What every subscriber has reported holding of a chain (org node only)",
+        request: "?chain=",
+        response: "JSON {acks: [{ackerChain, chainId, ackedSeq}]}",
+    },
+    RouteSpec {
+        method: "POST",
+        path: "/v1/sync/acks",
+        class: RouteClass::Write(MEMORY_WRITE),
+        purpose: "A subscriber's signed report of what it holds, after a fetch — verified against its trusted key, then recorded (org node only)",
+        request: "JSON {ackerChain, acks: [[chain, seq]], at, signature}",
+        response: "JSON {recorded}; 400 refused with the reason",
+    },
 ];
 
 /// Look up the row for a request. `path` must be the registered axum pattern
@@ -404,6 +477,13 @@ where
         // deleted. Registered last because registration order is the ROUTES
         // table's order, and E2's row is appended at its end.
         .route("/v1/memory/supersede", post(routes::handle_memory_supersede))
+        // --- E4 --- the org node's relay, in the table's order.
+        .route("/v1/sync/chains", get(sync::handle_sync_chains))
+        .route("/v1/sync/segments/:chain", get(sync::handle_sync_segments))
+        .route("/v1/sync/segments/:chain/:from/:to", get(sync::handle_sync_segment))
+        .route("/v1/sync/segments", post(sync::handle_sync_publish))
+        .route("/v1/sync/redactions", get(sync::handle_sync_redactions))
+        .route("/v1/sync/acks", get(sync::handle_sync_acks).post(sync::handle_sync_report_acks))
         // Per-route latency (`route:<pattern>`) into the same ring the arms
         // record in — `/v1/context/stats` reports both. `route_layer`, so a
         // host's own routes merged beside these are not counted here.
@@ -458,7 +538,7 @@ pub(crate) mod testing {
 
     /// A concrete URL for a route pattern, for the coverage sweep.
     pub fn concrete(path: &str) -> String {
-        path.replace(":kind", "session").replace(":id", "x")
+        path.replace(":kind", "session").replace(":id", "x").replace(":chain", "c").replace(":from", "1").replace(":to", "2")
     }
 
     /// A body the route's JSON extractor accepts, so the sweep proves the
@@ -468,6 +548,8 @@ pub(crate) mod testing {
             "/v1/prompts/ingest" => r#"{"prompt":"sweep","session_id":"s","cwd":"/tmp"}"#,
             "/v1/memory/proposals" => r#"{"proposals":[]}"#,
             "/v1/memory/remember" => r#"{"text":"kept","asUser":true}"#,
+            "/v1/sync/segments" => "{}",
+            "/v1/sync/acks" => r#"{"ackerChain":"c","acks":[],"at":0,"signature":""}"#,
             "/v1/memory/annotate" => r#"{"targetKind":"none","text":"note"}"#,
             "/v1/memory/forget" => r#"{"targetKind":"prompt","targetId":"1","confirm":"forget"}"#,
             "/v1/memory/events" => r#"{"items":[{"body":"imported"}]}"#,

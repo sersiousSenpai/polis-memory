@@ -40,7 +40,10 @@ pub const CORPUS_ROLE_VERSION_KEY: &str = "corpus_role_version";
 /// 4 (B3): the proposal work-queue columns, `last_recalled_at` on nodes and
 /// links, `retired_at` / `retired_reason` on observations, every `proposed`
 /// row flipped live, the organize gate's meta key dropped.
-pub const STORE_SCHEMA_VERSION: &str = "4";
+/// "5" since Session E4 (the org node: a peer's published catalog, the
+/// relayed acks) — C2 lands on the same "5"; every additive block is
+/// idempotent, so the merged block runs once.
+pub const STORE_SCHEMA_VERSION: &str = "5";
 
 /// The host's legacy `app_settings` keys, read once at adoption.
 pub const LEGACY_LEXICAL_KEY: &str = "redline.memory.lexicalVersion";

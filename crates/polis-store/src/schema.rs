@@ -67,6 +67,10 @@ pub const MEMORY_TABLES: &[&str] = &[
     "foreign_acks",
     "foreign_trust",
     "foreign_subscriptions",
+    // E4: the org node — a peer's published catalog, and the acks it relays
+    "foreign_class_nodes",
+    "foreign_class_links",
+    "org_acks",
 ];
 
 /// The FTS5 tables of the lexical layer (`lexical.rs`), for the schema dump.
@@ -855,6 +859,41 @@ impl Migration {
         // under adjudication, there is nothing a human accepts.
         let _ = conn.execute("DELETE FROM polis_meta WHERE key = 'polis.classmem.autoApply'", []);
         // ---- end B3 ------------------------------------------------------------
+        // ---- E4: the org node (plan §4.6) --------------------------------------
+        // A peer's published catalog: the class nodes and links its segments
+        // carry (`policy.tree`), kept beside its chain and never merged into
+        // ours — a local class may point at a foreign event, a foreign class
+        // never files a local one. `org_acks` is what an org node relays:
+        // "acker has imported chain up to seq", read off every segment it
+        // receives and served back so an emitter learns of an ack from a
+        // subscriber whose chain it does not hold.
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS foreign_class_nodes (
+                chain_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                parent_id TEXT,
+                kind TEXT NOT NULL,              -- node | digest
+                title TEXT NOT NULL,
+                summary TEXT,
+                imported_at INTEGER NOT NULL,
+                PRIMARY KEY (chain_id, node_id)
+            );
+            CREATE TABLE IF NOT EXISTS foreign_class_links (
+                chain_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                target_kind TEXT NOT NULL,       -- prompt | browse_event | foreign | …
+                target_id TEXT NOT NULL,         -- a seq on that chain, or chain:seq
+                PRIMARY KEY (chain_id, node_id, target_kind, target_id)
+            );
+            CREATE TABLE IF NOT EXISTS org_acks (
+                acker_chain TEXT NOT NULL,
+                chain_id TEXT NOT NULL,
+                acked_seq INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (acker_chain, chain_id)
+            );",
+        );
+        // ---- end E4 ------------------------------------------------------------
         Ok(())
     }
 

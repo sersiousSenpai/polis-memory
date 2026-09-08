@@ -122,6 +122,58 @@ catalog is not exported (the org node publishes its own); browse events
 are not shared. `polis export --dry-run` prints the full / gist / stub
 decision per seq before anything is written.
 
+## The org node (E4)
+
+A firm's node is **just another principal**: `polis init --org acme` gives it
+its own Ed25519 key, a device chain named for the org, and a card that
+carries the org's name. `polis serve --org` then does three things beside
+the ordinary daemon:
+
+- **Relay.** `/v1/sync/*` — a peer publishes a signed segment
+  (`POST /v1/sync/segments`), the node verifies it on receipt exactly as an
+  import (id, signature, bind, per-event hash and linkage, continuity
+  against the head it holds), stores the bytes verbatim under
+  `$POLIS_HOME/sync/org/<chain>/<from>-<to>.polis.json` (append-only, a
+  segment is never rewritten) and imports it into its own store. A
+  rewritten segment is refused as **forked** (409), the chain is marked, and
+  nothing newer from it lands until an operator resets the mark. Every row
+  of the surface is token-gated in both directions: a segment carries
+  bodies, and the node listens on a network. A non-loopback bind refuses to
+  start without an operator's `--token-file`; the home's own token is for
+  loopback callers.
+- **Never a trust root.** The node stores and relays; every peer
+  re-verifies every segment it fetches. `--tofu` lets the node trust a
+  peer's key on first use (the fingerprint is logged); without it an
+  unknown key waits for `polis trust add`.
+- **The firm's view, signed.** The node's own chain is published into the
+  same folder whenever its head moves, with `policy.tree` set: its catalog
+  (class nodes and links) rides the segment as `tree` / `treeLinks`, so a
+  peer imports "the firm's classes" as `foreign_class_*` rows beside the
+  node's chain — auditable and attributable, never merged into the peer's
+  own tree. Its gardener runs over what it holds (its own lake plus the
+  union of what it relays), and every organize it makes is an event on its
+  chain like anyone else's.
+
+**Acks through the node.** Acks still ride a peer's segments (a peer's
+next head past a redaction), but a peer syncing through an org node also
+posts a **signed ack report** after every fetch (`POST /v1/sync/acks`: the
+chains and seqs it now holds, signed by its human key; the node verifies
+against the key it trusted when it accepted the chain). The node serves
+`GET /v1/sync/acks?chain=…` back to the emitter on its next sync, so a
+redaction is acknowledged as soon as the subscriber has imported it — not
+when it next has something to say — and an emitter learns of acks from
+subscribers whose chains it does not hold. `GET /v1/sync/redactions` lists
+every relayed redaction with the subscribers that have and have not moved
+past it; `polis doctor` on the node prints the same per subscriber.
+
+**The cooperative limit, stated plainly.** A redaction is a request every
+honest peer honours on import (the body becomes a tombstone, its vectors
+and claims go); it is not enforcement. A peer running patched software can
+retain anything it was ever sent, and the node cannot know. That is why the
+default policy ships bodies only for `role = "user"`, org-visible rows, and
+why `polis doctor` shows acknowledgement per peer rather than pretending a
+`forget` is global.
+
 ## Commands
 
 ```
@@ -135,4 +187,9 @@ polis import FILE [--verify-only] [--tofu] [--force]
 polis export [--from-seq N] [--bodies …] [--roles …] [--include-vectors] [--dry-run]
 polis peers
 polis search --shared … · polis context --shared …
+
+polis init --org NAME                                        # the org node's home: its own key and chain
+polis serve --org [--tofu] [--listen HOST:PORT --token-file FILE]   # relay at /v1/sync/* (token required)
+polis sync --org URL --token-file FILE [--tofu] …            # a peer through the node (or POLIS_ORG_TOKEN)
+polis doctor                                                 # on the node: pending redactions per subscriber
 ```
