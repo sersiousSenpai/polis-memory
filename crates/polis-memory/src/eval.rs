@@ -494,6 +494,110 @@ mod instruments {
         }
     }
 
+    /// §6.1's "MCP `memory_context` round-trip" row (Session F1): B1's 10k
+    /// synthetic corpus in a real `$POLIS_HOME`, `polis mcp` spawned as a
+    /// client would spawn it, `memory_context` called over stdio JSON-RPC —
+    /// the whole trip (serialize, pipe, the pack, render, pipe, parse), not
+    /// the pack alone. Needs the binary: `cargo build -p polis-memory
+    /// --features cli`. `POLIS_MCP_ROUNDTRIP_PROMPTS` / `_CALLS` override the
+    /// sizes. Prints p50/p95 against the budget row (< 100 / < 300 ms).
+    #[test]
+    #[ignore]
+    fn eval_mcp_roundtrip() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Command, Stdio};
+        let prompts: usize = std::env::var("POLIS_MCP_ROUNDTRIP_PROMPTS").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+        let calls: usize = std::env::var("POLIS_MCP_ROUNDTRIP_CALLS").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+        // The binary beside this test's target dir (debug or release).
+        let exe = std::env::current_exe().unwrap();
+        let target = exe.ancestors().find(|p| p.file_name().map(|n| n == "debug" || n == "release").unwrap_or(false)).expect("target dir");
+        let polis = target.join("polis");
+        if !polis.exists() {
+            eprintln!("no {} — cargo build -p polis-memory --features cli; skipping", polis.display());
+            return;
+        }
+        let dir = tempdir::TempDirGuard::new("mcp-roundtrip");
+        let home = dir.path().join(".polis");
+        let env: Vec<(&str, String)> = vec![
+            ("HOME", dir.path().to_string_lossy().into_owned()),
+            ("POLIS_HOME", home.to_string_lossy().into_owned()),
+            ("POLIS_NO_NETWORK", "1".into()),
+        ];
+        let init = Command::new(&polis).arg("init").arg("--device").arg("bench").env_clear().envs(env.iter().map(|(k, v)| (k, v))).env("PATH", std::env::var("PATH").unwrap_or_default()).output().unwrap();
+        assert!(init.status.success(), "polis init: {}", String::from_utf8_lossy(&init.stderr));
+        // Seed B1's fitted corpus straight into the home's store.
+        let store = PolisStore::open(&home.join("polis.db")).unwrap();
+        let corpus = seed_corpus(&store, &CorpusSpec::new(prompts).with_seed(0x5eed_0002)).unwrap();
+        // Realistic probes: the canary's own queries against this lake.
+        let polis_view = Polis::new(&store, None, &NoHost, &NoopSink);
+        let probes: Vec<String> = canary::freeze(&polis_view, 1, &CanaryConfig::default()).probes.iter().map(|p| p.query.clone()).collect();
+        drop(polis_view);
+        drop(store);
+        assert!(!probes.is_empty(), "the corpus yielded no probes");
+        let mut child = Command::new(&polis)
+            .arg("mcp")
+            .env_clear()
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut id = 0u64;
+        let mut call = |method: &str, params: serde_json::Value, wait: bool| -> Option<serde_json::Value> {
+            id += 1;
+            let msg = if wait {
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+            } else {
+                serde_json::json!({"jsonrpc": "2.0", "method": method, "params": params})
+            };
+            writeln!(stdin, "{msg}").unwrap();
+            stdin.flush().unwrap();
+            if !wait {
+                return None;
+            }
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if stdout.read_line(&mut line).unwrap() == 0 {
+                    panic!("polis mcp closed stdout");
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if v.get("id").and_then(|i| i.as_u64()) == Some(id) {
+                        return Some(v);
+                    }
+                }
+            }
+        };
+        call("initialize", serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "bench", "version": "1"}}), true);
+        call("notifications/initialized", serde_json::json!({}), false);
+        // Warm once, then measure.
+        call("tools/call", serde_json::json!({"name": "memory_context", "arguments": {"q": probes[0], "max_tokens": 2000}}), true);
+        let mut ms: Vec<f64> = Vec::with_capacity(calls);
+        let mut non_empty = 0usize;
+        for i in 0..calls {
+            let q = &probes[i % probes.len()];
+            let t0 = std::time::Instant::now();
+            let v = call("tools/call", serde_json::json!({"name": "memory_context", "arguments": {"q": q, "max_tokens": 2000}}), true).unwrap();
+            ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+            let text = v.pointer("/result/structuredContent/text").and_then(|t| t.as_str());
+            if text.map(|t| !t.is_empty()).unwrap_or(false) {
+                non_empty += 1;
+            }
+        }
+        drop(stdin);
+        let _ = child.wait();
+        let d = Dist::of(ms.clone());
+        eprintln!(
+            "mcp_roundtrip: prompts={} probes={} calls={} non_empty={} p50={:.1}ms p95={:.1}ms max={:.1}ms (budget < 100 / < 300)",
+            corpus.prompts, probes.len(), calls, non_empty, d.p50, d.p95, d.max
+        );
+        assert!(non_empty > calls / 2, "most probes should render a block ({non_empty}/{calls})");
+    }
+
     /// Write today's results file for the synthetic corpus (and print the
     /// numbers the baseline is taken from).
     #[test]

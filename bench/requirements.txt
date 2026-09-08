@@ -1,0 +1,4 @@
+# Keyed runs only. The --stub path needs nothing beyond Python 3.11+.
+huggingface_hub==0.36.0      # bench/longmemeval/fetch.py downloads the dataset
+mem0ai==1.0.5                # bench/mem0 (Mem0 OSS v3 line)
+graphiti-core[falkordb]==0.24.3   # bench/graphiti (+ FalkorDB from docker-compose.yml)

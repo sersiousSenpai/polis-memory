@@ -1,0 +1,17 @@
+# FalkorDB for the Graphiti runner (plan §6.2 item 3). Start with
+#   docker compose -f bench/graphiti/docker-compose.yml up -d
+# and point the runner at it (FALKORDB_HOST / FALKORDB_PORT). Stop with `down -v`.
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - falkordb-data:/data
+volumes:
+  falkordb-data:

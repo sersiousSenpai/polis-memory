@@ -1,0 +1,5 @@
+{
+  "llm": { "provider": "openai", "config": { "model": "gpt-5.6-sol", "temperature": 0 } },
+  "embedder": { "provider": "openai", "config": { "model": "text-embedding-3-small" } },
+  "vector_store": { "provider": "qdrant", "config": { "path": "/tmp/mem0-bench-qdrant", "on_disk": true } }
+}
