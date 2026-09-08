@@ -13,14 +13,32 @@ tools arrive with identity (E2).
 claude mcp add polis -- polis mcp
 
 # …or write the config yourself, merging into what is there
-polis mcp install --client claude      # ~/.claude.json  → mcpServers.polis
-polis mcp install --client project     # ./.mcp.json     → mcpServers.polis
-polis mcp install --client codex       # ~/.codex/config.toml → [mcp_servers.polis]
+polis mcp install --client claude      # see the table below for every client
 
 # Streamable HTTP, against a running daemon
 polis serve                            # 127.0.0.1:7677, MCP at /mcp
 claude mcp add --transport http polis http://127.0.0.1:7677/mcp
 ```
+
+`polis mcp install --client <name>` merges an `mcpServers.polis` entry
+(`command = <this binary>`, `args = ["mcp"]`) into the client's own config
+and never overwrites anything else in it; `--path` overrides the file,
+`--polis` the binary. `polis doctor` reports which clients are wired.
+
+| `--client` | File it edits | Shape |
+|---|---|---|
+| `claude` | `~/.claude.json` | `mcpServers.polis` (JSON) |
+| `project` | `./.mcp.json` (cwd) | `mcpServers.polis` — any client that reads a project file |
+| `codex` | `~/.codex/config.toml` | `[mcp_servers.polis]` (TOML; added only when absent) |
+| `cursor` | `~/.cursor/mcp.json` | `mcpServers.polis` |
+| `windsurf` | `~/.codeium/windsurf/mcp_config.json` | `mcpServers.polis` |
+| `claude-desktop` | macOS `~/Library/Application Support/Claude/claude_desktop_config.json` · Windows `%APPDATA%\Claude\claude_desktop_config.json` · Linux `$XDG_CONFIG_HOME/Claude/claude_desktop_config.json` | `mcpServers.polis` |
+
+The registry manifest for the MCP server registry is `server.json` at the
+repository root (id `io.github.sersiousSenpai/polis-memory`; a `cargo`
+package for the binary and an `oci` package for the org-node image),
+validated against the registry's schema in CI; publishing it is one of the
+outward steps in `docs/distribution.md`.
 
 `polis mcp` picks its backend once at start: `--remote URL` (or
 `POLIS_REMOTE`) forces a daemon; otherwise a live `serve.json` under
