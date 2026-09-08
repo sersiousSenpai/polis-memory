@@ -154,27 +154,19 @@ pub fn cosine(a: &QVec, b: &QVec) -> f32 {
     dot_i8(&a.bytes, &b.bytes) as f32 * a.scale * b.scale
 }
 
-/// The int8 dot product the brute-force scan spends its time in.
-///
-/// Two bodies, one answer: on aarch64 the NEON path multiplies sixteen
-/// lanes at a time (`vmull_s8` → `vpadalq_s16` into four i32 accumulators;
-/// NEON is baseline on that architecture, so there is no runtime
-/// detection), everywhere else an eight-lane unrolled loop that LLVM's
-/// autovectorizer turns into SSE2/AVX2 on x86_64. Lengths that are not a
-/// multiple of the lane width finish in scalar. A test pins the two against
-/// the plain scalar sum on every length from 0 to 1,100 — the C2 session
-/// measured the NEON path at 100k chunks in `docs/bench.md`.
+/// The int8 dot product the brute-force scan spends its time in: an
+/// eight-lane unrolled loop with i32 accumulators, the shape LLVM's
+/// autovectorizer turns into NEON / SSE / AVX2 on its own. Session C2
+/// measured a hand-written NEON body (`vmull_s8` → `vpadalq_s16`) against
+/// this one at 100k × 256 on an M-series laptop: 10.1 ns per dot versus
+/// 8.9 — the intrinsics bought nothing the compiler was not already doing,
+/// so the `unsafe` path was removed rather than kept for its name. Lengths
+/// that are not a multiple of eight finish in scalar; a test pins the
+/// result equal to the plain scalar sum on every length from 0 to 1,100.
 #[inline]
 pub fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
     debug_assert_eq!(a.len(), b.len());
-    #[cfg(target_arch = "aarch64")]
-    {
-        dot_i8_neon(a, b)
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        dot_i8_portable(a, b)
-    }
+    dot_i8_portable(a, b)
 }
 
 /// The lane-unrolled portable body (the autovectorizer's shape).
@@ -193,35 +185,6 @@ pub fn dot_i8_portable(a: &[i8], b: &[i8]) -> i32 {
     let mut sum: i32 = acc.iter().sum();
     for (x, y) in ra.iter().zip(rb) {
         sum += *x as i32 * *y as i32;
-    }
-    sum
-}
-
-#[cfg(target_arch = "aarch64")]
-#[inline]
-fn dot_i8_neon(a: &[i8], b: &[i8]) -> i32 {
-    use std::arch::aarch64::*;
-    let n = a.len().min(b.len());
-    let mut i = 0usize;
-    // SAFETY: NEON is a baseline feature of every aarch64 target; every
-    // load reads sixteen bytes that `i + 16 <= n` proves are inside both
-    // slices; the intrinsics have no other preconditions.
-    let mut sum = unsafe {
-        let mut acc = vdupq_n_s32(0);
-        while i + 16 <= n {
-            let va = vld1q_s8(a.as_ptr().add(i));
-            let vb = vld1q_s8(b.as_ptr().add(i));
-            let lo = vmull_s8(vget_low_s8(va), vget_low_s8(vb));
-            let hi = vmull_high_s8(va, vb);
-            acc = vpadalq_s16(acc, lo);
-            acc = vpadalq_s16(acc, hi);
-            i += 16;
-        }
-        vaddvq_s32(acc)
-    };
-    while i < n {
-        sum += a[i] as i32 * b[i] as i32;
-        i += 1;
     }
     sum
 }

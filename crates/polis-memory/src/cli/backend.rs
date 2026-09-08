@@ -170,6 +170,22 @@ pub fn embedder_named(home: &Home, name: &str) -> Result<Arc<dyn Embedder>, Stri
     polis_embed::select(choice, Some(&home.models_dir()), true)?.ok_or_else(|| format!("provider `{name}` is not available on this machine"))
 }
 
+/// Fetch the default portable model once (C2) so `Auto` finds it: called by
+/// `init` and `serve` — explicit actions, never a read — and skipped under
+/// `POLIS_NO_NETWORK=1`. Returns what happened, for the log.
+pub fn ensure_default_model(home: &Home) -> String {
+    let no_network = std::env::var("POLIS_NO_NETWORK").map(|v| v == "1").unwrap_or(false);
+    match polis_embed::select(polis_embed::ProviderChoice::Model2Vec, Some(&home.models_dir()), !no_network) {
+        Ok(Some(e)) => format!("{} ready", e.model_id()),
+        Ok(None) => "absent".into(),
+        Err(e) if no_network => format!("skipped (POLIS_NO_NETWORK): {e}"),
+        Err(e) => {
+            tracing::warn!(error = %e, "the default embedding model could not be fetched");
+            format!("unavailable: {e}")
+        }
+    }
+}
+
 /// Ask the OS for Apple's contextual embedding assets once (C2): a real
 /// action with a network cost, so only `init` and `serve` call it, and
 /// never under `POLIS_NO_NETWORK=1`. Returns what was done, for the log.

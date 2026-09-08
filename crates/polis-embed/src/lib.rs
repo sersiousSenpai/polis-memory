@@ -143,8 +143,13 @@ impl dyn Embedder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderChoice {
     /// The platform default, decided by measurement (docs/bench.md
-    /// "Embedding providers"): on macOS the on-device Apple model; elsewhere
-    /// Model2Vec when its files are present (never a download on this path).
+    /// "Embedding providers", 2026-09-08): Model2Vec when its files are
+    /// present — on the real corpus it beat the Apple sentence model on
+    /// semantic Recall@10 (0.96 vs 0.60), tied the fused pack, embedded a
+    /// thousand times faster and was the first provider to clear the
+    /// filing precision floor — else Apple's on-device model on macOS, else
+    /// none. Never a download on this path (`polis init` / `serve` fetch
+    /// the files; a read never does).
     Auto,
     Apple,
     Model2Vec,
@@ -235,9 +240,6 @@ pub fn select(
             }
         }
         ProviderChoice::Auto => {
-            if let Some(p) = provider() {
-                return Ok(Some(p));
-            }
             #[cfg(feature = "model2vec")]
             {
                 if let Some(root) = models_root {
@@ -245,8 +247,14 @@ pub fn select(
                         return Ok(Some(Arc::new(m)));
                     }
                 }
+                #[cfg(feature = "bundled-model")]
+                {
+                    if let Ok(m) = model2vec::Model2Vec::bundled() {
+                        return Ok(Some(Arc::new(m)));
+                    }
+                }
             }
-            Ok(None)
+            Ok(provider())
         }
     }
 }
@@ -266,6 +274,25 @@ fn build_provider() -> Option<Arc<dyn Embedder>> {
 #[cfg(not(all(target_os = "macos", feature = "apple")))]
 fn build_provider() -> Option<Arc<dyn Embedder>> {
     None
+}
+
+/// One specific Apple provider, for a measurement that wants to name it
+/// (`polis_embed::select(Apple)` takes the best available). `None` off
+/// macOS, without the feature, or when that model is not loadable.
+pub fn apple_named(kind: ProviderKind) -> Option<Arc<dyn Embedder>> {
+    #[cfg(all(target_os = "macos", feature = "apple"))]
+    {
+        match kind {
+            ProviderKind::AppleContextual => apple::ContextualEmbedder::available().map(|e| Arc::new(e) as Arc<dyn Embedder>),
+            ProviderKind::AppleSentence => apple::SentenceEmbedder::available().map(|e| Arc::new(e) as Arc<dyn Embedder>),
+            _ => None,
+        }
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple")))]
+    {
+        let _ = kind;
+        None
+    }
 }
 
 /// Ask the OS for the Apple contextual model's assets (macOS + `apple`);
@@ -553,17 +580,29 @@ pub fn semantic_search(
              maintenance cost (see BRUTE_FORCE_CEILING_CHUNKS)"
         );
     }
-    let mut best: std::collections::HashMap<(String, i64), f32> = std::collections::HashMap::new();
+    // Collapse chunks to their target by MAX. The target kinds are a
+    // handful of short strings, so they are interned to a small index once
+    // per row rather than cloned into every map key (C2: at 100k rows that
+    // clone was most of the scan).
+    let mut kinds: Vec<&str> = Vec::with_capacity(4);
+    let mut best: std::collections::HashMap<(u8, i64), f32> = std::collections::HashMap::with_capacity(vectors.rows.len());
     for (_, kind, id, v) in &vectors.rows {
         let s = cosine(&q, v);
-        let e = best.entry((kind.clone(), *id)).or_insert(f32::MIN);
+        let k = match kinds.iter().position(|k| k == kind) {
+            Some(i) => i as u8,
+            None => {
+                kinds.push(kind.as_str());
+                (kinds.len() - 1) as u8
+            }
+        };
+        let e = best.entry((k, *id)).or_insert(f32::MIN);
         if s > *e {
             *e = s;
         }
     }
     let mut hits: Vec<SemanticHit> = best
         .into_iter()
-        .map(|((target_kind, target_id), score)| SemanticHit { target_kind, target_id, score })
+        .map(|((k, target_id), score)| SemanticHit { target_kind: kinds[k as usize].to_string(), target_id, score })
         .collect();
     // Deterministic order: score desc, then target for ties.
     hits.sort_by(|a, b| {

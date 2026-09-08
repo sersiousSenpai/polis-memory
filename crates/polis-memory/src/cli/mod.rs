@@ -407,6 +407,7 @@ fn run(cli: Cli) -> Result<(), String> {
             let login = crate::identity::login_name();
             let report = crate::identity::adopt(&store, &identity, &login)?;
             let _ = std::fs::create_dir_all(home.models_dir());
+            tracing::info!(model = %backend::ensure_default_model(&home), "default embedding model");
             tracing::info!(assets = backend::request_apple_assets_if_allowed(), "apple contextual embedding assets");
             emit(
                 json,
