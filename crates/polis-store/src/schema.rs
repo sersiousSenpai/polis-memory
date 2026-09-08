@@ -648,7 +648,7 @@ impl Migration {
             // The rows a stamp still has to visit — a partial index so the
             // post-write sweep is O(new rows), not a table scan.
             let _ = conn.execute(
-                &format!("CREATE INDEX IF NOT EXISTS idx_{table}_unscoped ON {table} (rowid) WHERE principal_id IS NULL"),
+                &format!("CREATE INDEX IF NOT EXISTS idx_{table}_unscoped ON {table} (principal_id) WHERE principal_id IS NULL"),
                 [],
             );
         }
