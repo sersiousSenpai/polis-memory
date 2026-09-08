@@ -238,7 +238,11 @@ pub fn item_vector(store: &PolisStore, embedder: &dyn Embedder, kind: &str, seq:
 /// What one organize run's filing tier did.
 #[derive(Debug, Default, Clone)]
 pub struct FilingOutcome {
+    /// Fileable items in the delta (prompts, pages, notes, decisions).
     pub considered: usize,
+    /// Delta items the tier does not file (revisions, session links, the
+    /// organizer's own events) — the consolidation classifier's.
+    pub skipped: usize,
     pub filed_by_centroid: usize,
     pub filed_by_model: usize,
     pub inboxed: usize,
@@ -274,6 +278,9 @@ impl FilingOutcome {
         }
         if self.no_vector > 0 {
             parts.push(format!("{} without a vector", self.no_vector));
+        }
+        if self.skipped > 0 {
+            parts.push(format!("{} bookkeeping event(s) left to the consolidation pass", self.skipped));
         }
         parts.join(", ")
     }
@@ -358,7 +365,7 @@ pub struct Pending {
 pub async fn file_delta(polis: &Polis<'_>, run_id: i64, tree: &[ClassNode], delta: &[LakeItem]) -> Result<FilingOutcome, String> {
     let store = polis.store;
     let has_model = polis.agent.is_some();
-    let mut out = FilingOutcome { considered: delta.len(), consolidation_due: consolidation_due(store, has_model), ..Default::default() };
+    let mut out = FilingOutcome { consolidation_due: consolidation_due(store, has_model), ..Default::default() };
     let th = Thresholds::load(store);
     out.thresholds = Some(th);
     let roots: HashSet<String> = tree.iter().filter(|n| n.parent_id.is_none()).map(|n| n.id.clone()).collect();
@@ -406,6 +413,7 @@ pub async fn file_delta(polis: &Polis<'_>, run_id: i64, tree: &[ClassNode], delt
             skipped.push(item.clone());
             continue;
         }
+        out.considered += 1;
         let kind = target_kind(item);
         let root = resolve_root(item, &roots);
         let under: Vec<String> = nodes_under(tree, &root);
@@ -527,6 +535,7 @@ pub async fn file_delta(polis: &Polis<'_>, run_id: i64, tree: &[ClassNode], delt
         }
     }
 
+    out.skipped = skipped.len();
     // Everything staged above becomes live now (the same acceptance the
     // classifier path uses), authored by the tier that filed it.
     let accepted = store.accept_all_pending(ROUTER_ACTOR).map_err(|e| e.to_string())?;
@@ -958,6 +967,143 @@ mod tests {
         Thresholds { t1: 0.6, margin: 0.12 }.save(&store).unwrap();
         let t = Thresholds::load(&store);
         assert!((t.t1 - 0.6).abs() < 1e-3 && (t.margin - 0.12).abs() < 1e-3);
+    }
+
+    // --- the POLIS_REAL_DB instruments (docs/filing.md; `--features eval`) --
+    #[cfg(feature = "eval")]
+    mod instruments {
+        use super::super::*;
+        use polis_core::host::NoHost;
+        use polis_llm::NoopSink;
+
+        fn real_copy() -> Option<(PolisStore, std::path::PathBuf)> {
+            let src = std::env::var("POLIS_REAL_DB").ok()?;
+            let dst = std::env::temp_dir().join(format!("polis-c1-{}-{}.db", std::process::id(), polis_core::ledger::now_millis()));
+            std::fs::copy(&src, &dst).expect("copy the real DB (never open the original)");
+            let store = PolisStore::open(&dst).expect("open the copy");
+            Some((store, dst))
+        }
+
+        fn results_dir() -> std::path::PathBuf {
+            let d = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/results");
+            std::fs::create_dir_all(&d).ok();
+            d
+        }
+
+        fn main_model(store: &PolisStore) -> Option<String> {
+            let conn = store.conn();
+            conn.query_row("SELECT model FROM embeddings GROUP BY model ORDER BY COUNT(*) DESC LIMIT 1", [], |r| r.get(0)).ok()
+        }
+
+        /// An embedder that only ever serves STORED vectors: the model id of
+        /// the real index, and an error for anything new — so the instrument
+        /// measures the corpus as it is, on any machine.
+        struct StoredOnly(String);
+        impl Embedder for StoredOnly {
+            fn model_id(&self) -> String {
+                self.0.clone()
+            }
+            fn dim(&self) -> usize {
+                polis_core::vec::DIM
+            }
+            fn embed(&self, _: &[String]) -> Result<Vec<Vec<f32>>, String> {
+                Err("stored vectors only".into())
+            }
+        }
+
+        /// Leave-one-out over the real links: picks (T1, M) at precision
+        /// ≥ 0.90 with the most coverage and reports the filing consistency.
+        /// `POLIS_REAL_DB=<copy> cargo test -p polis-memory --features eval -- --ignored real_db_filing_calibration --nocapture`
+        #[test]
+        #[ignore]
+        fn real_db_filing_calibration() {
+            let Some((store, path)) = real_copy() else { eprintln!("POLIS_REAL_DB unset — skipped"); return };
+            let model = main_model(&store).expect("the real index names a model");
+            let tree = store.list_class_nodes().unwrap();
+            let report = leave_one_out(&store, &model, &tree).unwrap();
+            let chosen = report.chosen.clone();
+            eprintln!(
+                "real_db_filing_calibration: model={} population={} coverable={} consistency={:.3} elapsed={}ms chosen={:?}",
+                report.model, report.population, report.coverable, report.consistency, report.elapsed_ms, chosen
+            );
+            for g in report.grid.iter().filter(|g| (g.margin - 0.10).abs() < 1e-6) {
+                eprintln!("  t1={:.2} m=0.10 coverage={:.3} precision={:.3} ({}/{})", g.t1, g.coverage, g.precision, g.correct, g.filed);
+            }
+            if let Some(c) = &chosen {
+                Thresholds { t1: c.t1, margin: c.margin }.save(&store).unwrap();
+            }
+            let out = results_dir().join(format!("filing-{}.json", chrono_date()));
+            let json = serde_json::json!({
+                "instrument": "real_db_filing_calibration",
+                "model": report.model,
+                "population": report.population,
+                "coverable": report.coverable,
+                "consistency_top1": report.consistency,
+                "chosen": chosen,
+                "grid": report.grid,
+                "elapsed_ms": report.elapsed_ms,
+            });
+            std::fs::write(&out, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+            eprintln!("wrote {}", out.display());
+            let _ = std::fs::remove_file(path);
+        }
+
+        /// Organize with NO model over the real copy, ten windows of the
+        /// newest items, timing each run: the centroid + inbox path's p50/p90.
+        /// `POLIS_REAL_DB=<copy> cargo test -p polis-memory --features eval -- --ignored real_db_organize_no_model --nocapture`
+        #[test]
+        #[ignore]
+        fn real_db_organize_no_model() {
+            let Some((store, path)) = real_copy() else { eprintln!("POLIS_REAL_DB unset — skipped"); return };
+            let model = main_model(&store).expect("the real index names a model");
+            let store = Arc::new(store);
+            let handle = crate::PolisHandle::new(store.clone(), None, Arc::new(NoHost), Arc::new(NoopSink)).with_embedder(Some(Arc::new(StoredOnly(model))));
+            let max_seq = store.max_ledger_seq().unwrap();
+            let window: i64 = 150;
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let mut wall: Vec<u128> = Vec::new();
+            let mut summaries = Vec::new();
+            for k in (1..=10).rev() {
+                // Move the cursor back so the next run sees one window of items.
+                let to = max_seq - window * k;
+                let id = store.insert_class_run(0, to).unwrap();
+                store.finish_class_run_with(id, &polis_core::types::ClassRunFinish { status: "done".into(), summary: "cursor".into(), ..Default::default() }).unwrap();
+                let started = std::time::Instant::now();
+                let out = rt.block_on(crate::organize::organize_once(&handle.view())).unwrap();
+                wall.push(started.elapsed().as_millis());
+                summaries.push(out.summary);
+            }
+            wall.sort();
+            let p = |q: f64| wall[((wall.len() as f64 - 1.0) * q).round() as usize];
+            eprintln!("real_db_organize_no_model: runs={} p50={}ms p90={}ms max={}ms", wall.len(), p(0.5), p(0.9), wall.last().unwrap());
+            for s in &summaries {
+                eprintln!("  {s}");
+            }
+            let out = results_dir().join(format!("filing-organize-{}.json", chrono_date()));
+            std::fs::write(&out, serde_json::to_string_pretty(&serde_json::json!({"instrument":"real_db_organize_no_model","window":window,"wall_ms":wall,"p50_ms":p(0.5),"p90_ms":p(0.9),"summaries":summaries})).unwrap()).unwrap();
+            let _ = std::fs::remove_file(path);
+        }
+
+        fn chrono_date() -> String {
+            // YYYY-MM-DD from the epoch, no chrono dependency.
+            let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            let days = secs / 86_400;
+            let (mut y, mut m, mut d) = (1970i64, 1i64, 1i64);
+            let mut left = days;
+            loop {
+                let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+                let ylen = if leap { 366 } else { 365 };
+                if left < ylen { break; }
+                left -= ylen; y += 1;
+            }
+            let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            let mlens = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+            for (i, ml) in mlens.iter().enumerate() {
+                if left < *ml { m = i as i64 + 1; d = left + 1; break; }
+                left -= ml;
+            }
+            format!("{y:04}-{m:02}-{d:02}")
+        }
     }
 
     // --- end to end: the tiers over a real in-memory store -----------------

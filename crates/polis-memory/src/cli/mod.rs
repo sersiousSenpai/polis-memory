@@ -125,6 +125,10 @@ enum Cmd {
         #[arg(long)]
         project: Option<String>,
     },
+    /// One organize pass now: file the new lake items — by class centroid,
+    /// then a small model batch for the ambiguous ones (or `~inbox` with no
+    /// model), and every fifth run the consolidation classifier.
+    Organize,
     /// Counts over the record.
     Stats,
     /// Re-walk the hash chain.
@@ -407,6 +411,19 @@ fn run(cli: Cli) -> Result<(), String> {
             let api = open(&home, cli.remote)?;
             let nodes = api.tree(&TreeRequest { root, project, scope: Scope::default() }).map_err(|e| e.to_string())?;
             emit(json, &serde_json::json!({ "nodes": nodes }), || render::tree(&nodes));
+            Ok(())
+        }
+        Cmd::Organize => {
+            let api = open(&home, cli.remote)?;
+            let rt = runtime()?;
+            let r = rt.block_on(api.organize(&Scope::default())).map_err(|e| e.to_string())?;
+            emit(json, &r, || {
+                if r.ran {
+                    format!("organized · {} · seq {}..{}", r.summary, r.seq_from, r.seq_to)
+                } else {
+                    format!("nothing to organize · {}", r.summary)
+                }
+            });
             Ok(())
         }
         Cmd::Stats => {

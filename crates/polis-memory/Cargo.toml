@@ -18,6 +18,12 @@ apple = ["polis-embed/apple"]
 # transports and their runtime into the graph (the documented feature-
 # unification hazard; Redline's `polis_deps_stay_lean` pins it off).
 cli = [
+    # C1: the HTTP model backends (an API key skips the 5–10 s CLI startup)
+    # and the on-device embedder the deterministic filer needs. A host never
+    # enables `cli`, so its graph is unchanged (`polis_deps_stay_lean`).
+    "polis-llm/anthropic",
+    "polis-llm/openai-compat",
+    "apple",
     "dep:clap",
     "dep:polis-mcp",
     "polis-mcp/remote",
