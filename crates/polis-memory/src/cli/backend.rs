@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use polis_core::host::NoHost;
 use polis_core::MemoryApi;
-use polis_llm::NoopSink;
+use polis_embed::Embedder;
+use polis_llm::{Agent, NoopSink};
 use polis_mcp::remote::RemoteApi;
 use polis_store::PolisStore;
 
@@ -84,10 +85,86 @@ pub fn open(home: &Home, backend: &Backend) -> Result<Arc<dyn MemoryApi>, String
                 }
                 None => None,
             };
-            Ok(Arc::new(PolisHandle::new(store, None, Arc::new(NoHost), Arc::new(NoopSink)).with_identity(identity)))
+            Ok(Arc::new(
+                PolisHandle::new(store, agent_for(), Arc::new(NoHost), Arc::new(NoopSink)).with_identity(identity).with_embedder(embedder_for()),
+            ))
         }
         Backend::Remote { base } => Ok(Arc::new(RemoteApi::new(base.clone(), home.read_token()))),
     }
+}
+
+/// The model a standalone `polis` speaks to (plan §4.7, C1's transport
+/// default), decided from the environment, in this order:
+///
+/// 1. `POLIS_NO_NETWORK=1` → never an HTTP backend (the CLI backends only).
+/// 2. `ANTHROPIC_API_KEY` → the Anthropic API (`POLIS_MODEL` overrides the
+///    model): no process spawn, no 5–10 s CLI startup per pass.
+/// 3. `OPENAI_BASE_URL` + `OPENAI_API_KEY` (+ `OPENAI_MODEL`) → an
+///    OpenAI-compatible endpoint.
+/// 4. `claude` on PATH → the Claude Code CLI; else `codex` → the Codex CLI.
+/// 5. Nothing → `None`: the no-model state. Capture, retrieval and filing
+///    still work (R12); ambiguous items wait in `~inbox`.
+pub fn agent_for() -> Option<Arc<dyn Agent>> {
+    let no_network = std::env::var("POLIS_NO_NETWORK").map(|v| v == "1").unwrap_or(false);
+    let nonempty = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    if !no_network {
+        if let Some(api) = polis_llm::anthropic::AnthropicApi::from_env() {
+            let api = match nonempty("POLIS_MODEL") {
+                Some(m) => api.model(m),
+                None => api,
+            };
+            tracing::info!(backend = "anthropic", "model transport");
+            return Some(Arc::new(api));
+        }
+        if let (Some(base), Some(key)) = (nonempty("OPENAI_BASE_URL"), nonempty("OPENAI_API_KEY")) {
+            let model = nonempty("OPENAI_MODEL").or_else(|| nonempty("POLIS_MODEL")).unwrap_or_else(|| "gpt-5".to_string());
+            tracing::info!(backend = "openai-compat", %base, %model, "model transport");
+            return Some(Arc::new(polis_llm::openai_compat::OpenAiCompat::new(base, model).api_key(key)));
+        }
+    }
+    if let Some(bin) = find_on_path("claude") {
+        tracing::info!(backend = "claude-cli", bin = %bin.display(), "model transport");
+        return Some(Arc::new(polis_llm::claude_cli::ClaudeCli::new(bin.to_string_lossy().to_string())));
+    }
+    if let Some(bin) = find_on_path("codex") {
+        tracing::info!(backend = "codex-cli", bin = %bin.display(), "model transport");
+        return Some(Arc::new(polis_llm::codex_cli::CodexCli::new(bin.to_string_lossy().to_string())));
+    }
+    tracing::info!(backend = "none", "no model configured (R12: capture, retrieval and filing still work)");
+    None
+}
+
+/// The embedder the deterministic filer and the semantic arm use: the
+/// on-device provider when this platform has one (Apple's, on macOS), else
+/// `None` — the arm is absent and every ambiguous item waits in `~inbox`.
+/// Program C2 adds the portable providers.
+pub fn embedder_for() -> Option<Arc<dyn Embedder>> {
+    polis_embed::provider()
+}
+
+/// `which`, without a dependency: the first executable named `name` on PATH.
+pub fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if candidate.is_file() && candidate.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false) {
+                return Some(candidate);
+            }
+        }
+        #[cfg(windows)]
+        {
+            for ext in ["exe", "cmd", "bat"] {
+                let c = candidate.with_extension(ext);
+                if c.is_file() {
+                    return Some(c);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

@@ -52,6 +52,8 @@ pub const MEMORY_TABLES: &[&str] = &[
     "embeddings",
     // B2: the per-op journal (docs/ledger.md "Reversibility")
     "class_run_ops",
+    // C1: the filing cache (docs/filing.md)
+    "class_centroids",
     // E2: identity
     "principals",
     "principal_aliases",
@@ -799,6 +801,23 @@ impl Migration {
             pre = crate::lexical::PREFIX_SIZES,
         ))?;
         // ---- end E3 ------------------------------------------------------------
+        // ---- C1 (docs/filing.md "Centroids") ------------------------------
+        // One running mean per live class node and embedding model, from its
+        // members' chunk-0 vectors: the deterministic filer's index. A cache
+        // over class_links × embeddings — `rebuild_centroids` recomputes it
+        // whole; a node with no members has no row.
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS class_centroids (
+                node_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                dim INTEGER NOT NULL,
+                n INTEGER NOT NULL,
+                sum_vec BLOB NOT NULL,          -- f32 little-endian, the SUM of unit vectors
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (node_id, model)
+            );",
+        );
+        // ---- end C1 --------------------------------------------------------
         Ok(())
     }
 

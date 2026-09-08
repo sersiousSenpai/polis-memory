@@ -140,6 +140,10 @@ pub fn run(home: &Home) -> Doctor {
             }
             None => match PolisStore::open(&db) {
                 Ok(store) => {
+                    // C1: the embedder this process would file with (the
+                    // daemon path reads it from health; here it is a fact
+                    // of the platform).
+                    d.embedder = Some(polis_embed::provider_kind().as_str().to_string());
                     match store.verify_ledger_chain() {
                         Ok(v) => {
                             d.chain_ok = Some(v.ok);
@@ -233,7 +237,11 @@ pub fn render(d: &Doctor) -> String {
     if let Some(n) = d.total_prompts {
         out.push_str(&format!("prompts     {}\n", n));
     }
-    out.push_str(&format!("model       {} · embedder {}\n", d.model.as_deref().unwrap_or("none (capture, retrieval and filing still work)"), d.embedder.as_deref().unwrap_or("absent")));
+    out.push_str(&format!(
+        "model       {} · embedder {}\n",
+        d.model.as_deref().unwrap_or("no_model (a fact, not a fault: capture, retrieval and filing work — ambiguous items wait in ~inbox)"),
+        d.embedder.as_deref().unwrap_or("absent")
+    ));
     out.push_str(&format!("hook        {}{}{}\n", if d.hook_installed { "installed" } else { "not installed (`polis hook install`)" }, if d.hook_installed && !d.hook_current { " · STALE — run `polis hook install` again" } else { "" }, d.hook_settings.as_deref().map(|s| format!(" · {s}")).unwrap_or_default()));
     out.push_str(&format!("clients     claude {} · codex {} · project {}\n", yn(d.client_claude), yn(d.client_codex), yn(d.client_project)));
     out.push_str(&format!("binaries    {}\n", d.binaries.iter().map(|(n, b)| format!("{n} {}", if *b { "found" } else { "absent" })).collect::<Vec<_>>().join(" · ")));

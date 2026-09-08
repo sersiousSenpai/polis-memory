@@ -794,6 +794,11 @@ pub async fn step(
     match crate::latency::timed_async("gardener.organize", crate::organize::organize_once(polis)).await {
         Ok(o) if o.ran => {
             out.organized = true;
+            // C1: the filing tier organizes without a model; the run still
+            // counts as a no-model run (`catalog_health`'s share, §6.3).
+            if polis.agent.is_none() {
+                out.no_model = true;
+            }
             tracing::info!(summary = %o.summary, "gardener organized");
         }
         Ok(_) => {}
@@ -898,7 +903,10 @@ mod step_tests {
     async fn the_gates_hold_and_a_run_without_a_model_reports_no_model() {
         let store = PolisStore::open_in_memory().unwrap();
         let polis = Polis::new(&store, None, &NoHost, &NoopSink);
-        let clock = FakeClock(Mutex::new(1_000_000));
+        // Real now, not an epoch constant: since C1 the run itself appends
+        // ledger events (the filings) stamped with wall-clock time, and the
+        // idle gate compares them with this clock.
+        let clock = FakeClock(Mutex::new(polis_core::ledger::now_millis()));
         let bus = Bus(Mutex::new(Vec::new()));
         let cfg = GardenerConfig::default();
         let mut st = GardenerState::default();
@@ -917,7 +925,9 @@ mod step_tests {
         let ran = step(&polis, &mut st, &Idle(0), &clock, &cfg, &bus).await;
         assert_eq!(ran.gate, Gate::Ran);
         assert!(ran.no_model, "no agent → the model passes report no_model, never an error");
-        assert!(!ran.organized);
+        // C1: organize itself no longer needs a model — the deterministic
+        // filing tier ran and parked the new items under `~inbox`.
+        assert!(ran.organized, "the filing tier organizes without a model (R12)");
         assert_eq!(ran.compacted, 0);
         assert!(bus.0.lock().unwrap().contains(&Change::Catalog), "a run announces itself");
         assert!(store.verify_ledger_chain().unwrap().ok);

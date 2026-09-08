@@ -123,7 +123,12 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
     let db = home.db_path();
     let store = Arc::new(PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?);
     let activity = Arc::new(Activity::default());
-    let handle = Arc::new(PolisHandle::new(store.clone(), None, Arc::new(NoHost), Arc::new(NoopSink)));
+    // C1: the model transport from the environment (an API key, else a
+    // CLI on PATH, else none) and this platform's on-device embedder.
+    let handle = Arc::new(
+        PolisHandle::new(store.clone(), super::backend::agent_for(), Arc::new(NoHost), Arc::new(NoopSink))
+            .with_embedder(super::backend::embedder_for()),
+    );
     let api: Arc<dyn MemoryApi> = handle.clone();
     let state = PolisState { api: api.clone(), ingest: activity.clone(), events: Arc::new(LogEvents) };
 

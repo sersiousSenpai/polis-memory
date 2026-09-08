@@ -1,0 +1,30 @@
+{
+  "instrument": "real_db_organize_no_model",
+  "p50_ms": 581,
+  "p90_ms": 675,
+  "summaries": [
+    "330 item(s), 314 to ~inbox, 55 without a vector, 70 bookkeeping event(s) left to the consolidation pass",
+    "339 item(s), 1 filed by centroid, 317 to ~inbox, 47 without a vector, 61 bookkeeping event(s) left to the consolidation pass",
+    "353 item(s), 8 filed by centroid, 332 to ~inbox, 43 without a vector, 47 bookkeeping event(s) left to the consolidation pass",
+    "336 item(s), 1 filed by centroid, 324 to ~inbox, 35 without a vector, 64 bookkeeping event(s) left to the consolidation pass",
+    "310 item(s), 6 filed by centroid, 256 to ~inbox, 27 without a vector, 90 bookkeeping event(s) left to the consolidation pass",
+    "313 item(s), 6 filed by centroid, 257 to ~inbox, 26 without a vector, 87 bookkeeping event(s) left to the consolidation pass",
+    "352 item(s), 1 filed by centroid, 319 to ~inbox, 25 without a vector, 48 bookkeeping event(s) left to the consolidation pass",
+    "293 item(s), 3 filed by centroid, 272 to ~inbox, 40 without a vector, 107 bookkeeping event(s) left to the consolidation pass",
+    "313 item(s), 6 filed by centroid, 274 to ~inbox, 47 without a vector, 87 bookkeeping event(s) left to the consolidation pass",
+    "233 item(s), 209 to ~inbox, 43 without a vector, 56 bookkeeping event(s) left to the consolidation pass"
+  ],
+  "wall_ms": [
+    441,
+    511,
+    538,
+    555,
+    570,
+    581,
+    627,
+    659,
+    675,
+    687
+  ],
+  "window": 400
+}

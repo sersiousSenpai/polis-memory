@@ -1,0 +1,28 @@
+{
+  "best": {
+    "correct": 425,
+    "coverage": 0.3281853199005127,
+    "filed": 425,
+    "margin": 0.1599999964237213,
+    "precision": 1.0,
+    "t1": 0.6500000357627869
+  },
+  "chosen": {
+    "correct": 900,
+    "coverage": 0.760617733001709,
+    "filed": 985,
+    "margin": 0.019999999552965164,
+    "precision": 0.913705587387085,
+    "t1": 0.45000001788139343
+  },
+  "consistency_top1": 0.8032786846160889,
+  "corpus": {
+    "prompts": 2000,
+    "seed": 11
+  },
+  "coverable": 1281,
+  "embedder": "test-bag-of-words-64",
+  "instrument": "synthetic_filing_calibration",
+  "population": 1295,
+  "precision_floor": 0.8999999761581421
+}

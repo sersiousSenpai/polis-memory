@@ -34,6 +34,9 @@ pub const CORPUS_ROLE_VERSION_KEY: &str = "corpus_role_version";
 /// "4" since Session E3 (sharing: the `foreign_*` tables, trust,
 /// subscriptions, acks) — the same "4" B3's and C1's blocks land on; every
 /// additive block is idempotent, so the merged block runs once.
+/// "4" since Session C1 (`class_centroids`, the filing cache) — B3 and E3
+/// land on the same "4"; every additive block is idempotent, so the merged
+/// block runs once.
 pub const STORE_SCHEMA_VERSION: &str = "4";
 
 /// The host's legacy `app_settings` keys, read once at adoption.

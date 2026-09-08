@@ -462,6 +462,46 @@ pub async fn organize_once(polis: &Polis<'_>) -> Result<OrganizeOutcome, String>
         });
     }
 
+    // --- C1: centroid-first filing (docs/filing.md) -----------------------
+    // The deterministic tier files what the class centroids can, sends the
+    // ambiguous remainder to a small candidates-only model batch (or to the
+    // root's `~inbox` when no model is configured), and says whether this
+    // run is one of the consolidation runs. A plain run ends here — the
+    // consolidation classifier below sees only what the tier handed on.
+    let filing = crate::filing::file_delta(polis, run_id, &tree, &delta).await?;
+    if !filing.consolidation_due {
+        let summary = filing.summary();
+        db.finish_class_run_with(
+            run_id,
+            &ClassRunFinish {
+                status: "done".into(),
+                summary: summary.clone(),
+                duration_ms: Some(started.elapsed().as_millis() as i64),
+                items: Some(filing.considered as i64),
+                ops: Some((filing.filed_by_centroid + filing.filed_by_model + filing.inboxed + filing.refiled_from_inbox) as i64),
+                model: model.clone(),
+                outcome: Some("done".into()),
+                mode: Some(polis_store::runs::MODE_ORGANIZE.into()),
+                llm_calls: Some(filing.llm_calls as i64),
+                prompt_bytes: Some(filing.prompt_bytes as i64),
+                wall_ms: Some(started.elapsed().as_millis() as i64),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(OrganizeOutcome {
+            staged: StageResult { staged_links: (filing.filed_by_centroid + filing.filed_by_model + filing.inboxed) as usize, ..Default::default() },
+            summary,
+            auto_applied: true,
+            seq_from,
+            seq_to,
+            ran: true,
+        });
+    }
+    let delta = filing.leftover;
+    let tree = db.list_class_nodes().map_err(|e| e.to_string())?;
+    // --- end C1 ------------------------------------------------------------
+
     // Temporal + storage facts so the orchestrator judges coldness against the
     // lake's own activity (fed as ground truth, never inferred).
     let direct = db.node_direct_link_activity().map_err(|e| e.to_string())?;

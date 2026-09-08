@@ -78,6 +78,29 @@ jobs:
           ! command -v codex
           ! command -v ollama
       - run: cargo test -p polis-core --locked
+      - name: build the polis binary
+        run: cargo build -p polis-memory --features cli --locked
+      - name: "R12: capture, retrieval and filing with no model (C1)"
+        env:
+          HOME: ${{ runner.temp }}/keyless-home
+          POLIS_HOME: ${{ runner.temp }}/keyless-home/.polis
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME"
+          P=target/debug/polis
+          $P init
+          printf '%s' '{"session_id":"ci","cwd":"/tmp/proj","prompt":"remember we chose sqlite fts5 trigram for grep"}' | $P capture
+          printf '%s' '{"session_id":"ci","cwd":"/tmp/proj","prompt":"the trigram tokenizer keeps grep under 30 ms on sqlite"}' | $P capture
+          $P search sqlite trigram grep | tee search.txt
+          grep -q 'remember we chose sqlite fts5 trigram for grep' search.txt
+          $P organize | tee organize.txt
+          grep -Eq '~inbox|filed by centroid' organize.txt
+          $P tree | tee tree.txt
+          grep -Eq '~inbox|links' tree.txt
+          $P doctor | tee doctor.txt
+          grep -q 'no_model' doctor.txt
+          ! grep -q 'RESTORE AVAILABLE' doctor.txt
+          $P verify
 
   licenses:
     name: licenses (cargo-deny)
