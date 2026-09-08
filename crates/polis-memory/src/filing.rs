@@ -1024,13 +1024,13 @@ mod tests {
         /// An embedder that only ever serves STORED vectors: the model id of
         /// the real index, and an error for anything new — so the instrument
         /// measures the corpus as it is, on any machine.
-        struct StoredOnly(String);
+        struct StoredOnly(String, usize);
         impl Embedder for StoredOnly {
             fn model_id(&self) -> String {
                 self.0.clone()
             }
             fn dim(&self) -> usize {
-                polis_core::vec::DIM
+                self.1
             }
             fn embed(&self, _: &[String]) -> Result<Vec<Vec<f32>>, String> {
                 Err("stored vectors only".into())
@@ -1092,7 +1092,7 @@ mod tests {
             let Some((store, path)) = real_copy() else { eprintln!("POLIS_REAL_DB unset — skipped"); return };
             let model = main_model(&store).expect("the real index names a model");
             let store = Arc::new(store);
-            let handle = crate::PolisHandle::new(store.clone(), None, Arc::new(NoHost), Arc::new(NoopSink)).with_embedder(Some(Arc::new(StoredOnly(model))));
+            let handle = crate::PolisHandle::new(store.clone(), None, Arc::new(NoHost), Arc::new(NoopSink)).with_embedder(Some(Arc::new(StoredOnly(model.clone(), store.embedding_dim(&model).ok().flatten().unwrap_or(0) as usize))));
             let max_seq = store.max_ledger_seq().unwrap();
             // Ten distinct windows of the real record, oldest first: rewind
             // the organizer's cursor on the COPY to `max − 400·k` (the run

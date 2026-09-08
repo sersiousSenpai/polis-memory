@@ -24,9 +24,6 @@ pub const CHUNK_OVERLAP: usize = 150;
 /// across a mean-pooled vector of the whole thing.
 pub const OPENING_CHARS: usize = 400;
 
-/// The dimensionality both Apple providers return.
-pub const DIM: usize = 512;
-
 /// One chunk of a source text, with the offsets it came from so a hit can be
 /// highlighted back on the original.
 #[derive(Debug, Clone, PartialEq)]
@@ -154,13 +151,79 @@ pub fn cosine(a: &QVec, b: &QVec) -> f32 {
     if a.bytes.len() != b.bytes.len() {
         return 0.0;
     }
-    let dot: i32 = a
-        .bytes
-        .iter()
-        .zip(b.bytes.iter())
-        .map(|(x, y)| *x as i32 * *y as i32)
-        .sum();
-    dot as f32 * a.scale * b.scale
+    dot_i8(&a.bytes, &b.bytes) as f32 * a.scale * b.scale
+}
+
+/// The int8 dot product the brute-force scan spends its time in.
+///
+/// Two bodies, one answer: on aarch64 the NEON path multiplies sixteen
+/// lanes at a time (`vmull_s8` → `vpadalq_s16` into four i32 accumulators;
+/// NEON is baseline on that architecture, so there is no runtime
+/// detection), everywhere else an eight-lane unrolled loop that LLVM's
+/// autovectorizer turns into SSE2/AVX2 on x86_64. Lengths that are not a
+/// multiple of the lane width finish in scalar. A test pins the two against
+/// the plain scalar sum on every length from 0 to 1,100 — the C2 session
+/// measured the NEON path at 100k chunks in `docs/bench.md`.
+#[inline]
+pub fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
+    debug_assert_eq!(a.len(), b.len());
+    #[cfg(target_arch = "aarch64")]
+    {
+        dot_i8_neon(a, b)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        dot_i8_portable(a, b)
+    }
+}
+
+/// The lane-unrolled portable body (the autovectorizer's shape).
+#[inline]
+pub fn dot_i8_portable(a: &[i8], b: &[i8]) -> i32 {
+    let n = a.len().min(b.len());
+    let (a, b) = (&a[..n], &b[..n]);
+    let mut acc = [0i32; 8];
+    let (ca, ra) = a.as_chunks::<8>();
+    let (cb, rb) = b.as_chunks::<8>();
+    for (x, y) in ca.iter().zip(cb) {
+        for k in 0..8 {
+            acc[k] += x[k] as i32 * y[k] as i32;
+        }
+    }
+    let mut sum: i32 = acc.iter().sum();
+    for (x, y) in ra.iter().zip(rb) {
+        sum += *x as i32 * *y as i32;
+    }
+    sum
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn dot_i8_neon(a: &[i8], b: &[i8]) -> i32 {
+    use std::arch::aarch64::*;
+    let n = a.len().min(b.len());
+    let mut i = 0usize;
+    // SAFETY: NEON is a baseline feature of every aarch64 target; every
+    // load reads sixteen bytes that `i + 16 <= n` proves are inside both
+    // slices; the intrinsics have no other preconditions.
+    let mut sum = unsafe {
+        let mut acc = vdupq_n_s32(0);
+        while i + 16 <= n {
+            let va = vld1q_s8(a.as_ptr().add(i));
+            let vb = vld1q_s8(b.as_ptr().add(i));
+            let lo = vmull_s8(vget_low_s8(va), vget_low_s8(vb));
+            let hi = vmull_high_s8(va, vb);
+            acc = vpadalq_s16(acc, lo);
+            acc = vpadalq_s16(acc, hi);
+            i += 16;
+        }
+        vaddvq_s32(acc)
+    };
+    while i < n {
+        sum += a[i] as i32 * b[i] as i32;
+        i += 1;
+    }
+    sum
 }
 
 /// Pack a quantized vector for storage as a BLOB.
@@ -179,6 +242,35 @@ pub fn unpack(blob: &[u8], scale: f32) -> QVec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dimensionality the tests quantize at (what the Apple providers
+    /// return; the vocabulary itself is dimension-free since C2).
+    const D: usize = 512;
+
+    /// The two dot bodies agree with the plain scalar sum on every length —
+    /// including the tails the lane loops leave to scalar code.
+    #[test]
+    fn the_lane_dots_equal_the_scalar_sum_on_every_length() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed as u8) as i8
+        };
+        for n in 0..1_100usize {
+            let a: Vec<i8> = (0..n).map(|_| next()).collect();
+            let b: Vec<i8> = (0..n).map(|_| next()).collect();
+            let scalar: i32 = a.iter().zip(&b).map(|(x, y)| *x as i32 * *y as i32).sum();
+            assert_eq!(dot_i8_portable(&a, &b), scalar, "portable, n = {n}");
+            assert_eq!(dot_i8(&a, &b), scalar, "dot_i8, n = {n}");
+        }
+        // The extremes: -127·-127 and 127·-127 saturate nothing at 512 lanes.
+        let lo = vec![-127i8; 512];
+        let hi = vec![127i8; 512];
+        assert_eq!(dot_i8(&lo, &lo), 127 * 127 * 512);
+        assert_eq!(dot_i8(&hi, &lo), -127 * 127 * 512);
+    }
 
     #[test]
     fn chunk_zero_is_always_the_opening() {
@@ -243,22 +335,22 @@ mod tests {
 
     #[test]
     fn quantization_round_trips_within_tolerance() {
-        let v: Vec<f32> = (0..DIM).map(|i| ((i as f32) * 0.017).sin()).collect();
+        let v: Vec<f32> = (0..D).map(|i| ((i as f32) * 0.017).sin()).collect();
         let q = quantize(&v);
-        assert_eq!(q.bytes.len(), DIM);
+        assert_eq!(q.bytes.len(), D);
         // A vector is maximally similar to itself.
         assert!((cosine(&q, &q) - 1.0).abs() < 0.02, "self-cosine {}", cosine(&q, &q));
         // Storage: one byte per dimension plus the scale.
-        assert_eq!(pack(&q).len(), DIM);
+        assert_eq!(pack(&q).len(), D);
         assert_eq!(unpack(&pack(&q), q.scale), q);
     }
 
     #[test]
     fn cosine_orders_similar_above_dissimilar() {
-        let a: Vec<f32> = (0..DIM).map(|i| (i as f32 * 0.01).sin()).collect();
+        let a: Vec<f32> = (0..D).map(|i| (i as f32 * 0.01).sin()).collect();
         // `b` is `a` with noise; `c` is unrelated.
         let b: Vec<f32> = a.iter().enumerate().map(|(i, x)| x + (i as f32 * 0.3).cos() * 0.05).collect();
-        let c: Vec<f32> = (0..DIM).map(|i| (i as f32 * 0.31).cos()).collect();
+        let c: Vec<f32> = (0..D).map(|i| (i as f32 * 0.31).cos()).collect();
         let (qa, qb, qc) = (quantize(&a), quantize(&b), quantize(&c));
         assert!(
             cosine(&qa, &qb) > cosine(&qa, &qc),

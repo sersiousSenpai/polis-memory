@@ -121,6 +121,12 @@ impl Home {
         self.root.join("backups")
     }
 
+    /// C2: downloadable embedding models (`potion-base-8M/`, `fastembed/`),
+    /// each verified against its pinned hash before use.
+    pub fn models_dir(&self) -> PathBuf {
+        self.root.join("models")
+    }
+
     pub fn exists(&self) -> bool {
         self.root.is_dir()
     }

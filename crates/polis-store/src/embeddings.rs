@@ -231,6 +231,28 @@ impl PolisStore {
         Ok((chunks, pending))
     }
 
+    /// The models present in the index, as `(model, dim, rows)`, most rows
+    /// first (C2: the index may hold two providers' vectors side by side
+    /// during a switch).
+    pub fn models_in_index(&self) -> rusqlite::Result<Vec<(String, i64, i64)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT model, MAX(dim), COUNT(*) FROM embeddings GROUP BY model ORDER BY COUNT(*) DESC")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect()
+    }
+
+    /// The dimension a model's rows carry, when it has any.
+    pub fn embedding_dim(&self, model: &str) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn();
+        conn.query_row("SELECT dim FROM embeddings WHERE model = ?1 LIMIT 1", params![model], |r| r.get(0)).optional()
+    }
+
+    /// Drop one model's rows (a `reindex --prune` after a provider switch).
+    pub fn delete_embeddings_for_model(&self, model: &str) -> rusqlite::Result<usize> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM embeddings WHERE model = ?1", params![model])
+    }
+
     /// The vector index's high-water mark — the cache key. One monotonic
     /// number, so invalidation never depends on anyone remembering to clear it
     /// (the `build_stats_cached` idiom).

@@ -127,8 +127,9 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
     // CLI on PATH, else none) and this platform's on-device embedder.
     let handle = Arc::new(
         PolisHandle::new(store.clone(), super::backend::agent_for(), Arc::new(NoHost), Arc::new(NoopSink))
-            .with_embedder(super::backend::embedder_for()),
+            .with_embedder(super::backend::embedder_for(home)),
     );
+    tracing::info!(assets = super::backend::request_apple_assets_if_allowed(), "apple contextual embedding assets");
     let api: Arc<dyn MemoryApi> = handle.clone();
     let state = PolisState { api: api.clone(), ingest: activity.clone(), events: Arc::new(LogEvents) };
 

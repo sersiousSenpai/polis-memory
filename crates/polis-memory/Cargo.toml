@@ -24,6 +24,12 @@ cli = [
     "polis-llm/anthropic",
     "polis-llm/openai-compat",
     "apple",
+    # C2: the portable providers ride in the binary — Model2Vec (with its
+    # pinned first-use download) and the OpenAI-compatible remote; ONNX
+    # (`fastembed`) stays a separate opt-in because of its weight.
+    "polis-embed/model2vec",
+    "polis-embed/download",
+    "polis-embed/remote",
     "dep:clap",
     "dep:polis-mcp",
     "polis-mcp/remote",
@@ -39,6 +45,10 @@ cli = [
 # gate, the real-DB instrument and the canary calibration. Tests only; the
 # library carries the corpus, canary and eval modules regardless.
 eval = []
+# C2: bge-small through ONNX Runtime, opt-in (docs/bench.md "Embedding providers").
+fastembed = ["polis-embed/fastembed"]
+# C2: the Model2Vec files compiled in (the org node's image; air-gapped).
+bundled-model = ["polis-embed/bundled-model"]
 
 [[bin]]
 name = "polis"

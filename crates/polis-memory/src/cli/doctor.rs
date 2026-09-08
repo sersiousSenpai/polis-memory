@@ -143,7 +143,10 @@ pub fn run(home: &Home) -> Doctor {
                     // C1: the embedder this process would file with (the
                     // daemon path reads it from health; here it is a fact
                     // of the platform).
-                    d.embedder = Some(polis_embed::provider_kind().as_str().to_string());
+                    d.embedder = Some(match super::backend::embedder_for(home) {
+                        Some(e) => format!("{} ({})", (e.as_ref() as &dyn polis_embed::Embedder).kind().as_str(), e.model_id()),
+                        None => "absent".to_string(),
+                    });
                     match store.verify_ledger_chain() {
                         Ok(v) => {
                             d.chain_ok = Some(v.ok);
