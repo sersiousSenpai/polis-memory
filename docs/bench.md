@@ -250,3 +250,63 @@ The real corpus's consistency row is the embedder's number, not the
 mechanism's: the plan's "decided by measurement" gate for embeddings (C2)
 re-runs `real_db_filing_calibration` per provider, and the tier turns on for
 the first one that clears the floor.
+
+## Embedding providers (C2, plan §7.3)
+
+Measured 2026-09-08 on the real-corpus copy (2,164 prompts, 1,232 pages,
+229 class nodes; 8,694 chunks under a 256/384-dim model, 8,724 under the
+512-dim one) with `eval_real_db_providers` (`crates/polis-memory/src/eval.rs`,
+`--features eval[,fastembed]`), on an M-series laptop, macOS 14.3, release
+profile. `bench/results/2026-09-08-d2ea47cf83f8-providers.json` is the
+record. Every provider re-embedded the whole corpus into a fresh copy; the
+semantic column is the arm alone (PromptSpan probes, top-10 by cosine), the
+fused columns are the answer pack with that provider, the filing columns
+are C1's leave-one-out calibration under that provider's vectors.
+
+| Provider | Model | dim | Bytes on disk | `polis` binary delta | Embed ms / chunk | Index bytes | Semantic R@10 | Fused R@10 | MRR | Canary | Filing consistency | Chosen (T1, M) → precision / coverage |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| apple-sentence (macOS ≥ 11) | `apple-sentence-en` | 512 | OS asset | 0 | 21.6 | 4,501,584 | 0.600 | 0.730 | 0.587 | 0.766 | 0.404 | none — best 0.864 at 1.8 % |
+| apple-contextual (macOS ≥ 14) | — | — | OS asset, not downloaded here | 0 | — | — | — | — | — | — | — | — |
+| **model2vec** | `potion-base-8M` | 256 | 30,920,628 (3 files, pinned) | **+1,027,664** (with `download` + `remote`) | **0.02** | 2,260,440 | **0.960** | **0.750** | **0.604** | 0.776 | 0.536 | **(0.65, 0.14) → 0.902 / 13.5 %** |
+| fastembed (opt-in) | `bge-small-en-v1.5` | 384 | ~130 MB + the ONNX runtime | +21,046,896 | 18.0 | 3,373,272 | 0.860 | 0.750 | 0.596 | 0.776 | 0.597 | (0.55, 0.08) → 0.903 / 15.3 % |
+| remote (opt-in egress) | the endpoint's | — | 0 | in `cli` | network | — | not measured (no key on this machine; the client is tested against a fake endpoint) | | | | | |
+| `bundled-model` | potion compiled in | 256 | — | +31,158,208 | as model2vec | | | | | | | |
+
+Binary deltas are `cargo build --release -p polis-memory --features cli[,…]`
+against main @ bfb134d's `cli` binary (14,907,904 B); with the portable
+providers the `polis` binary is 15,935,568 B.
+
+**The decision, by measurement.** Model2Vec is the default wherever its
+files are present (`ProviderChoice::Auto`, `polis_embed::select`): it beats
+the Apple sentence model on the semantic arm by 36 points, ties or edges it
+on the fused pack and MRR, embeds a thousand times faster, halves the index,
+and is the first provider to clear C1's filing precision floor — the
+centroid tier turns ON under it (13.5 % of items filed deterministically at
+precision 0.90; the plan's ≥ 0.85 consistency row is still not met by any
+provider, and the number to watch is the chosen pair's precision, which is).
+Apple's contextual model could not be measured: its assets were not on this
+machine (the OS downloads them on request — `request_apple_assets` is wired
+into `init` and `serve` — but not before this table was due). bge-small
+through ONNX is not the default: it wins nothing on recall over Model2Vec,
+embeds 900× slower on CPU, and costs 21 MB of binary. `polis init` and
+`polis serve` fetch the Model2Vec files once (pinned sha256; refused under
+`POLIS_NO_NETWORK=1`, in which case Apple's model, else the absent state,
+serves); a read never downloads.
+
+**Semantic search alone at 100k chunks (§6.1: p50 < 60 ms, p95 < 120 ms).**
+`crates/polis-embed/tests/semantic_100k.rs`, release, this machine: dim 256
+warm p50 **13.0 ms**, p95 **21.9 ms** (cold cache build 34 ms); dim 512 p50
+13.5 ms, p95 22.2 ms (cold 44 ms). The dot itself is 9.5 ns at 256 and
+14.6 ns at 512 (`dot_i8`, the autovectorized eight-lane loop); a hand-written
+NEON body measured 10.7 / 14.8 ns and was removed. Most of the scan was the
+per-target collapse cloning a kind string per row; interned, the p50 fell
+from 16 to 13 ms. CI prints this row on its Ubuntu runner
+(`POLIS_BENCH_100K=print`); the gate is armed (`=1`) once that runner's
+number is known.
+
+**Download policy.** Three files, three pinned sha256s (`model2vec::PINNED`),
+fetched from the model's Hugging Face `main` into `$POLIS_HOME/models/
+potion-base-8M/`, each verified before it is kept and again before it is
+loaded; a byte that does not hash is never used. `bundled-model` compiles
+the same three files in from `POLIS_BUNDLED_MODEL_DIR` at build time (the
+org node's image; air-gapped installs) and refuses a placeholder at runtime.
