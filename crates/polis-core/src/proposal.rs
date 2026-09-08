@@ -72,6 +72,22 @@ pub enum Proposal {
     },
 }
 
+impl Proposal {
+    /// The op's wire name (`file` / `create` / `promote` / `split` / `merge` /
+    /// `collapse` / `supersede`) — what the journal records it as.
+    pub fn op_name(&self) -> &'static str {
+        match self {
+            Proposal::File { .. } => "file",
+            Proposal::Create { .. } => "create",
+            Proposal::Promote { .. } => "promote",
+            Proposal::Split { .. } => "split",
+            Proposal::Merge { .. } => "merge",
+            Proposal::Collapse { .. } => "collapse",
+            Proposal::Supersede { .. } => "supersede",
+        }
+    }
+}
+
 /// Extract the proposals JSON from a classifier's final message. Tolerates the
 /// model wrapping it in a ```json fence or in surrounding prose: finds the first
 /// balanced `{...}` object that parses and contains a `proposals` array. Pure.

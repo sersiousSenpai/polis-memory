@@ -31,8 +31,6 @@ use polis_store::PolisStore;
 
 #[allow(unused_imports)]
 use crate::agent::{run_classifier, run_keeper_summarizer};
-#[allow(unused_imports)]
-use crate::organize::AUTO_APPLY_KEY;
 use crate::Polis;
 
 /// Clamp + default for `GET /v1/context/prompts`'s `?limit=`.
@@ -676,6 +674,7 @@ pub fn build_answer_pack_scoped(
         shared_hits,
     };
     enforce_pack_budget(&mut pack);
+    crate::warmth::record_pack(&pack, polis_core::ledger::now_millis()); // B3: warmth, flushed by the gardener
     pack_span.record("ms", pack_timer.stop());
     pack
 }

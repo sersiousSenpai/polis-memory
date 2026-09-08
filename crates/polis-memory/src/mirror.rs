@@ -29,8 +29,6 @@ use polis_store::PolisStore;
 
 #[allow(unused_imports)]
 use crate::agent::{run_classifier, run_keeper_summarizer};
-#[allow(unused_imports)]
-use crate::organize::AUTO_APPLY_KEY;
 use crate::Polis;
 
 /// The setting key holding the user-chosen mirror directory. Absent/empty ⇒ the

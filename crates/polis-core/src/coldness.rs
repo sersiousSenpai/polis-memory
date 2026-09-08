@@ -121,6 +121,38 @@ pub fn subtree_stats(
     out
 }
 
+// --- B3: protection without pins -------------------------------------------
+
+/// `subtree_stats` with the protected set supplied by the caller (B3, plan
+/// §5.1 "anti-decay without pins"): `BranchStat::pinned` becomes "this node
+/// or a descendant is PROTECTED" — warm (recalled in the freshest slice of
+/// the lake's span) or carrying a user note — so `auto_collapse_safe`'s veto
+/// reads the same field it always did, fed by warmth instead of a flag the
+/// user set. The `pinned` column is never read.
+pub fn subtree_stats_protected(
+    nodes: &[ClassNode],
+    direct: &HashMap<String, (i64, Option<i64>)>,
+    protected: &std::collections::HashSet<String>,
+) -> HashMap<String, BranchStat> {
+    let mut shadow: Vec<ClassNode> = nodes.to_vec();
+    for n in &mut shadow {
+        n.pinned = protected.contains(&n.id);
+    }
+    subtree_stats(&shadow, direct)
+}
+
+/// Warm iff the newest recall in the branch sits inside the freshest
+/// `COLLAPSE_FRESH_FRACTION` of the lake's span (plan §5.1: protected iff
+/// `max(last_recalled_at) ≥ newest − 0.34·span`).
+pub fn is_warm(last_recalled_at: Option<i64>, env: LakeEnvelope) -> bool {
+    let Some(last) = last_recalled_at else { return false };
+    let span = env.span();
+    if span <= 0 {
+        return last >= env.newest;
+    }
+    (env.newest - last) as f64 <= COLLAPSE_FRESH_FRACTION * span as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

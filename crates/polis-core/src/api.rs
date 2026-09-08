@@ -374,7 +374,7 @@ pub struct ReindexReceipt {
 /// `GET /v1/memory/health`: is the record intact and what is the install
 /// able to do. `model: None` is the no-model state (R12) — the deterministic
 /// tiers still run and this reports it rather than erroring.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthReport {
     /// The chain verdict's `ok`, lifted for a one-glance read.
@@ -389,6 +389,10 @@ pub struct HealthReport {
     pub embedder: String,
     pub schema_version: Option<String>,
     pub lexical_version: Option<String>,
+    /// B3: the gardener's efficacy (§6.3). `None` from a surface that does
+    /// not compute it (an older daemon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<crate::types::CatalogHealth>,
 }
 
 // ---------------------------------------------------------------------------
