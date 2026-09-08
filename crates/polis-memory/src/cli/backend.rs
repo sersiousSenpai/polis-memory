@@ -71,8 +71,20 @@ pub fn open(home: &Home, backend: &Backend) -> Result<Arc<dyn MemoryApi>, String
             if !db.exists() {
                 return Err(format!("no store at {} — run `polis init` first", db.display()));
             }
-            let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
-            Ok(Arc::new(PolisHandle::new(Arc::new(store), None, Arc::new(NoHost), Arc::new(NoopSink))))
+            let store = Arc::new(PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?);
+            // The identity, when `polis init` has made one: adoption is
+            // idempotent and cheap, so every open re-runs it — a store that
+            // grew new author strings gets their aliases without a command.
+            let identity = match crate::identity::Identity::load(&home.identity_dir(), home.device_name())? {
+                Some(id) => {
+                    if let Err(e) = crate::identity::adopt(&store, &id, &crate::identity::login_name()) {
+                        tracing::warn!(error = %e, "adoption on open failed");
+                    }
+                    Some(Arc::new(id))
+                }
+                None => None,
+            };
+            Ok(Arc::new(PolisHandle::new(store, None, Arc::new(NoHost), Arc::new(NoopSink)).with_identity(identity)))
         }
         Backend::Remote { base } => Ok(Arc::new(RemoteApi::new(base.clone(), home.read_token()))),
     }

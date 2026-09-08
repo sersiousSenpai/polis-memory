@@ -43,10 +43,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create $POLIS_HOME (~/.polis): the store, a private token, config.toml.
-    /// Identity keys (Ed25519, device chains) land in E2; until then the
-    /// author is the local user name.
-    Init,
+    /// Create $POLIS_HOME (~/.polis): the store, a private token, config.toml,
+    /// and this device's identity — an Ed25519 key (`identity.key`, 0600)
+    /// whose hash is your principal id, a device id derived from it and the
+    /// device name, and a `principal_bind` event binding the key to the chain.
+    /// Re-running adopts nothing twice.
+    Init {
+        /// The device name (default: the hostname). One key, many devices:
+        /// each name is its own chain under the same human.
+        #[arg(long)]
+        device: Option<String>,
+        /// Adopt an existing Redline install: point this home at its
+        /// `redline.db` and share the key under `<dir>/polis/` (one device,
+        /// one chain — a copy would fork it), alias every author it has
+        /// recorded, and bind.
+        #[arg(long, value_name = "REDLINE_DATA_DIR")]
+        from_redline: Option<PathBuf>,
+    },
     /// Run the daemon: HTTP routes, MCP at /mcp, the gardener, rotating backups.
     Serve {
         /// Bind address (default: config.toml `listen`, else 127.0.0.1:7677).
@@ -219,26 +232,67 @@ fn run(cli: Cli) -> Result<(), String> {
     let home = Home::resolve()?;
     let json = cli.json;
     match cli.cmd {
-        Cmd::Init => {
+        Cmd::Init { device, from_redline } => {
             let fresh = !home.exists();
             home.ensure()?;
+            let wrote_config = home.ensure_config()?;
+            if let Some(dir) = &from_redline {
+                let redline_db = dir.join("redline.db");
+                if !redline_db.exists() {
+                    return Err(format!("{} has no redline.db", dir.display()));
+                }
+                // Point, never copy: two writers on one chain would be two
+                // heads under one id, which is exactly what devices exist to
+                // prevent. Redline and `polis` are the same device here.
+                home.config_set("db", &redline_db.to_string_lossy())?;
+                home.config_set("identity_dir", &dir.join("polis").to_string_lossy())?;
+            }
+            if let Some(name) = &device {
+                home.config_set("device", name)?;
+            }
             let db = home.db_path();
             let created_db = !db.exists();
-            PolisStore::open(&db).map_err(|e| format!("create {}: {e}", db.display()))?;
+            let store = PolisStore::open(&db).map_err(|e| format!("create {}: {e}", db.display()))?;
             home.ensure_token()?;
-            let wrote_config = home.ensure_config()?;
-            emit(json, &serde_json::json!({ "home": home.root, "db": db, "createdHome": fresh, "createdDb": created_db, "wroteConfig": wrote_config }), || {
-                format!(
-                    "home   {}{}\nstore  {}{}\ntoken  {}\nconfig {}{}\n\nnext: `polis hook install` (capture prompts), `polis mcp install --client claude` (answer them), `polis serve` (a daemon with the gardener and backups).\nidentity keys and device chains land in E2; the author is the local user name today.",
-                    home.root.display(),
-                    if fresh { " (created)" } else { "" },
-                    db.display(),
-                    if created_db { " (created)" } else { " (present)" },
-                    home.token_path().display(),
-                    home.config_path().display(),
-                    if wrote_config { " (written)" } else { "" }
-                )
-            });
+            let identity_dir = home.identity_dir();
+            let (identity, created_key) = crate::identity::Identity::load_or_create(&identity_dir, home.device_name())?;
+            let login = crate::identity::login_name();
+            let report = crate::identity::adopt(&store, &identity, &login)?;
+            emit(
+                json,
+                &serde_json::json!({
+                    "home": home.root, "db": db, "createdHome": fresh, "createdDb": created_db, "wroteConfig": wrote_config,
+                    "identity": { "dir": identity_dir, "createdKey": created_key, "principal": identity.principal_id(), "fingerprint": identity.fingerprint(), "device": identity.device_id(), "deviceName": identity.device_name },
+                    "adopt": report,
+                }),
+                || {
+                    format!(
+                        "home     {}{}\nstore    {}{}\ntoken    {}\nconfig   {}{}\nidentity {} ({}; key {})\n         principal {}  device {} ({})\n         bind #{}{}; aliases +{}, stamped {} rows{}\n\nnext: `polis hook install` (capture prompts), `polis mcp install --client claude` (answer them), `polis serve` (a daemon with the gardener and backups).",
+                        home.root.display(),
+                        if fresh { " (created)" } else { "" },
+                        db.display(),
+                        if created_db { " (created)" } else { " (present)" },
+                        home.token_path().display(),
+                        home.config_path().display(),
+                        if wrote_config { " (written)" } else { "" },
+                        identity_dir.display(),
+                        crate::identity::KEY_FILE,
+                        if created_key { "created" } else { "present" },
+                        identity.fingerprint(),
+                        polis_core::identity::fingerprint(&identity.device_id()),
+                        identity.device_name,
+                        report.bind_seq.unwrap_or(0),
+                        if report.already_bound { " (already bound)" } else { " (appended)" },
+                        report.aliases_seeded.len(),
+                        report.stamped,
+                        {
+                            let u = &report.unscoped;
+                            let left = u.prompts + u.browse_events + u.user_notes + u.class_nodes + u.class_observations;
+                            if left > 0 { format!(", {left} still unscoped") } else { String::new() }
+                        }
+                    )
+                },
+            );
             Ok(())
         }
         Cmd::Serve { listen, token_file, no_gardener, tick } => {

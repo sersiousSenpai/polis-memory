@@ -301,6 +301,15 @@ pub const ROUTES: &[RouteSpec] = &[
         request: "kind + id in path",
         response: "JSON tree node",
     },
+    // --- E2 ---
+    RouteSpec {
+        method: "POST",
+        path: "/v1/memory/supersede",
+        class: RouteClass::Write(MEMORY_WRITE),
+        purpose: "Supersede a decision: a newer one replaces an older one on the same subject; the old stays in the lake",
+        request: "JSON {oldSeq, newSeq, rationale?, scope?}",
+        response: "JSON {applied, effectiveOld, eventSeq, rejected}",
+    },
 ];
 
 /// Look up the row for a request. `path` must be the registered axum pattern
@@ -362,6 +371,10 @@ where
         // with its parent + child digests).
         .route("/v1/context/threads/:kind/:id", get(routes::handle_context_thread))
         .route("/v1/context/tree/:kind/:id", get(routes::handle_context_tree))
+        // --- E2 --- the supersession write: a decision replaced, never
+        // deleted. Registered last because registration order is the ROUTES
+        // table's order, and E2's row is appended at its end.
+        .route("/v1/memory/supersede", post(routes::handle_memory_supersede))
         // Per-route latency (`route:<pattern>`) into the same ring the arms
         // record in — `/v1/context/stats` reports both. `route_layer`, so a
         // host's own routes merged beside these are not counted here.
@@ -430,6 +443,7 @@ pub(crate) mod testing {
             "/v1/memory/forget" => r#"{"targetKind":"prompt","targetId":"1","confirm":"forget"}"#,
             "/v1/memory/events" => r#"{"items":[{"body":"imported"}]}"#,
             "/v1/memory/browse" => r#"{"url":"https://example.test","text":"page"}"#,
+            "/v1/memory/supersede" => r#"{"oldSeq":1,"newSeq":2}"#,
             _ => "",
         }
     }

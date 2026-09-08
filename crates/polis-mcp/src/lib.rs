@@ -25,7 +25,10 @@ pub mod remote;
 
 use std::sync::Arc;
 
-use polis_core::api::{ContextRequest, GrepRequest, Scope, SearchRequest, TreeRequest};
+use polis_core::api::{
+    AnnotateRequest, ContextRequest, ForgetRequest, GrepRequest, IngestItem, IngestRequest, RememberRequest, Scope, SearchRequest,
+    SupersedeRequest, TreeRequest,
+};
 use polis_core::types::LedgerFilters;
 use polis_core::{MemoryApi, MemoryError};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -60,6 +63,10 @@ pub const TOOLS: &[&str] = &[
     "memory_stats",
     "memory_verify",
 ];
+
+/// The writes (E2, plan §4.4): every one appends to the chain; `memory_forget`
+/// is the one destructive verb. Never `revert_run` — that is GUI/HTTP only.
+pub const WRITE_TOOLS: &[&str] = &["memory_remember", "memory_ingest", "memory_annotate", "memory_forget", "memory_supersede"];
 
 /// The compat aliases (one release): the legacy name → what it maps to.
 /// `memory_tree` kept its name and shape, so it needs no alias.
@@ -99,6 +106,24 @@ fn to_value<T: serde::Serialize>(v: &T) -> Value {
     serde_json::to_value(v).unwrap_or(Value::Null)
 }
 
+/// The agent a write is stamped with when the caller names none:
+/// `mcp:<clientInfo.name>` from the session's `initialize`, else `mcp`.
+fn write_scope(scope: Option<ScopeArg>, ctx: &RequestContext<RoleServer>) -> Scope {
+    let mut s = scope_of(scope);
+    if s.agent.as_deref().map(str::trim).filter(|a| !a.is_empty()).is_none() {
+        let client = ctx.peer.peer_info().map(|i| i.client_info.name.clone()).filter(|n| !n.trim().is_empty());
+        s.agent = Some(match client {
+            Some(name) => format!("mcp:{}", name.trim()),
+            None => "mcp".to_string(),
+        });
+    }
+    s
+}
+
+fn scope_of(v: Option<ScopeArg>) -> Scope {
+    scope(v)
+}
+
 #[tool_router]
 impl PolisMcp {
     pub fn new(api: Arc<dyn MemoryApi>) -> Self {
@@ -136,6 +161,81 @@ impl PolisMcp {
     async fn stats_with(&self, scope: Scope) -> Result<CallToolResult, McpError> {
         Ok(match self.blocking(move |api| api.stats(&scope)).await {
             Ok(s) => done(render::stats(&s), to_value(&s)),
+            Err(e) => failed(e),
+        })
+    }
+
+    // --- the writes (E2) -----------------------------------------------------
+
+    #[tool(
+        name = "memory_remember",
+        description = "Keep ONE memory on the user's behalf: with as_user=true it is recorded as the user's own words (a prompt row, searchable like anything they typed); otherwise as a standalone note. Appends to the chain; returns the ledger seq. Use sparingly and only for things the user asked to remember or clearly wants kept.",
+        annotations(read_only_hint = false, idempotent_hint = false, destructive_hint = false, open_world_hint = false)
+    )]
+    async fn memory_remember(&self, Parameters(p): Parameters<RememberParams>, ctx: RequestContext<RoleServer>) -> Result<CallToolResult, McpError> {
+        let req = RememberRequest { text: p.text, as_user: p.as_user.unwrap_or(false), project: p.project, scope: write_scope(p.scope, &ctx) };
+        Ok(match self.blocking(move |api| api.remember(&req)).await {
+            Ok(r) => done(render::write_receipt("remembered", &r), to_value(&r)),
+            Err(e) => failed(e),
+        })
+    }
+
+    #[tool(
+        name = "memory_ingest",
+        description = "Import a batch of episodes or messages with their own timestamps, run and project. Idempotent on (body hash, run): replaying a batch records nothing twice. Returns the seqs recorded and how many were skipped.",
+        annotations(read_only_hint = false, idempotent_hint = true, destructive_hint = false, open_world_hint = false)
+    )]
+    async fn memory_ingest(&self, Parameters(p): Parameters<IngestParams>, ctx: RequestContext<RoleServer>) -> Result<CallToolResult, McpError> {
+        let items = p
+            .items
+            .into_iter()
+            .map(|i| IngestItem { body: i.body, ts: i.ts, role: i.role, session: i.session, run: i.run, project: i.project })
+            .collect();
+        let req = IngestRequest { items, scope: write_scope(p.scope, &ctx) };
+        Ok(match self.blocking(move |api| api.ingest(&req)).await {
+            Ok(r) => done(format!("recorded {} (skipped {})", r.recorded.len(), r.skipped), to_value(&r)),
+            Err(e) => failed(e),
+        })
+    }
+
+    #[tool(
+        name = "memory_annotate",
+        description = "Attach a note to a ledger event (#seq), a class node, a session, or nowhere (a standalone thought). A note is a strong curation signal to the organizer and shows up in the answer pack. Appends to the chain.",
+        annotations(read_only_hint = false, idempotent_hint = false, destructive_hint = false, open_world_hint = false)
+    )]
+    async fn memory_annotate(&self, Parameters(p): Parameters<AnnotateParams>, ctx: RequestContext<RoleServer>) -> Result<CallToolResult, McpError> {
+        let req = AnnotateRequest { target_kind: p.target_kind, target_id: p.target_id, text: p.text, scope: write_scope(p.scope, &ctx) };
+        Ok(match self.blocking(move |api| api.annotate(&req)).await {
+            Ok(r) => done(render::write_receipt("annotated", &r), to_value(&r)),
+            Err(e) => failed(e),
+        })
+    }
+
+    #[tool(
+        name = "memory_forget",
+        description = "DESTRUCTIVE: forget a memory's text. The body becomes [forgotten], its archive and vectors are removed; the chain stays green because it commits to the hash, not the text. Requires confirm=\"forget\". Use only on the user's explicit instruction.",
+        annotations(read_only_hint = false, idempotent_hint = true, destructive_hint = true, open_world_hint = false)
+    )]
+    async fn memory_forget(&self, Parameters(p): Parameters<ForgetParams>, ctx: RequestContext<RoleServer>) -> Result<CallToolResult, McpError> {
+        let req = ForgetRequest { target_kind: p.target_kind, target_id: p.target_id, confirm: p.confirm, scope: write_scope(p.scope, &ctx) };
+        Ok(match self.blocking(move |api| api.forget(&req)).await {
+            Ok(r) => done(if r.forgotten { format!("forgotten (event #{})", r.seq.unwrap_or(0)) } else { "nothing forgotten".to_string() }, to_value(&r)),
+            Err(e) => failed(e),
+        })
+    }
+
+    #[tool(
+        name = "memory_supersede",
+        description = "Record that a newer decision (#new_seq) replaces an older one (#old_seq) on the same subject. Never deletes: the old decision stays in the lake, marked superseded, and the answer pack shows it as history. A guardrail refusal (different subjects, not a decision) is returned as data, not an error.",
+        annotations(read_only_hint = false, idempotent_hint = true, destructive_hint = false, open_world_hint = false)
+    )]
+    async fn memory_supersede(&self, Parameters(p): Parameters<SupersedeParams>, ctx: RequestContext<RoleServer>) -> Result<CallToolResult, McpError> {
+        let req = SupersedeRequest { old_seq: p.old_seq, new_seq: p.new_seq, rationale: p.rationale, scope: write_scope(p.scope, &ctx) };
+        Ok(match self.blocking(move |api| api.supersede(&req)).await {
+            Ok(r) => done(
+                if r.applied { format!("superseded #{} by #{} (event #{})", r.effective_old.unwrap_or(p.old_seq), p.new_seq, r.event_seq.unwrap_or(0)) } else { format!("not applied: {}", r.rejected.clone().unwrap_or_default()) },
+                to_value(&r),
+            ),
             Err(e) => failed(e),
         })
     }
@@ -491,13 +591,23 @@ mod tests {
         for (alias, _) in ALIASES {
             assert!(names.contains(alias), "missing alias {alias}");
         }
-        assert_eq!(tools.len(), TOOLS.len() + ALIASES.len(), "no unlisted tools");
+        for want in WRITE_TOOLS {
+            assert!(names.contains(want), "missing write tool {want}");
+        }
+        assert_eq!(tools.len(), TOOLS.len() + WRITE_TOOLS.len() + ALIASES.len(), "no unlisted tools");
         for t in &tools {
             let a = t.annotations.as_ref().unwrap_or_else(|| panic!("{} has no annotations", t.name));
-            assert_eq!(a.read_only_hint, Some(true), "{} must be read-only", t.name);
-            assert_eq!(a.idempotent_hint, Some(true), "{} must be idempotent", t.name);
             assert!(t.description.as_deref().is_some_and(|d| d.len() > 40), "{} needs a real description", t.name);
+            if WRITE_TOOLS.contains(&t.name.as_ref()) {
+                assert_eq!(a.read_only_hint, Some(false), "{} is a write", t.name);
+                assert_eq!(a.destructive_hint, Some(t.name.as_ref() == "memory_forget"), "only forget is destructive ({})", t.name);
+                assert_eq!(a.idempotent_hint, Some(matches!(t.name.as_ref(), "memory_ingest" | "memory_forget" | "memory_supersede")), "{} idempotency", t.name);
+            } else {
+                assert_eq!(a.read_only_hint, Some(true), "{} must be read-only", t.name);
+                assert_eq!(a.idempotent_hint, Some(true), "{} must be idempotent", t.name);
+            }
         }
+        assert!(!names.contains(&"revert_run") && !names.iter().any(|n| n.contains("revert")), "revert is never an MCP tool");
         let info = s.get_info();
         assert!(info.instructions.as_deref().unwrap().contains("third-party"));
         assert!(info.capabilities.tools.is_some() && info.capabilities.resources.is_some() && info.capabilities.prompts.is_some());

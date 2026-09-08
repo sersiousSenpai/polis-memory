@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use polis_core::api::{
     AnnotateRequest, BrowseRequest, ContextRequest, ForgetRequest, GrepRequest, IngestRequest,
-    PromptsRequest, RememberRequest, Scope, SearchRequest, TreeRequest,
+    PromptsRequest, RememberRequest, Scope, SearchRequest, SupersedeRequest, TreeRequest,
 };
 use polis_core::host::Change;
 use polis_core::pack::budgeted_item_count;
@@ -526,6 +526,24 @@ pub async fn handle_memory_forget(
     match state.api.forget(&req) {
         Ok(receipt) => {
             if receipt.seq.is_some() {
+                state.events.changed(&[Change::Ledger, Change::Memory]);
+            }
+            Json(receipt).into_response()
+        }
+        Err(e) => memory_error(e),
+    }
+}
+
+/// `POST /v1/memory/supersede` (E2) — a newer decision replaces an older one
+/// on the same subject; never deletes. A guardrail refusal is data
+/// (`applied: false`, `rejected`), not an error.
+pub async fn handle_memory_supersede(
+    State(state): State<PolisState>,
+    Json(req): Json<SupersedeRequest>,
+) -> Response {
+    match state.api.supersede(&req) {
+        Ok(receipt) => {
+            if receipt.applied {
                 state.events.changed(&[Change::Ledger, Change::Memory]);
             }
             Json(receipt).into_response()

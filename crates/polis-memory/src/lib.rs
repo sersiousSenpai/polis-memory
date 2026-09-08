@@ -210,8 +210,14 @@ impl PolisHandle {
         self
     }
 
-    /// The author a write is stamped with.
+    /// The author a write is stamped with. A named agent becomes a principal
+    /// on first sight, so the scope stamp can resolve the id it writes.
     fn actor(&self, scope: &Scope) -> String {
+        if let (Some(id), Some(agent)) = (self.identity.as_ref(), scope.agent.as_deref().map(str::trim).filter(|a| !a.is_empty())) {
+            if let Err(e) = identity::ensure_agent(&self.store, id, agent) {
+                tracing::warn!(error = %e, agent, "could not register the agent principal");
+            }
+        }
         identity::actor_for(self.identity.as_ref(), scope.agent.as_deref(), self.store.author())
     }
 

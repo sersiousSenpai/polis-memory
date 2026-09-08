@@ -389,6 +389,27 @@ pub fn adopt(store: &PolisStore, identity: &Identity, login: &str) -> Result<Ado
     Ok(report)
 }
 
+/// An agent principal under this device, created on first sight (an MCP
+/// client's `mcp:<name>`, a seat): the id a write by that agent is stamped
+/// with. Idempotent.
+pub fn ensure_agent(store: &PolisStore, identity: &Identity, name: &str) -> Result<String, String> {
+    let name = name.strip_prefix("agent:").unwrap_or(name);
+    let id = identity.agent_id(name);
+    if store.get_principal(&id).map_err(|e| e.to_string())?.is_none() {
+        store
+            .upsert_principal(&Principal {
+                principal_id: id.clone(),
+                kind: PrincipalKind::Agent,
+                pubkey: None,
+                parent_id: Some(identity.device_id()),
+                display_name: Some(format!("agent:{name}")),
+                created_at: now_millis(),
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(id)
+}
+
 /// The bind payload a device's `principal_bind` event committed to, as kept
 /// beside the chain (what an export ships so an importer can verify the
 /// bind's signature without the store).
