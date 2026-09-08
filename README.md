@@ -159,3 +159,9 @@ POLIS_REAL_DB=/path/to/a/COPY.db cargo test -p polis-memory --features eval -- -
 Every op reports its own p50/p95 at runtime on `GET /v1/context/stats`
 (`latency`), so a slow install can be read rather than guessed at.
 
+The LongMemEval harness — the Polis runner, the competitor scripts under
+identical conditions, the nightly job and the table — is under
+[`bench/`](bench/README.md). The kill criterion it is scored against is
+written in `docs/bench.md` ahead of the first run; no benchmark number is
+published anywhere until that table exists.
+

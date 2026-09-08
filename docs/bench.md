@@ -161,6 +161,7 @@ Real-DB copy (2,164 prompts), this machine, `eval_real_db_instrument`:
 | grep | 5 | 8 ms | 8 ms | < 30 / < 100 ✓ |
 | ingest.item | 100 | 0 ms | 2 ms | < 5 / < 20 ✓ |
 | canary set (201 packs) | 10 runs | 3.36 s | 3.47 s | < 3 s p50 ✗ (12% over) / < 8 s p95 ✓ |
+| MCP `memory_context` round-trip (synthetic 10k, `polis mcp` over stdio, debug binary) | 200 | 38.5 ms | 76.7 ms | < 100 / < 300 ✓ (F1, `eval_mcp_roundtrip`) |
 
 The canary set's p50 is over its row; the pack's time is the browse arm
 (`pack.browse` p50 9 of the pack's 14 ms — the FTS5 MATCH over 1,483 page
@@ -250,3 +251,81 @@ The real corpus's consistency row is the embedder's number, not the
 mechanism's: the plan's "decided by measurement" gate for embeddings (C2)
 re-runs `real_db_filing_calibration` per provider, and the tier turns on for
 the first one that clears the floor.
+
+## LongMemEval (§6.2, Session F1)
+
+The runner, the competitor scripts, the nightly job and the table live under
+[`bench/`](../bench/README.md). What follows was written **before the first
+scored run**, as the plan requires, and the first scored run is scored
+against it.
+
+### The kill criterion (§6.2 item 4, verbatim)
+
+After F2 and F3, `polis-full` within 5 points of the best competitor overall
+on LongMemEval-100 is acceptable and is reported as such next to the
+write-path cost difference (Polis 0 LLM calls per add). Trailing the best
+competitor by more than 10 points overall, or `multi-session` trailing by
+more than 5 after the 2-hop expansion, changes the strategy: the response is
+an opt-in, background, cited write-side "enrich" pass (an extraction over
+user text, filed and superseded like claims), not a substrate change. No
+landing-page number is published until this table exists.
+
+### Conditions
+
+LongMemEval-S (HF `xiaowu0162/longmemeval-cleaned`; 500 questions over six
+types plus `_abs` abstention variants), a seeded stratified subset of 100
+for the nightly job and the full 500 per release. Every system under
+identical conditions: the same questions, the same fixed answer model given
+a ≤ 4,000-token grounding context, the same fixed judge with the
+LongMemEval type-specific yes/no templates (`bench/common/judge.py`), the
+same hardware, one memory namespace per question (a fresh `POLIS_HOME`; a
+Mem0 `user_id`; a Graphiti `group_id`). Two Polis configs: `polis-default`
+(user turns only — the capture hook's world) and `polis-full` (every role).
+Cost columns beside accuracy: ingest wall, LLM calls and tokens on the
+write path (Polis: 0 by design; Mem0 and Graphiti extract with a model on
+every add — their runners count the calls), query p50, context tokens p50.
+
+### The table
+
+| system | n | overall | ss-user | ss-asst | ss-pref | temporal | kn-update | multi-sess | abstain | write calls | write tokens | query p50 ms | ctx tokens p50 | models (answer / judge) | date | commit | hardware |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| polis-default | — | not yet run — needs a keyed run | | | | | | | | 0 | 0 | | | | | | |
+| polis-full | — | not yet run — needs a keyed run | | | | | | | | 0 | 0 | | | | | | |
+| mem0-oss (v3) | — | not yet run — needs a keyed run | | | | | | | | | | | | | | | |
+| graphiti-falkordb | — | not yet run — needs a keyed run | | | | | | | | | | | | | | | |
+
+A row enters this table by hand, from a results file the nightly job or a
+release dispatch uploaded (`bench/results/<date>-<sha>-longmemeval-<system>.json`,
+rendered with `python3 -m bench.common.report`), with the commit, the
+models, the date and the hardware it was measured on. **Verdict against
+the kill criterion: not yet scored.**
+
+### What F1 could and could not run on this machine (2026-09-07)
+
+- Built and exercised end to end, keyless: all three runners in `--stub`
+  mode (a deterministic stub answer model and stub judge; the stub judge
+  says yes iff the gold answer's words reach the response, so a stub row is
+  retrieval *reachability*, never a score — the renderer labels it STUB),
+  on a six-question built-in sample covering every type; the four results
+  files join into one table. The FalkorDB compose file starts healthy on
+  this machine (validated, then torn down).
+- Not run: any scored question. There is no model key on this machine and
+  nothing was spent. The nightly job (`.github/workflows/bench.yml`) skips
+  cleanly until the repository carries `LONGMEMEVAL_API_KEY`.
+- A finding the stub run surfaced before any key: `polis-full` retrieves
+  the same rows as `polis-default` today, because the answer pack excludes
+  `role = agent` prompts by design (§5.5 keeps agent and system text out of
+  prompts). Making assistant turns retrievable for this benchmark is a
+  retrieval decision (a role filter on the pack under an explicit scope),
+  not a benchmark knob; until it is made, the two Polis rows will differ
+  only in what they ingested, and the assistant-answer categories will
+  score near zero for both, as the plan predicted for `polis-default`.
+- Cost estimate for a keyed run (from the dataset's shape: ~115k tokens of
+  haystack per question, an answer call over ≤ 4k context, a judge call of
+  ~300 tokens): Polis ≈ 2 calls and ≈ 5k tokens per question → ~200 calls /
+  ~0.5M tokens for 100 questions, ~1,000 calls / ~2.5M tokens for 500, per
+  config; Mem0 and Graphiti add their write-path extraction over the whole
+  haystack (~40 sessions per question) — tens of calls and ~150–300k
+  tokens per question, i.e. an order of magnitude more. The nightly job's
+  default cap is 6M tokens for the whole run.
+
