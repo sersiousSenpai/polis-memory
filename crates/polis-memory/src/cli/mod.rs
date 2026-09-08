@@ -96,6 +96,9 @@ enum Cmd {
         node: Option<String>,
         #[arg(long)]
         limit: Option<i64>,
+        /// Also search the imported peer chains (E3); hits are labelled by source.
+        #[arg(long)]
+        shared: bool,
     },
     /// The answer pack rendered as one grounding block.
     Context {
@@ -104,6 +107,9 @@ enum Cmd {
         node: Option<String>,
         #[arg(long)]
         max_tokens: Option<usize>,
+        /// Also include the imported peer chains, in a labelled SHARED section.
+        #[arg(long)]
+        shared: bool,
     },
     /// Literal / regex search over the record.
     Grep {
@@ -471,17 +477,17 @@ fn run(cli: Cli) -> Result<(), String> {
             capture(&home);
             Ok(())
         }
-        Cmd::Search { q, node, limit } => {
+        Cmd::Search { q, node, limit, shared } => {
             let api = open(&home, cli.remote)?;
-            let req = SearchRequest { q: words(q), node, limit, scope: Scope::default() };
+            let req = SearchRequest { q: words(q), node, limit, scope: Scope { include_shared: shared, ..Default::default() } };
             let pack = api.search(&req).map_err(|e| e.to_string())?;
             emit(json, &pack, || render::pack(&pack));
             Ok(())
         }
-        Cmd::Context { q, node, max_tokens } => {
+        Cmd::Context { q, node, max_tokens, shared } => {
             let api = open(&home, cli.remote)?;
             let q = words(q).ok_or("a question is required")?;
-            let block = api.context(&ContextRequest { q, node, max_tokens, scope: Scope::default() }).map_err(|e| e.to_string())?;
+            let block = api.context(&ContextRequest { q, node, max_tokens, scope: Scope { include_shared: shared, ..Default::default() } }).map_err(|e| e.to_string())?;
             emit(json, &block, || render::context(&block));
             Ok(())
         }
