@@ -3,7 +3,7 @@
 All notable changes to Polis Memory. The format follows Keep a Changelog;
 the project is pre-1.0 and every crate shares one version.
 
-## [Unreleased] — 0.1.0
+## [0.1.0] — 2026-09-08
 
 The first cut, extracted from Redline on 2026-09-07 with its history and
 built out over the sessions the plan calls Programs A, B, C, E and G:
