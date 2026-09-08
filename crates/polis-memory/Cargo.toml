@@ -57,6 +57,9 @@ tracing = "0.1"
 # BSD-3-Clause; the seed comes from the OS through `getrandom`.
 ed25519-dalek = "3"
 getrandom = { version = "0.4", features = ["std"] }
+# E3: the `SegmentTransport` trait is async (a transport may be a network); the
+# two shipped here (a folder, a git remote) do blocking local I/O inside it.
+async-trait = "0.1"
 # --- the `cli` feature's deps (all optional) ---
 clap = { version = "4", features = ["derive"], optional = true }
 polis-mcp = { workspace = true, optional = true }

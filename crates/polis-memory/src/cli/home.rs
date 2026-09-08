@@ -112,6 +112,11 @@ impl Home {
     pub fn lock_path(&self) -> PathBuf {
         self.root.join("gardener.lock")
     }
+    /// E3: transport working state (a git remote's clone) under the home.
+    pub fn sync_dir(&self) -> PathBuf {
+        self.root.join("sync")
+    }
+
     pub fn backups_dir(&self) -> PathBuf {
         self.root.join("backups")
     }

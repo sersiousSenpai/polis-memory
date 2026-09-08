@@ -55,6 +55,16 @@ pub const MEMORY_TABLES: &[&str] = &[
     // E2: identity
     "principals",
     "principal_aliases",
+    // E3: sharing — foreign chains are never re-chained (plan §4.6)
+    "foreign_chains",
+    "foreign_principals",
+    "foreign_events",
+    "foreign_prompts",
+    "foreign_notes",
+    "foreign_redactions",
+    "foreign_acks",
+    "foreign_trust",
+    "foreign_subscriptions",
 ];
 
 /// The FTS5 tables of the lexical layer (`lexical.rs`), for the schema dump.
@@ -64,6 +74,9 @@ pub const LEXICAL_TABLES: &[&str] = &[
     "class_nodes_fts",
     "prompts_grep",
     "browse_grep",
+    // E3: the foreign bodies' own index (created by the sharing block, not
+    // the lexical version gate — a rebuild of the local layer never touches it)
+    "foreign_prompts_fts",
 ];
 
 /// The migration steps, in the order Redline ran them. Associated functions
@@ -667,6 +680,125 @@ impl Migration {
             );
         }
         // ---- end E2 ------------------------------------------------------------
+
+        // ---- E3: sharing (plan §4.6) --------------------------------------------
+        // What a peer's verified segments leave behind. Keyed by
+        // `(chain_id, seq)`, never re-chained: our chain never references a
+        // foreign row and a foreign row never enters our hash. Trust,
+        // subscriptions and redaction acknowledgements sit beside the rows
+        // they guard. The foreign bodies get their own FTS5 index with the
+        // lake's tokenizer, built HERE (idempotent) rather than by the
+        // lexical version gate, so a rebuild of the local layer — which drops
+        // and recreates `prompts_fts` — never touches it, and vice versa.
+        conn.execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS foreign_chains (
+                chain_id TEXT PRIMARY KEY,       -- the peer's device id
+                human_id TEXT NOT NULL,          -- its parent human
+                device_name TEXT,
+                display_name TEXT,
+                head_seq INTEGER NOT NULL,       -- newest seq we hold
+                head_hash TEXT NOT NULL,         -- its entry_hash
+                forked INTEGER NOT NULL DEFAULT 0,
+                fork_detail TEXT,
+                first_import_at INTEGER NOT NULL,
+                last_import_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS foreign_principals (
+                principal_id TEXT PRIMARY KEY,
+                chain_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                pubkey TEXT,
+                parent_id TEXT,
+                display_name TEXT
+            );
+            CREATE TABLE IF NOT EXISTS foreign_events (
+                chain_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                ts INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                author TEXT NOT NULL,
+                prompt_id INTEGER,
+                session_id TEXT,
+                version_number INTEGER,
+                ref_kind TEXT,
+                ref_id TEXT,
+                payload_hash TEXT NOT NULL,
+                prev_hash TEXT NOT NULL,
+                entry_hash TEXT NOT NULL,
+                PRIMARY KEY (chain_id, seq)
+            );
+            CREATE TABLE IF NOT EXISTS foreign_prompts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,  -- what an embedding row targets
+                chain_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,                  -- the prompt event's seq on its chain
+                prompt_id INTEGER NOT NULL,            -- the peer's own row id
+                role TEXT NOT NULL,
+                body_hash TEXT NOT NULL,
+                redaction TEXT NOT NULL,               -- full | gist | stub
+                text TEXT,
+                project TEXT,
+                tombstoned INTEGER NOT NULL DEFAULT 0,
+                imported_at INTEGER NOT NULL,
+                UNIQUE (chain_id, seq)
+            );
+            CREATE TABLE IF NOT EXISTS foreign_notes (
+                chain_id TEXT NOT NULL,
+                note_id INTEGER NOT NULL,
+                seq INTEGER,
+                target_kind TEXT NOT NULL,
+                target_id TEXT,
+                text TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (chain_id, note_id)
+            );
+            CREATE TABLE IF NOT EXISTS foreign_redactions (
+                chain_id TEXT NOT NULL,           -- the chain that emitted it
+                event_seq INTEGER NOT NULL,
+                target_chain TEXT NOT NULL,
+                target_seq INTEGER NOT NULL,
+                imported_at INTEGER NOT NULL,
+                PRIMARY KEY (chain_id, event_seq)
+            );
+            CREATE TABLE IF NOT EXISTS foreign_acks (
+                chain_id TEXT PRIMARY KEY,        -- a peer
+                acked_seq INTEGER NOT NULL,       -- newest seq of OUR chain it reported importing
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS foreign_trust (
+                principal_id TEXT PRIMARY KEY,    -- a human
+                pubkey TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                source TEXT NOT NULL,             -- tofu | admin
+                display_name TEXT,
+                added_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS foreign_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                principal TEXT,                   -- a human id, a fingerprint prefix, or a display name
+                project TEXT,
+                class TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_foreign_prompts_chain ON foreign_prompts (chain_id, seq);
+            CREATE VIRTUAL TABLE IF NOT EXISTS foreign_prompts_fts USING fts5(
+                text,
+                content='foreign_prompts', content_rowid='id',
+                tokenize='{tok}', prefix='{pre}'
+            );
+            CREATE TRIGGER IF NOT EXISTS foreign_prompts_fts_ai AFTER INSERT ON foreign_prompts BEGIN
+                INSERT INTO foreign_prompts_fts(rowid, text) VALUES (new.id, COALESCE(new.text, ''));
+            END;
+            CREATE TRIGGER IF NOT EXISTS foreign_prompts_fts_ad AFTER DELETE ON foreign_prompts BEGIN
+                INSERT INTO foreign_prompts_fts(foreign_prompts_fts, rowid, text) VALUES ('delete', old.id, COALESCE(old.text, ''));
+            END;
+            CREATE TRIGGER IF NOT EXISTS foreign_prompts_fts_au AFTER UPDATE ON foreign_prompts BEGIN
+                INSERT INTO foreign_prompts_fts(foreign_prompts_fts, rowid, text) VALUES ('delete', old.id, COALESCE(old.text, ''));
+                INSERT INTO foreign_prompts_fts(rowid, text) VALUES (new.id, COALESCE(new.text, ''));
+            END;",
+            tok = crate::lexical::TOKENIZER,
+            pre = crate::lexical::PREFIX_SIZES,
+        ))?;
+        // ---- end E3 ------------------------------------------------------------
         Ok(())
     }
 

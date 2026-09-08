@@ -47,12 +47,14 @@ pub struct ScopeFilter {
     pub agent: Option<String>,
     pub run: Option<String>,
     pub org: Option<String>,
+    /// E3: widen a read to the imported foreign chains. Never the default.
+    pub include_shared: bool,
 }
 
 impl ScopeFilter {
     /// The identity half of a [`polis_core::api::Scope`].
     pub fn from_scope(scope: &polis_core::api::Scope) -> Self {
-        ScopeFilter { principal: scope.principal.clone(), agent: scope.agent.clone(), run: scope.run.clone(), org: scope.org.clone() }
+        ScopeFilter { principal: scope.principal.clone(), agent: scope.agent.clone(), run: scope.run.clone(), org: scope.org.clone(), include_shared: scope.include_shared }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -391,7 +393,7 @@ mod tests {
     #[test]
     fn the_tables_exist_and_the_scope_columns_are_on_all_five() {
         let store = PolisStore::open_in_memory().unwrap();
-        assert_eq!(store.meta(crate::meta::SCHEMA_VERSION_KEY).unwrap().as_deref(), Some("3"));
+        assert_eq!(store.meta(crate::meta::SCHEMA_VERSION_KEY).unwrap().as_deref(), Some(crate::meta::STORE_SCHEMA_VERSION));
         let conn = store.conn();
         for table in ["prompts", "browse_events", "user_notes", "class_nodes", "class_observations"] {
             let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap();

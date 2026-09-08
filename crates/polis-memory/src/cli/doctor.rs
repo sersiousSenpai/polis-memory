@@ -45,6 +45,11 @@ pub struct Doctor {
     pub newest_verifying_backup: Option<String>,
     pub fde: String,
     pub identity: String,
+    /// E3: `(chain, source, head_seq, forked)` for every imported peer chain.
+    pub peers: Vec<(String, String, i64, bool)>,
+    /// E3: redactions we emitted that a peer has not reported importing.
+    pub unacked_redactions: Vec<crate::sharing::UnackedRedaction>,
+    pub trusted_keys: usize,
     /// The file could not even be opened as a store (malformed, wrong schema).
     pub store_unreadable: bool,
     pub offer_restore: bool,
@@ -93,6 +98,23 @@ pub fn run(home: &Home) -> Doctor {
         None => "no key — run `polis init` (writes carry the login name until then)".into(),
     };
     d.fde = fde_status();
+    // Sharing (E3): the peer chains we hold, forks, redactions not yet
+    // acknowledged. A read of our own file; a daemon holding it is fine.
+    if d.db_exists {
+        if let Ok(store) = PolisStore::open(&db) {
+            if let Ok(chains) = store.list_foreign_chains() {
+                for c in chains {
+                    let source = c.display_name.clone().unwrap_or_else(|| polis_core::identity::fingerprint(&c.chain_id));
+                    if c.forked {
+                        d.problems.push(format!("peer chain {} ({source}) is FORKED: {} — nothing newer from it lands until `polis subscribe rm --purge` resets it", polis_core::identity::fingerprint(&c.chain_id), c.fork_detail.clone().unwrap_or_default()));
+                    }
+                    d.peers.push((c.chain_id, source, c.head_seq, c.forked));
+                }
+            }
+            d.trusted_keys = store.trust_list().map(|t| t.len()).unwrap_or(0);
+            d.unacked_redactions = crate::sharing::unacknowledged_redactions(&store).unwrap_or_default();
+        }
+    }
     for name in ["claude", "codex", "ollama"] {
         d.binaries.push((name.into(), on_path(name).is_some()));
     }
@@ -218,6 +240,21 @@ pub fn render(d: &Doctor) -> String {
     out.push_str(&format!("backups     {} · newest verifying: {}\n", d.backups, d.newest_verifying_backup.as_deref().unwrap_or("none")));
     out.push_str(&format!("disk crypt  {}\n", d.fde));
     out.push_str(&format!("identity    {}\n", d.identity));
+    out.push_str(&format!(
+        "sharing     {} peer chain(s) · {} trusted key(s){}\n",
+        d.peers.len(),
+        d.trusted_keys,
+        if d.peers.iter().any(|p| p.3) { " · FORKED chains above" } else { "" }
+    ));
+    for (chain, source, head, forked) in &d.peers {
+        out.push_str(&format!("  peer      {} ({source}) · head #{head}{}\n", polis_core::identity::fingerprint(chain), if *forked { " · FORKED" } else { "" }));
+    }
+    if !d.unacked_redactions.is_empty() {
+        out.push_str(&format!("redactions  {} not yet acknowledged by a peer:\n", d.unacked_redactions.len()));
+        for r in &d.unacked_redactions {
+            out.push_str(&format!("  #{} (forgot #{}) — {} last reported #{}\n", r.redaction_seq, r.target_seq, r.peer_source, r.peer_acked_seq.map(|s| s.to_string()).unwrap_or_else(|| "nothing".into())));
+        }
+    }
     if d.problems.is_empty() {
         out.push_str("\nno problems found\n");
     } else {

@@ -34,7 +34,11 @@ pub mod mirror;
 pub mod organize;
 pub mod retrieval;
 pub mod revert;
+pub mod sharing;
 pub mod skill;
+pub mod sync;
+pub mod transport;
+pub mod union;
 
 use std::sync::Arc;
 
@@ -495,10 +499,19 @@ impl MemoryApi for PolisHandle {
                     .trim()
                     .parse()
                     .map_err(|_| MemoryError::Rejected("target_id must be a prompt id".into()))?;
+                let actor = self.actor(&req.scope);
                 let seq = self
                     .store
-                    .compact_prompt_body(id, "[forgotten]", "forget", gardener::GIST_SOURCE_DETERMINISTIC, &self.actor(&req.scope))
+                    .compact_prompt_body(id, "[forgotten]", "forget", gardener::GIST_SOURCE_DETERMINISTIC, &actor)
                     .map_err(store_err)?;
+                // --- E3 --- a `redaction` event so peers that hold this body
+                // tombstone it on their next sync (plan §4.6 "Forget
+                // propagates"). Only a device chain can name what it forgot.
+                if let Some(identity) = self.identity.as_ref() {
+                    if let Err(e) = sharing::append_redaction(&self.store, &identity.device_id(), id, &actor) {
+                        tracing::warn!(error = %e, prompt = id, "forget: the redaction event was not appended");
+                    }
+                }
                 Ok(ForgetReceipt { forgotten: true, seq })
             }
             other => Err(MemoryError::Unavailable(format!("forget for `{other}` lands with the sharing layer (E2)"))),

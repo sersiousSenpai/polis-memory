@@ -659,6 +659,9 @@ pub fn build_answer_pack_scoped(
         },
     ];
 
+    // --- E3 --- the union arm: foreign hits only under include_shared, labelled by source.
+    let shared_hits = if scope.include_shared { crate::union::shared_hits(polis, query, limit) } else { Vec::new() };
+    let arm_coverage = crate::union::with_shared_coverage(arm_coverage, scope.include_shared, shared_hits.len());
     let mut pack = AnswerPack {
         head_seq,
         query: query.map(str::to_string),
@@ -670,6 +673,7 @@ pub fn build_answer_pack_scoped(
         grep_hits,
         arm_coverage,
         truncated: over_cap.into_iter().map(str::to_string).collect(),
+        shared_hits,
     };
     enforce_pack_budget(&mut pack);
     pack_span.record("ms", pack_timer.stop());

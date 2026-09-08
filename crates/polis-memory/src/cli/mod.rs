@@ -161,17 +161,107 @@ enum Cmd {
         /// Corpus roles whose bodies may ship, comma-separated (default: user).
         #[arg(long)]
         roles: Option<String>,
+        /// Ship the local vectors beside every full body (a peer with the same
+        /// embedder skips the re-embed; any other discards them).
+        #[arg(long)]
+        include_vectors: bool,
     },
-    /// Verify a `polis.bundle/2` envelope: the key hashes to its principal,
-    /// the device derives from it, the header signature, the payload hash,
-    /// the bind, every event hash and link, and — for this device's own
-    /// chain — continuity with the local rows. Stores nothing (E3).
+    /// Import a peer's `polis.bundle/2` envelope (E3): verify everything —
+    /// the key hashes to its principal, the device derives from it, the
+    /// signature, the payload hash, the bind, every event hash and link —
+    /// then trust, then continuity with what we already hold of that chain,
+    /// then store its rows as FOREIGN (never re-chained). `--verify-only`
+    /// reports and stores nothing.
     Import {
         file: PathBuf,
-        /// Required until E3: verify and report, never store.
+        /// Verify and report, never store.
         #[arg(long)]
         verify_only: bool,
+        /// Trust an unknown key on first use (its fingerprint is printed).
+        #[arg(long)]
+        tofu: bool,
+        /// Import even when no subscription matches the chain.
+        #[arg(long)]
+        force: bool,
     },
+    /// Publish this device's new segments and import subscribed peers' —
+    /// through a folder (`--folder DIR`, e.g. a synced drive) or a git
+    /// remote (`--git URL`). Replicate, never federate: after a sync every
+    /// question is answered from local rows.
+    Sync {
+        #[arg(long, value_name = "DIR")]
+        folder: Option<PathBuf>,
+        #[arg(long, value_name = "URL")]
+        git: Option<String>,
+        /// Only publish.
+        #[arg(long)]
+        publish_only: bool,
+        /// Only fetch + import.
+        #[arg(long)]
+        fetch_only: bool,
+        /// Trust unknown keys on first use.
+        #[arg(long)]
+        tofu: bool,
+        /// Import chains no subscription matches.
+        #[arg(long)]
+        force: bool,
+        /// Ship vectors beside full bodies.
+        #[arg(long)]
+        include_vectors: bool,
+        /// auto | full | gist | stub (default auto).
+        #[arg(long)]
+        bodies: Option<String>,
+    },
+    /// What to import: by human (id, fingerprint prefix or display name),
+    /// project root, or class. No subscriptions = import every chain a
+    /// transport offers.
+    Subscribe {
+        #[command(subcommand)]
+        cmd: SubscribeCmd,
+    },
+    /// The keys this install trusts (admin-distributed, or on first use).
+    Trust {
+        #[command(subcommand)]
+        cmd: TrustCmd,
+    },
+    /// The peer chains held here: source, head, forked.
+    Peers,
+}
+
+#[derive(Subcommand)]
+enum SubscribeCmd {
+    Add {
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        class: Option<String>,
+    },
+    List,
+    Rm {
+        id: i64,
+        /// Also delete every row imported from chains this subscription
+        /// covered (and clear their fork marks).
+        #[arg(long)]
+        purge: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TrustCmd {
+    List,
+    /// Trust a human's key: 64 hex chars, or `@FILE` holding them.
+    Add {
+        pubkey: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    Rm {
+        principal: String,
+    },
+    /// This install's human fingerprint and public key — what a peer adds.
+    Fingerprint,
 }
 
 #[derive(Subcommand)]
@@ -444,7 +534,7 @@ fn run(cli: Cli) -> Result<(), String> {
             });
             Ok(())
         }
-        Cmd::Export { signed: _, from_seq, out, dry_run, bodies, roles } => {
+        Cmd::Export { signed: _, from_seq, out, dry_run, bodies, roles, include_vectors } => {
             let db = home.db_path();
             let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
             let mut policy = crate::envelope::Policy::default();
@@ -454,7 +544,7 @@ fn run(cli: Cli) -> Result<(), String> {
             if let Some(r) = roles.as_deref() {
                 policy.roles = r.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
             }
-            let opts = crate::envelope::BuildOptions { from_seq, policy, org_id: None };
+            let opts = crate::envelope::BuildOptions { from_seq, policy, org_id: None, include_vectors };
             if dry_run {
                 let d = crate::envelope::decisions(&store, &opts)?;
                 emit(json, &d, || {
@@ -484,13 +574,24 @@ fn run(cli: Cli) -> Result<(), String> {
             }
             Ok(())
         }
-        Cmd::Import { file, verify_only } => {
-            if !verify_only {
-                return Err("importing a foreign chain lands with the sharing layer (E3); pass --verify-only to verify and report".into());
-            }
+        Cmd::Import { file, verify_only, tofu, force } => {
             let text = std::fs::read_to_string(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
             let env: crate::envelope::Envelope = serde_json::from_str(&text).map_err(|e| format!("{} is not a polis.bundle/2 envelope: {e}", file.display()))?;
             let db = home.db_path();
+            if !verify_only {
+                let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
+                let opts = crate::sharing::ImportOptions { tofu, force, local_model: None };
+                return match crate::sharing::import(&store, &env, &opts) {
+                    Ok(r) => {
+                        emit(json, &r, || render_import(&r));
+                        Ok(())
+                    }
+                    Err(e) => {
+                        emit(json, &serde_json::json!({ "ok": false, "error": e }), || format!("REFUSED · {e}"));
+                        Err(format!("import refused: {e}"))
+                    }
+                };
+            }
             let result = if db.exists() {
                 let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
                 crate::envelope::verify_against(&store, &env)
@@ -512,6 +613,133 @@ fn run(cli: Cli) -> Result<(), String> {
                     Err(format!("envelope refused: {e}"))
                 }
             }
+        }
+        Cmd::Sync { folder, git, publish_only, fetch_only, tofu, force, include_vectors, bodies } => {
+            let transport: Box<dyn crate::transport::SegmentTransport> = match (folder, git) {
+                (Some(dir), None) => Box::new(crate::transport::FolderTransport::new(dir)),
+                (None, Some(url)) => Box::new(crate::transport::GitTransport::new(url.clone(), home.sync_dir().join("git").join(short_hash(&url)))),
+                _ => return Err("pass exactly one of --folder DIR or --git URL".into()),
+            };
+            let db = home.db_path();
+            let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
+            let identity = crate::identity::Identity::load(&home.identity_dir(), home.device_name())?
+                .ok_or_else(|| "no identity — run `polis init` first".to_string())?;
+            let mut policy = crate::envelope::Policy::default();
+            if let Some(b) = bodies.as_deref() {
+                policy.bodies = crate::envelope::Bodies::parse(b).ok_or_else(|| format!("--bodies must be auto|full|gist|stub, not `{b}`"))?;
+            }
+            let opts = crate::sync::SyncOptions { publish: !fetch_only, fetch: !publish_only, tofu, force, policy, include_vectors, local_model: None };
+            let rt = runtime()?;
+            let report = rt.block_on(crate::sync::sync(&store, &identity, &crate::identity::login_name(), transport.as_ref(), &opts));
+            emit(json, &report, || render_sync(&report));
+            if report.errors.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("{} error(s) during sync", report.errors.len()))
+            }
+        }
+        Cmd::Subscribe { cmd } => {
+            let db = home.db_path();
+            let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
+            match cmd {
+                SubscribeCmd::Add { principal, project, class } => {
+                    if principal.is_none() && project.is_none() && class.is_none() {
+                        return Err("give at least one of --principal, --project, --class".into());
+                    }
+                    let id = store.subscribe(principal.as_deref(), project.as_deref(), class.as_deref()).map_err(|e| e.to_string())?;
+                    emit(json, &serde_json::json!({ "id": id }), || format!("subscription #{id} added"));
+                    Ok(())
+                }
+                SubscribeCmd::List => {
+                    let rows = store.subscriptions().map_err(|e| e.to_string())?;
+                    emit(json, &rows, || {
+                        if rows.is_empty() {
+                            "no subscriptions — every chain a transport offers is imported".to_string()
+                        } else {
+                            rows.iter().map(|r| format!("#{} principal {} · project {} · class {}", r.id, r.principal.as_deref().unwrap_or("*"), r.project.as_deref().unwrap_or("*"), r.class.as_deref().unwrap_or("*"))).collect::<Vec<_>>().join("\n")
+                        }
+                    });
+                    Ok(())
+                }
+                SubscribeCmd::Rm { id, purge } => {
+                    let rows = store.subscriptions().map_err(|e| e.to_string())?;
+                    let Some(row) = rows.iter().find(|r| r.id == id) else { return Err(format!("no subscription #{id}")) };
+                    let mut purged = 0usize;
+                    if purge {
+                        for c in store.list_foreign_chains().map_err(|e| e.to_string())? {
+                            let matches = row.principal.as_deref().is_none_or(|p| {
+                                let p_l = p.to_ascii_lowercase();
+                                c.human_id == p_l || c.human_id.starts_with(&p_l) || polis_core::identity::fingerprint(&c.human_id) == p_l || c.display_name.as_deref().is_some_and(|d| d.eq_ignore_ascii_case(p))
+                            });
+                            if matches {
+                                purged += store.forget_foreign_chain(&c.chain_id).map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                    store.unsubscribe(id).map_err(|e| e.to_string())?;
+                    emit(json, &serde_json::json!({ "removed": id, "purgedRows": purged }), || format!("subscription #{id} removed{}", if purge { format!(" · {purged} foreign row(s) purged") } else { String::new() }));
+                    Ok(())
+                }
+            }
+        }
+        Cmd::Trust { cmd } => {
+            let db = home.db_path();
+            match cmd {
+                TrustCmd::Fingerprint => {
+                    let identity = crate::identity::Identity::load(&home.identity_dir(), home.device_name())?
+                        .ok_or_else(|| "no identity — run `polis init` first".to_string())?;
+                    emit(json, &serde_json::json!({ "principal": identity.principal_id(), "fingerprint": identity.fingerprint(), "pubkey": identity.pubkey_hex() }), || {
+                        format!("human {} · fingerprint {} · pubkey {}", identity.principal_id(), identity.fingerprint(), identity.pubkey_hex())
+                    });
+                    Ok(())
+                }
+                TrustCmd::List => {
+                    let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
+                    let rows = store.trust_list().map_err(|e| e.to_string())?;
+                    emit(json, &rows, || {
+                        if rows.is_empty() {
+                            "no trusted keys".to_string()
+                        } else {
+                            rows.iter().map(|t| format!("{} ({}) · {}{}", t.fingerprint, t.source, t.principal_id, t.display_name.as_deref().map(|n| format!(" · {n}")).unwrap_or_default())).collect::<Vec<_>>().join("\n")
+                        }
+                    });
+                    Ok(())
+                }
+                TrustCmd::Add { pubkey, name } => {
+                    let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
+                    let hex = match pubkey.strip_prefix('@') {
+                        Some(path) => std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?.trim().to_string(),
+                        None => pubkey.trim().to_string(),
+                    };
+                    let bytes = crate::identity::hex_decode(&hex).filter(|b| b.len() == 32).ok_or("a public key is 64 hex chars")?;
+                    let principal = polis_core::identity::principal_id(&bytes);
+                    let entry = polis_store::foreign::TrustEntry { principal_id: principal.clone(), pubkey: hex, fingerprint: polis_core::identity::fingerprint(&principal), source: "admin".into(), display_name: name, added_at: polis_core::ledger::now_millis() };
+                    let added = store.trust_set(&entry).map_err(|e| e.to_string())?;
+                    emit(json, &serde_json::json!({ "principal": principal, "added": added }), || format!("{} {}", entry.fingerprint, if added { "trusted (admin)" } else { "already trusted — `polis trust rm` first to replace" }));
+                    Ok(())
+                }
+                TrustCmd::Rm { principal } => {
+                    let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
+                    let rows = store.trust_list().map_err(|e| e.to_string())?;
+                    let target = rows.iter().find(|t| t.principal_id == principal || t.fingerprint == principal).map(|t| t.principal_id.clone()).ok_or_else(|| format!("no trusted key {principal}"))?;
+                    store.trust_remove(&target).map_err(|e| e.to_string())?;
+                    emit(json, &serde_json::json!({ "removed": target }), || "removed".to_string());
+                    Ok(())
+                }
+            }
+        }
+        Cmd::Peers => {
+            let db = home.db_path();
+            let store = PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?;
+            let chains = store.list_foreign_chains().map_err(|e| e.to_string())?;
+            emit(json, &chains, || {
+                if chains.is_empty() {
+                    "no peer chains held".to_string()
+                } else {
+                    chains.iter().map(|c| format!("{} ({}) · head #{} · {}{}", polis_core::identity::fingerprint(&c.chain_id), c.display_name.as_deref().unwrap_or("unnamed"), c.head_seq, c.device_name.as_deref().unwrap_or("?"), if c.forked { " · FORKED" } else { "" })).collect::<Vec<_>>().join("\n")
+                }
+            });
+            Ok(())
         }
         Cmd::Backup => {
             let db = home.db_path();
@@ -586,4 +814,49 @@ fn capture(home: &Home) {
         }
         Err(e) => tracing::warn!(error = %e, "capture: could not open the store"),
     }
+}
+
+fn short_hash(s: &str) -> String {
+    polis_core::ledger::sha256_hex(s.as_bytes())[..16].to_string()
+}
+
+fn render_import(r: &crate::sharing::ImportReport) -> String {
+    let what = match &r.outcome {
+        crate::sharing::ImportOutcome::Appended { appended } => format!("{appended} new event(s)"),
+        crate::sharing::ImportOutcome::NoOp => "already held, unchanged".to_string(),
+        crate::sharing::ImportOutcome::OwnChain => "our own chain — continuity ok, nothing stored".to_string(),
+    };
+    format!(
+        "ok · {} · chain {} of human {} · seq {}..{} · {} prompts, {} notes, {} tombstoned · vectors kept {} / discarded {}{}",
+        what,
+        polis_core::identity::fingerprint(&r.chain_id),
+        polis_core::identity::fingerprint(&r.human),
+        r.from_seq,
+        r.to_seq,
+        r.rows.prompts,
+        r.rows.notes,
+        r.rows.tombstoned,
+        r.vectors_kept,
+        r.vectors_discarded,
+        r.trusted_now.as_deref().map(|f| format!(" · TRUSTED ON FIRST USE: {f} (verify this fingerprint with the peer)")).unwrap_or_default()
+    )
+}
+
+fn render_sync(r: &crate::sync::SyncReport) -> String {
+    let mut s = String::new();
+    match &r.published {
+        Some(p) => s.push_str(&format!("published seq {}..{} → {}\n", p.from_seq, p.to_seq, p.locator)),
+        None => s.push_str("published nothing new\n"),
+    }
+    for i in &r.imported {
+        s.push_str(&render_import(i));
+        s.push('\n');
+    }
+    for (c, why) in &r.skipped {
+        s.push_str(&format!("skipped {}: {why}\n", polis_core::identity::fingerprint(c)));
+    }
+    for (c, e) in &r.errors {
+        s.push_str(&format!("ERROR {}: {e}\n", if c.len() == 64 { polis_core::identity::fingerprint(c) } else { c.clone() }));
+    }
+    s.trim_end().to_string()
 }

@@ -120,6 +120,53 @@ pub struct PayloadPrompt {
     pub body_hash: String,
     pub redaction: Redaction,
     pub text: Option<String>,
+    /// E3: the project root the prompt was captured under, so a subscriber's
+    /// `--project` filter can keep or stub it. Outside the hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+}
+
+// --- E3 ---
+/// A vector the exporter ships beside a full body. Reused by an importer
+/// only when `model` is its own embedder's id; otherwise discarded and the
+/// text re-embedded locally (plan §4.6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayloadVector {
+    pub prompt_id: i64,
+    pub model: String,
+    pub dim: i64,
+    pub chunk_ix: i64,
+    pub char_start: i64,
+    pub char_len: i64,
+    /// The int8 scale, as stored.
+    pub scale: f64,
+    /// The int8 bytes, hex.
+    pub vec_hex: String,
+}
+
+/// What a `redaction` event on the chain commits to: the `(chain, seq)`
+/// whose body was forgotten. Only its hash is on the chain; the payload
+/// rides here (and in `polis_meta` under `polis.redaction.<event_seq>`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedactionPayload {
+    pub chain_id: String,
+    pub seq: i64,
+    /// The redaction event's own seq on the emitting chain.
+    pub event_seq: i64,
+}
+
+impl RedactionPayload {
+    /// The bytes the chain hashes: `{"chainId":…,"seq":…}` — the event's own
+    /// seq is not part of it (it is the row's position, not its content).
+    pub fn canonical_json(&self) -> String {
+        serde_json::json!({ "chainId": self.chain_id, "seq": self.seq }).to_string()
+    }
+
+    pub fn payload_hash(&self) -> String {
+        sha256_hex(self.canonical_json().as_bytes())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -131,6 +178,18 @@ pub struct Payload {
     pub principals: Vec<PrincipalCard>,
     pub aliases: Vec<(String, String)>,
     pub binds: Vec<BindPayload>,
+    // --- E3 --- (all default-empty, so an E2 envelope still parses)
+    /// Vectors for the full bodies shipped, when the exporter chose to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vectors: Vec<PayloadVector>,
+    /// The payloads of the `redaction` events in this segment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redactions: Vec<RedactionPayload>,
+    /// `(chain_id, head_seq)` — the newest seq of each PEER chain the
+    /// exporter holds. A peer reading this learns which of its redactions
+    /// this device has honoured.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acks: Vec<(String, i64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +219,9 @@ pub struct BuildOptions {
     pub from_seq: Option<i64>,
     pub policy: Policy,
     pub org_id: Option<String>,
+    /// E3: ship the local vectors of every full body (a peer with the same
+    /// embedder skips the re-embed; any other discards them).
+    pub include_vectors: bool,
 }
 
 /// One row of a `--dry-run`: what the policy decided for each prompt.
@@ -206,6 +268,7 @@ struct PromptRow {
     body: String,
     gist: Option<String>,
     body_hash: String,
+    project: Option<String>,
 }
 
 fn prompt_rows(store: &PolisStore, ids: &[i64]) -> Result<Vec<PromptRow>, String> {
@@ -213,14 +276,14 @@ fn prompt_rows(store: &PolisStore, ids: &[i64]) -> Result<Vec<PromptRow>, String
     let mut out = Vec::with_capacity(ids.len());
     let mut stmt = conn
         .prepare(
-            "SELECT id, COALESCE(role, 'user'), COALESCE(visibility, 'private'), body, gist, body_hash
+            "SELECT id, COALESCE(role, 'user'), COALESCE(visibility, 'private'), body, gist, body_hash, project_path
              FROM prompts WHERE id = ?1",
         )
         .map_err(|e| e.to_string())?;
     for id in ids {
         let row = stmt
             .query_row(rusqlite::params![id], |r| {
-                Ok(PromptRow { id: r.get(0)?, role: r.get(1)?, visibility: r.get(2)?, body: r.get(3)?, gist: r.get(4)?, body_hash: r.get(5)? })
+                Ok(PromptRow { id: r.get(0)?, role: r.get(1)?, visibility: r.get(2)?, body: r.get(3)?, gist: r.get(4)?, body_hash: r.get(5)?, project: r.get(6)? })
             })
             .map_err(|e| e.to_string())?;
         out.push(row);
@@ -279,8 +342,26 @@ pub fn build(store: &PolisStore, identity: &Identity, login: &str, opts: &BuildO
             Redaction::Gist => row.gist.clone(),
             Redaction::Stub => None,
         };
-        prompts.push(PayloadPrompt { id: row.id, role: row.role, body_hash: row.body_hash, redaction, text });
+        prompts.push(PayloadPrompt { id: row.id, role: row.role, body_hash: row.body_hash, redaction, text, project: row.project });
     }
+    // --- E3 --- vectors beside full bodies, when asked; the segment's own
+    // redaction payloads; the peer heads we hold (acks).
+    let mut vectors = Vec::new();
+    if opts.include_vectors {
+        for p in prompts.iter().filter(|p| p.redaction == Redaction::Full) {
+            for (model, dim, chunk_ix, char_start, char_len, scale, vec) in store.embeddings_for_prompt(p.id).map_err(|e| e.to_string())? {
+                vectors.push(PayloadVector { prompt_id: p.id, model, dim, chunk_ix, char_start, char_len, scale, vec_hex: crate::identity::hex_encode(&vec) });
+            }
+        }
+    }
+    let redactions: Vec<RedactionPayload> = store
+        .own_redactions()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|(event_seq, _, _)| events.iter().any(|e| e.seq == *event_seq))
+        .map(|(event_seq, chain_id, seq)| RedactionPayload { chain_id, seq, event_seq })
+        .collect();
+    let acks: Vec<(String, i64)> = store.list_foreign_chains().map_err(|e| e.to_string())?.into_iter().map(|c| (c.chain_id, c.head_seq)).collect();
 
     let seqs: std::collections::HashSet<i64> = events.iter().map(|e| e.seq).collect();
     let notes: Vec<BundleNote> = if opts.policy.roles.iter().any(|r| r == "user") {
@@ -309,7 +390,7 @@ pub fn build(store: &PolisStore, identity: &Identity, login: &str, opts: &BuildO
         return Err("this device is not bound to the chain — run `polis init`".into());
     }
 
-    let payload = Payload { events, prompts, notes, principals, aliases, binds };
+    let payload = Payload { events, prompts, notes, principals, aliases, binds, vectors, redactions, acks };
     let payload_json = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
     let header = Header {
         schema: ENVELOPE_SCHEMA.to_string(),
@@ -357,6 +438,10 @@ pub enum VerifyError {
     BodyHash(i64),
     /// The segment is our own chain and disagrees with the local rows.
     Continuity(String),
+    // --- E3 ---
+    /// A `redaction` event in the segment commits to a payload the envelope
+    /// does not carry (or carries with a different hash).
+    RedactionHashMismatch(i64),
 }
 
 impl std::fmt::Display for VerifyError {
@@ -375,6 +460,7 @@ impl std::fmt::Display for VerifyError {
             VerifyError::BindHashMismatch(s) => write!(f, "bind hash: the principal_bind at seq {s} commits to a payload the envelope does not carry"),
             VerifyError::BodyHash(id) => write!(f, "body hash: prompt {id} does not hash to its body_hash"),
             VerifyError::Continuity(s) => write!(f, "continuity: {s}"),
+            VerifyError::RedactionHashMismatch(s) => write!(f, "redaction hash: the redaction at seq {s} commits to a payload the envelope does not carry"),
         }
     }
 }
@@ -465,6 +551,13 @@ pub fn verify(env: &Envelope) -> Result<Verified, VerifyError> {
     for e in events.iter().filter(|e| e.kind == EventKind::PrincipalBind.as_str() && e.ref_id.as_deref() == Some(h.chain_id.as_str())) {
         if !env.payload.binds.iter().any(|b| b.payload_hash() == e.payload_hash) {
             return Err(VerifyError::BindHashMismatch(e.seq));
+        }
+    }
+    // 7b (E3). a redaction event in the segment commits to a payload the envelope carries
+    for e in events.iter().filter(|e| e.kind == EventKind::Redaction.as_str()) {
+        let ok = env.payload.redactions.iter().any(|r| r.event_seq == e.seq && r.payload_hash() == e.payload_hash);
+        if !ok {
+            return Err(VerifyError::RedactionHashMismatch(e.seq));
         }
     }
     // 8. bodies: a full text hashes to its body_hash; a prompt event's hash is its row's

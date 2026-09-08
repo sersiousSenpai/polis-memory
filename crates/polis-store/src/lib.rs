@@ -34,6 +34,7 @@ pub mod prompts;
 pub mod record;
 pub mod runs;
 pub mod principals;
+pub mod foreign;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};

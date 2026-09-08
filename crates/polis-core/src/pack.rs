@@ -136,6 +136,42 @@ pub struct AnswerPack {
     /// Which lists the byte budget cut, so the agent knows to narrow rather
     /// than conclude the record is empty.
     pub truncated: Vec<String>,
+    // --- E3 ---
+    /// Hits from imported foreign chains (plan §4.6). Present only when the
+    /// scope asked for `include_shared`; each carries its source, and a
+    /// consumer must never present one as the user's own words.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_hits: Vec<ForeignHit>,
+}
+
+// --- E3 ---
+/// One hit from a foreign chain: third-party content, labelled by source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignHit {
+    /// The peer's device chain.
+    pub chain_id: String,
+    /// `shared:<fingerprint>` (or the peer's display name when known) — the
+    /// label a consumer shows beside the text.
+    pub source: String,
+    /// The prompt event's seq ON ITS CHAIN — cite as `chain:seq`, never `#seq`.
+    pub seq: i64,
+    pub role: String,
+    /// `full` | `gist` | `stub`.
+    pub redaction: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub arms: Vec<ArmHit>,
+    pub score: f64,
+}
+
+impl ForeignHit {
+    /// `chain:seq` — the citation form for a foreign row.
+    pub fn cite(&self) -> String {
+        format!("{}:{}", crate::identity::fingerprint(&self.chain_id), self.seq)
+    }
 }
 
 
@@ -250,6 +286,10 @@ pub enum Arm {
     Lexical,
     Grep,
     Semantic,
+    // --- E3 ---
+    /// The union arm over imported foreign chains; runs only under
+    /// `include_shared`.
+    Shared,
 }
 
 impl Arm {
@@ -260,6 +300,7 @@ impl Arm {
             Arm::Lexical => "lexical",
             Arm::Grep => "grep",
             Arm::Semantic => "semantic",
+            Arm::Shared => "shared",
         }
     }
 }
@@ -371,7 +412,8 @@ pub fn render_answer_pack_block(
         && pack.notes.is_empty()
         && pack.prompt_hits.is_empty()
         && pack.browse_hits.is_empty()
-        && pack.grep_hits.is_empty();
+        && pack.grep_hits.is_empty()
+        && pack.shared_hits.is_empty();
     if empty {
         return None;
     }
@@ -495,6 +537,22 @@ pub fn render_answer_pack_block(
                 g.seq.unwrap_or(0),
                 g.label,
                 clip_line(&g.excerpt, 160)
+            ));
+        }
+        out.push('\n');
+    }
+    // --- E3 --- third-party content, always last and always labelled: a
+    // model reading this block must be able to tell a peer's words from
+    // the user's own, and never cite one as `#seq`.
+    if !pack.shared_hits.is_empty() {
+        out.push_str("SHARED (third-party, from peers — not the user's own words):\n");
+        for h in &pack.shared_hits {
+            out.push_str(&format!(
+                "- [{}] {} ({}) {}\n",
+                h.source,
+                h.cite(),
+                h.redaction,
+                clip_line(h.text.as_deref().unwrap_or("[body not shared]"), INLINE_BODY_CHARS)
             ));
         }
         out.push('\n');
@@ -658,6 +716,7 @@ mod tests {
             grep_hits: Vec::new(),
             arm_coverage: Vec::new(),
             truncated: Vec::new(),
+            shared_hits: Vec::new(),
         };
         enforce_pack_budget(&mut pack);
 

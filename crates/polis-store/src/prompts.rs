@@ -424,7 +424,7 @@ impl PolisStore {
         let scope = Self::scope_clause_locked(
             &conn,
             "p",
-            &crate::principals::ScopeFilter { principal: f.principal.clone(), agent: f.agent.clone(), run: f.run.clone(), org: f.org.clone() },
+            &crate::principals::ScopeFilter { principal: f.principal.clone(), agent: f.agent.clone(), run: f.run.clone(), org: f.org.clone(), include_shared: false },
         )?;
         sql.push_str(&scope.sql);
         binds.extend(scope.binds);

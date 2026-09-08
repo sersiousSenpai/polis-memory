@@ -390,9 +390,16 @@ pub fn semantic_search(
 pub fn index_tick(store: &PolisStore, embedder: &dyn Embedder, max_targets: usize) -> usize {
     let provider = embedder;
     let model = provider.model_id();
-    let Ok(backlog) = store.embedding_backlog(&model, max_targets as i64) else {
+    let Ok(mut backlog) = store.embedding_backlog(&model, max_targets as i64) else {
         return 0;
     };
+    // E3: foreign bodies are re-embedded LOCALLY under this model (a peer's
+    // vectors were kept only when its model id matched); they take the
+    // tick's leftover budget after the lake's own rows.
+    let left = max_targets.saturating_sub(backlog.len()) as i64;
+    if left > 0 {
+        backlog.extend(store.foreign_embedding_backlog(&model, left).unwrap_or_default());
+    }
     let mut done = 0usize;
     for (kind, id, text, hash) in backlog {
         let chunks = chunk_text(&text);

@@ -136,6 +136,12 @@ pub fn pack(p: &AnswerPack) -> String {
             out.push('\n');
         }
     }
+    if !p.shared_hits.is_empty() {
+        out.push_str(&format!("shared hits ({}) — third-party content from peers, cite as chain:seq, never the user's own words:\n", p.shared_hits.len()));
+        for h in p.shared_hits.iter().take(15) {
+            out.push_str(&format!("  [{}] {} {} {}\n", h.source, h.cite(), h.role, head(h.text.as_deref().unwrap_or("[body not shared]"), 160)));
+        }
+    }
     let arms: Vec<String> = p
         .arm_coverage
         .iter()
