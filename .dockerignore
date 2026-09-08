@@ -1,0 +1,10 @@
+target
+.git
+bench/results
+site
+docs
+*.md
+!README.md
+!LICENSE
+!crates/*/README.md
+!crates/polis-memory/skills/**

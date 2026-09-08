@@ -53,13 +53,38 @@ unifies features across a graph.
 
 ## Install
 
-Nothing is published yet. From the repo:
+One line, no toolchain (the release binaries, sha256-checked and attested,
+from the GitHub release; the `cli` build: HTTP model backends, the MCP
+transports, the on-device embedder on macOS):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sersiousSenpai/polis-memory/releases/latest/download/polis-memory-installer.sh | sh
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/sersiousSenpai/polis-memory/releases/latest/download/polis-memory-installer.ps1 | iex"
+```
+
+```sh
+brew install sersiousSenpai/tap/polis-memory     # the Homebrew tap
+cargo install polis-memory --features cli        # from crates.io, or:
+cargo binstall polis-memory                      # the prebuilt binary through cargo
+```
+
+Until the first tagged release and the crates.io publish (both are pending
+outward steps — `docs/distribution.md` says which), the source path works
+today:
 
 ```sh
 cargo install --git https://github.com/sersiousSenpai/polis-memory polis-memory --features cli
-polis init                              # ~/.polis: the store, a private token, config.toml
+```
+
+Then:
+
+```sh
+polis init                              # ~/.polis: the store, a private token, config.toml, your key
 polis hook install                      # capture every prompt you submit in Claude Code
-polis mcp install --client claude       # answer questions about them (see docs/mcp.md)
+polis mcp install --client claude       # answer questions about them (docs/mcp.md lists every client)
 polis doctor                            # the install, the chain, the backups, the clients
 ```
 
@@ -67,7 +92,9 @@ polis doctor                            # the install, the chain, the backups, t
 rotating verified backups); without it every command opens the store file
 directly and the capture hook writes locally. `polis restore` swaps in the
 newest verifying snapshot when `doctor` reports the chain red or the file
-unsound. No model, key or network is needed for any of this.
+unsound. No model, key or network is needed for any of this. The org node
+(`polis serve --org`) ships as a container image for operators only —
+`docs/distribution.md`.
 
 ## MCP
 
