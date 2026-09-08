@@ -28,9 +28,22 @@ built out over the sessions the plan calls Programs A, B, C, E and G:
   transports, `sync`/`subscribe`, union retrieval with source labels.
 - **C1:** centroid-first filing with an honest calibration, the `~inbox`
   fallback, the real keyless CI job.
+- **C2:** per-model dimension, honest `ProviderKind`, the portable
+  Model2Vec runtime (pinned download), fastembed opt-in, the remote
+  provider, the measured provider table — Model2Vec is the product's
+  default when present.
+- **E4:** the org node (`polis serve --org`, the `/v1/sync/*` relay, the
+  node as its own principal publishing the firm's catalog as signed
+  events), redaction propagation with signed per-peer acks,
+  `docs/security.md`.
+- **F1:** the LongMemEval harness with a keyless stub mode, the competitor
+  runners under identical conditions, the nightly job gated on a secret,
+  the kill criterion written before any run; the MCP round-trip row.
 - **G1:** cargo-dist release workflow (five targets, shell/PowerShell/
   Homebrew installers, attestations), the size ceiling, the org-node image,
   `mcp install` for every client, `server.json`, the root docs.
 
-Nothing is published yet; see `docs/distribution.md` for what is live and
-what waits on an outward step.
+This release ships the GitHub artifacts (the installers, the attested
+binaries, the formula attached to the release). The crates are not on
+crates.io yet, the image is not pushed, and the npm / PyPI names are not
+reserved; see `docs/distribution.md` for what waits on an outward step.
