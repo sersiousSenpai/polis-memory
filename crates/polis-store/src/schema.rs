@@ -667,6 +667,43 @@ impl Migration {
             );
         }
         // ---- end E2 ------------------------------------------------------------
+        // ---- B3: autonomy (plan §5.1 / §5.2 / §5.4 / §6.3) ----------------------
+        // The proposal table is a WORK QUEUE, not a review queue: a structural
+        // op the verifier could not adjudicate this run waits (`attempts`,
+        // `next_after_run` with 1/2/4-run backoff) and expires after three
+        // attempts or seven lake-days (`expires_lake_ts`, measured on the
+        // lake's own clock). `last_reason` is the last verdict's reason.
+        let _ = conn.execute("ALTER TABLE class_proposals ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE class_proposals ADD COLUMN next_after_run INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_proposals ADD COLUMN expires_lake_ts INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_proposals ADD COLUMN last_reason TEXT", []);
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_class_proposals_next ON class_proposals (status, next_after_run)",
+            [],
+        );
+        // Warmth without pins: when a node / link was last served by an answer
+        // pack or a context block. Bumped by the gardener tick from an
+        // in-memory recall log (the read path stays write-free). A branch is
+        // protected from collapse and compaction while it is warm or carries a
+        // user note — never by a pin.
+        let _ = conn.execute("ALTER TABLE class_nodes ADD COLUMN last_recalled_at INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_links ADD COLUMN last_recalled_at INTEGER", []);
+        // Observation re-validation: the observations pass returns keep|retire
+        // per live row, and a row whose cited seq was forgotten (or whose node
+        // retired) retires deterministically. Marks, never deletes; the
+        // `observation` events stay as history.
+        let _ = conn.execute("ALTER TABLE class_observations ADD COLUMN retired_at INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_observations ADD COLUMN retired_reason TEXT", []);
+        // The three holds are gone (§5.4): every node and link is live. The
+        // `status`, `pinned`, `dismissed` and `starred` columns stay in place
+        // (rows written before this bump carry them) but nothing reads them
+        // any more; `proposed` cannot recur because staging writes `accepted`.
+        let _ = conn.execute("UPDATE class_nodes SET status = 'accepted' WHERE status = 'proposed'", []);
+        let _ = conn.execute("UPDATE class_links SET status = 'accepted' WHERE status = 'proposed'", []);
+        // The organize gate is retired with the holds: the gardener applies
+        // under adjudication, there is nothing a human accepts.
+        let _ = conn.execute("DELETE FROM polis_meta WHERE key = 'polis.classmem.autoApply'", []);
+        // ---- end B3 ------------------------------------------------------------
         Ok(())
     }
 

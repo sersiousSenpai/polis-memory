@@ -56,6 +56,12 @@ pub struct ClassObservation {
     pub pinned: bool,
     pub dismissed: bool,
     pub created_at: i64,
+    /// B3 re-validation: when and why the pass (or a forgotten citation)
+    /// retired this pattern. `None` = live. Retired rows are never served.
+    #[serde(default)]
+    pub retired_at: Option<i64>,
+    #[serde(default)]
+    pub retired_reason: Option<String>,
 }
 
 /// A compact prompt/decision item fed to the classifier and returned by
@@ -410,6 +416,14 @@ pub struct ClassProposalRow {
     pub rationale: Option<String>,
     pub status: String,
     pub created_at: i64,
+    /// B3 work queue: verifier attempts so far, the run this row waits for
+    /// (`None` = due now), and the lake `ts` past which it expires.
+    #[serde(default)]
+    pub attempts: i64,
+    #[serde(default)]
+    pub next_after_run: Option<i64>,
+    #[serde(default)]
+    pub expires_lake_ts: Option<i64>,
 }
 
 /// One gardener run: a classifier pass over the lake delta (`mode =
@@ -627,4 +641,48 @@ pub struct MirrorRow {
     pub thread_kind: Option<String>,
     pub thread_id: Option<String>,
     pub parent_session_id: Option<String>,
+}
+
+// --- B3: the catalog's health (plan §6.3) ---------------------------------
+
+/// `catalog_health()` — the gardener's efficacy at a glance, rebuilt from the
+/// runs, the canary trail and the live tree on every `health()` read.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CatalogHealth {
+    /// Organize runs considered (the newest, up to 50).
+    pub runs_considered: i64,
+    pub organize_p50_ms: Option<i64>,
+    pub organize_p90_ms: Option<i64>,
+    /// Errors over the runs considered (target < 0.05).
+    pub error_rate: f64,
+    /// Runs the canary reverted, over the runs considered.
+    pub canary_reverts: i64,
+    /// `canary_after − canary_before` for the newest three runs that carried a
+    /// canary pair, newest first.
+    pub canary_trend: Vec<f64>,
+    /// Three consecutive net-negative canary runs.
+    pub canary_alert: bool,
+    /// The widest live node's link count, and the nodes over 150 / over 120.
+    pub max_fan_out: i64,
+    pub nodes_over_150: i64,
+    pub nodes_over_120: i64,
+    /// Digest nodes over live nodes.
+    pub digest_ratio: f64,
+    /// Live nodes whose parent is missing or retired, over live nodes.
+    pub orphan_rate: f64,
+    /// Live nodes per depth (index = depth; roots at 0).
+    pub depth_histogram: Vec<i64>,
+    /// Sibling pairs with the same title, over live nodes.
+    pub duplicate_title_rate: f64,
+    /// Prompt links filed outside their provenance root (0 by construction
+    /// once adjudication runs; counted, never trusted).
+    pub provenance_violations: i64,
+    /// Runs that had no model, over the runs considered.
+    pub no_model_share: f64,
+    /// Redactions peers have not acknowledged (0 until E4).
+    pub unacknowledged_redactions: i64,
+    /// The work queue: proposals due and deferred.
+    pub queue_depth: i64,
+    pub live_observations: i64,
 }

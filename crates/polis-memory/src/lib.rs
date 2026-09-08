@@ -18,6 +18,7 @@
 //! markdown mirror ([`mirror`]). The host keeps only what only a host has:
 //! the watch bus, friction, its own tables, provider selection.
 
+pub mod adjudicate;
 pub mod agent;
 pub mod backup;
 pub mod bundle;
@@ -27,7 +28,9 @@ pub mod canary;
 pub mod envelope;
 pub mod corpus;
 pub mod eval;
+pub mod fence;
 pub mod gardener;
+pub mod health;
 pub mod identity;
 pub mod latency;
 pub mod mirror;
@@ -35,6 +38,7 @@ pub mod organize;
 pub mod retrieval;
 pub mod revert;
 pub mod skill;
+pub mod warmth;
 
 use std::sync::Arc;
 
@@ -360,6 +364,7 @@ impl MemoryApi for PolisHandle {
             embedder: view.provider_kind().as_str().to_string(),
             schema_version: view.get_setting(polis_store::meta::SCHEMA_VERSION_KEY),
             lexical_version: view.get_setting(polis_store::meta::LEXICAL_VERSION_KEY),
+            catalog: Some(health::catalog_health(&view)),
         })
     }
 
@@ -526,8 +531,13 @@ impl MemoryApi for PolisHandle {
         }
     }
 
-    fn stage_proposals(&self, proposals: &[Proposal], _actor: &str) -> Result<StageResult, MemoryError> {
-        let out = organize::stage_proposals(&self.view(), None, proposals).map_err(|e| MemoryError::Store(e.to_string()));
+    fn stage_proposals(&self, proposals: &[Proposal], actor: &str) -> Result<StageResult, MemoryError> {
+        // B3: the route stages into the same queue under the same
+        // adjudication as the gardener's own ops — file / create judged now,
+        // structural ops queued for the next run.
+        let out = organize::stage_adjudicated(&self.view(), None, proposals, actor)
+            .map(|s| s.result)
+            .map_err(MemoryError::Store);
         self.stamp();
         out
     }

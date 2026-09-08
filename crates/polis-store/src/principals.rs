@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn the_tables_exist_and_the_scope_columns_are_on_all_five() {
         let store = PolisStore::open_in_memory().unwrap();
-        assert_eq!(store.meta(crate::meta::SCHEMA_VERSION_KEY).unwrap().as_deref(), Some("3"));
+        assert_eq!(store.meta(crate::meta::SCHEMA_VERSION_KEY).unwrap().as_deref(), Some(crate::meta::STORE_SCHEMA_VERSION));
         let conn = store.conn();
         for table in ["prompts", "browse_events", "user_notes", "class_nodes", "class_observations"] {
             let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap();

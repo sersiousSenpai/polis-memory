@@ -380,6 +380,34 @@ pub fn evaluate(polis: &Polis<'_>, set: &CanarySet, cfg: &CanaryConfig) -> (Cana
     (report, results)
 }
 
+/// The nodes whose probes went from hit to miss between two evaluations of
+/// the SAME frozen set — the subjects a regression quarantines (B3 §5.3).
+/// Prompt-span probes name no node; their misses count in the aggregate and
+/// quarantine nothing.
+pub fn regressed_subjects(set: &CanarySet, before: &[ProbeResult], after: &[ProbeResult]) -> Vec<String> {
+    let mut out = Vec::new();
+    for ((probe, b), a) in set.probes.iter().zip(before).zip(after) {
+        if b.hit && !a.hit {
+            match &probe.gold {
+                Gold::NodeLink { node_id, .. } | Gold::Node { node_id } => out.push(node_id.clone()),
+                _ => {}
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The frozen verdict a run row keeps (`class_runs.canary_json`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanaryVerdict {
+    pub before: CanaryReport,
+    pub after: CanaryReport,
+    pub regression: Option<String>,
+    pub quarantined: Vec<String>,
+}
+
 /// The §5.3 rule. `Some(reason)` when `after` regressed against `before`.
 pub fn regression(before: &CanaryReport, after: &CanaryReport, cfg: &CanaryConfig) -> Option<String> {
     for b in &before.subjects {

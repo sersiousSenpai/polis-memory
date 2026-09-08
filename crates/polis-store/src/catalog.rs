@@ -64,9 +64,9 @@ impl PolisStore {
 }
 
 impl PolisStore {
-    /// Seed one proposed root per (id, title, project_path), idempotent — a root
-    /// that already exists (by id) is left untouched, so re-seeding never
-    /// re-proposes an already-accepted class. Returns how many were newly seeded.
+    /// Seed one root per (id, title, project_path), idempotent — a root that
+    /// already exists (by id) is left untouched. Live on creation (B3: there is
+    /// no `proposed` state any more). Returns how many were newly seeded.
     pub fn seed_class_roots(
         &self,
         rows: &[(String, String, Option<String>)],
@@ -79,7 +79,7 @@ impl PolisStore {
                 "INSERT INTO class_nodes
                     (id, parent_id, kind, title, summary, project_path, ip_name,
                      status, pinned, curated_by, created_at, updated_at)
-                 VALUES (?1, NULL, 'node', ?2, NULL, ?3, NULL, 'proposed', 0,
+                 VALUES (?1, NULL, 'node', ?2, NULL, ?3, NULL, 'accepted', 0,
                          'classifier', ?4, ?4)
                  ON CONFLICT(id) DO NOTHING",
                 params![id, title, project, now],
@@ -190,9 +190,11 @@ impl PolisStore {
         Ok(out)
     }
 
-    /// Stage one parsed proposal as reviewable rows (never accepts). Additive
-    /// proposals become `proposed` nodes/links; structural ones queue in
-    /// `class_proposals`. See `classmem` for the accept path.
+    /// Stage one parsed proposal. Additive proposals (`file` / `create`)
+    /// become LIVE nodes / links at once (B3: the adjudication that admits
+    /// them runs before this call — `polis_memory::adjudicate`); structural
+    /// ones enter the `class_proposals` work queue, where the gardener
+    /// adjudicates them run by run. Nothing waits for a human.
     pub fn stage_proposal(
         &self,
         run_id: Option<i64>,
@@ -237,7 +239,7 @@ impl PolisStore {
                     "INSERT INTO class_nodes
                         (id, parent_id, kind, title, summary, project_path, ip_name,
                          status, pinned, curated_by, created_at, updated_at)
-                     VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'proposed', 0,
+                     VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'accepted', 0,
                              'classifier', ?4, ?4)",
                     params![id, parent_id, title, now],
                 )?;
@@ -274,7 +276,7 @@ impl PolisStore {
                                     "INSERT INTO class_nodes
                                         (id, parent_id, kind, title, summary, project_path,
                                          ip_name, status, pinned, curated_by, created_at, updated_at)
-                                     VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'proposed', 0,
+                                     VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'accepted', 0,
                                              'classifier', ?4, ?4)",
                                     params![id, parent_id, sc.trim(), now],
                                 )?;
@@ -313,7 +315,7 @@ impl PolisStore {
                         conn.execute(
                             "INSERT INTO class_links
                                 (node_id, target_kind, target_id, note, status, created_at)
-                             VALUES (?1, ?2, ?3, ?4, 'proposed', ?5)",
+                             VALUES (?1, ?2, ?3, ?4, 'accepted', ?5)",
                             params![target_node, target_kind, target_id, note, now],
                         )?;
                         let id = conn.last_insert_rowid();
@@ -433,67 +435,24 @@ impl PolisStore {
         rationale: Option<&str>,
         now: i64,
     ) -> rusqlite::Result<()> {
+        // Expiry on the lake's own clock (B3 §5.1): seven lake-days after the
+        // newest event at staging, whatever wall-clock does meanwhile.
+        let newest: i64 = conn.query_row("SELECT COALESCE(MAX(ts), 0) FROM ledger_events", [], |r| r.get(0))?;
+        let expires = newest + crate::runs::PROPOSAL_TTL_LAKE_MS;
         conn.execute(
             "INSERT INTO class_proposals
                 (run_id, op, node_id, parent_id, title, summary, extra_json,
-                 rationale, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'proposed', ?9)",
-            params![run_id, op, node_id, parent_id, title, summary, extra_json, rationale, now],
+                 rationale, status, created_at, attempts, next_after_run, expires_lake_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'proposed', ?9, 0, NULL, ?10)",
+            params![run_id, op, node_id, parent_id, title, summary, extra_json, rationale, now, expires],
         )?;
         Ok(())
     }
 
-    /// `author` is stamped as `curated_by` on every node the chain flips —
-    /// the store's own author (`PolisStore::author`) at both call sites.
-    pub fn accept_node_chain(
-        conn: &rusqlite::Connection,
-        author: &str,
-        id: &str,
-    ) -> rusqlite::Result<Vec<String>> {
-        let now = polis_core::ledger::now_millis();
-        let mut flipped = Vec::new();
-        let mut cur = Some(id.to_string());
-        let mut guard = 0;
-        while let Some(nid) = cur {
-            guard += 1;
-            if guard > 32 {
-                break;
-            }
-            let row: Option<(Option<String>, String)> = conn
-                .query_row(
-                    "SELECT parent_id, status FROM class_nodes WHERE id = ?1",
-                    params![nid],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            let Some((parent, status)) = row else { break };
-            if status == "proposed" {
-                conn.execute(
-                    "UPDATE class_nodes SET status = 'accepted', curated_by = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![nid, author, now],
-                )?;
-                flipped.push(nid.clone());
-            }
-            cur = parent;
-        }
-        Ok(flipped)
-    }
-
-    /// Accept a proposed node and any proposed ancestors (so no accepted node is
-    /// ever orphaned under a proposed parent). Returns the ids newly flipped to
-    /// accepted (for ledger events). Idempotent on already-accepted nodes.
-    pub fn accept_class_node(&self, id: &str) -> rusqlite::Result<Vec<String>> {
-        let conn = self.conn();
-        Self::accept_node_chain(&conn, self.author(), id)
-    }
-
-    /// Accept EVERY currently-proposed node and link in one shot — the
-    /// auto-organize path (Organize applies the classifier's work directly
-    /// rather than gating it behind per-item review). Returns the node ids that
-    /// were flipped, so the caller can emit their `class_curate` ledger events.
-    /// Structural proposals are applied separately (see `apply_class_proposal`).
-    /// `actor` lands in `curated_by`: the classifier's seat name on the
-    /// auto-organize path, the local human on a manual accept-all.
+    /// Flip any `proposed` node / link live. Since B3 staging writes live rows,
+    /// so this finds nothing on a current store; it stays for rows written
+    /// before the bump and for the harnesses that call it. Returns the node
+    /// ids it flipped. `actor` lands in `curated_by`.
     pub fn accept_all_pending(&self, actor: &str) -> rusqlite::Result<Vec<String>> {
         let conn = self.conn();
         let now = polis_core::ledger::now_millis();
@@ -513,26 +472,6 @@ impl PolisStore {
             [],
         )?;
         Ok(ids)
-    }
-
-    /// Accept a proposed link, ensuring its node (and ancestors) are accepted.
-    /// Returns (node_id, newly-accepted ancestor node ids).
-    pub fn accept_class_link(&self, link_id: i64) -> rusqlite::Result<Option<(String, Vec<String>)>> {
-        let conn = self.conn();
-        let node_id: Option<String> = conn
-            .query_row(
-                "SELECT node_id FROM class_links WHERE id = ?1",
-                params![link_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let Some(node_id) = node_id else { return Ok(None) };
-        conn.execute(
-            "UPDATE class_links SET status = 'accepted' WHERE id = ?1",
-            params![link_id],
-        )?;
-        let flipped = Self::accept_node_chain(&conn, self.author(), &node_id)?;
-        Ok(Some((node_id, flipped)))
     }
 
     /// Delete a single class link (a pointer into the lake) by id, returning its
@@ -563,67 +502,60 @@ impl PolisStore {
     // `runs::retire_node_subtree`, which marks the rows under a run so the
     // run can be reverted; `vacuum_retired` deletes past the horizon.
 
-    pub fn reject_class_link(&self, link_id: i64) -> rusqlite::Result<()> {
-        let conn = self.conn();
-        conn.execute("DELETE FROM class_links WHERE id = ?1", params![link_id])?;
-        Ok(())
-    }
+    // The human curation surface — accept / reject / pin / rename on nodes and
+    // links — is gone (B3, plan §5.4): nothing is held for a person, a node's
+    // protection is its warmth or a user note, and a title a user dislikes is
+    // annotated, not renamed. `remember` / `annotate` / `forget` / `revert_run`
+    // are what survives.
 
-    /// Reject (retire) a node and its whole proposed/accepted subtree + links,
-    /// under a `curation` run of its own so the rejection is journaled and
-    /// revertible like any gardener op.
-    pub fn reject_class_node(&self, id: &str) -> rusqlite::Result<()> {
-        let run = self.insert_class_run_with(crate::runs::MODE_CURATION, None, None)?;
-        let conn = self.conn();
-        let set = Self::retire_node_subtree(&conn, id, run, None)?;
-        let mut subjects: Vec<String> = set.nodes.iter().map(|n| crate::runs::subject::node(n)).collect();
-        subjects.extend(set.links.iter().map(|l| crate::runs::subject::link(*l)));
-        let pre = serde_json::json!({
-            "nodeId": id, "digestId": serde_json::Value::Null,
-            "retiredNodes": set.nodes, "retiredLinks": set.links,
-            "retiredObservations": set.observations, "citationLinks": Vec::<i64>::new(),
-        });
-        Self::journal_op_locked(&conn, run, &crate::runs::OpRecord::applied("collapse", subjects, pre))?;
-        conn.execute(
-            "UPDATE class_runs SET status = 'done', finished_at = ?2, outcome = 'done', ops = 1,
-                    summary = ?3 WHERE id = ?1",
-            params![run, polis_core::ledger::now_millis(), format!("rejected node {id}")],
-        )?;
-        Ok(())
-    }
+    pub const PROPOSAL_COLS: &'static str = "id, run_id, op, node_id, parent_id, title, summary, extra_json,
+                    rationale, status, created_at, attempts, next_after_run, expires_lake_ts";
 
-    pub fn set_class_node_pinned(&self, id: &str, pinned: bool) -> rusqlite::Result<()> {
-        let conn = self.conn();
-        conn.execute(
-            "UPDATE class_nodes SET pinned = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, pinned as i64, polis_core::ledger::now_millis()],
-        )?;
-        Ok(())
-    }
-
-    pub fn rename_class_node(&self, id: &str, title: &str) -> rusqlite::Result<()> {
-        let conn = self.conn();
-        conn.execute(
-            "UPDATE class_nodes SET title = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, title, polis_core::ledger::now_millis()],
-        )?;
-        Ok(())
-    }
-
-    /// The pending structural proposals (promote/split/merge/collapse).
+    /// Every queued structural proposal (promote / split / merge / collapse /
+    /// supersede), oldest first — the whole work queue, due or deferred.
     pub fn list_class_proposals(&self) -> rusqlite::Result<Vec<polis_core::types::ClassProposalRow>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, run_id, op, node_id, parent_id, title, summary, extra_json,
-                    rationale, status, created_at
-             FROM class_proposals WHERE status = 'proposed' ORDER BY id ASC",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM class_proposals WHERE status = 'proposed' ORDER BY id ASC",
+            Self::PROPOSAL_COLS
+        ))?;
         let rows = stmt.query_map([], Self::row_to_proposal)?;
         rows.collect()
     }
 
-    /// How many structural proposals are held awaiting review — the ambient
-    /// pill/hero count, so the held-op channel is visible without loading rows.
+    /// The proposals DUE this run (B3): never deferred, or deferred to a run
+    /// at or before this one. Oldest first.
+    pub fn list_due_proposals(&self, run_id: i64) -> rusqlite::Result<Vec<polis_core::types::ClassProposalRow>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM class_proposals
+             WHERE status = 'proposed' AND (next_after_run IS NULL OR next_after_run <= ?1)
+             ORDER BY id ASC",
+            Self::PROPOSAL_COLS
+        ))?;
+        let rows = stmt.query_map(params![run_id], Self::row_to_proposal)?;
+        rows.collect()
+    }
+
+    /// A verifier could not adjudicate this proposal this run: count the
+    /// attempt and park it until `next_after_run`, keeping the reason.
+    pub fn defer_proposal(&self, id: i64, attempts: i64, next_after_run: i64, reason: &str) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE class_proposals SET attempts = ?2, next_after_run = ?3, last_reason = ?4 WHERE id = ?1",
+            params![id, attempts, next_after_run, reason],
+        )?;
+        Ok(())
+    }
+
+    /// The lake's newest event `ts` — the clock proposals expire on.
+    pub fn lake_newest_ts(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn();
+        conn.query_row("SELECT COALESCE(MAX(ts), 0) FROM ledger_events", [], |r| r.get(0))
+    }
+
+    /// The work queue's depth — proposals waiting for a run (due or deferred).
+    /// Nothing here waits for a person.
     pub fn count_pending_class_proposals(&self) -> rusqlite::Result<i64> {
         let conn = self.conn();
         conn.query_row(
@@ -639,9 +571,7 @@ impl PolisStore {
     ) -> rusqlite::Result<Option<polis_core::types::ClassProposalRow>> {
         let conn = self.conn();
         conn.query_row(
-            "SELECT id, run_id, op, node_id, parent_id, title, summary, extra_json,
-                    rationale, status, created_at
-             FROM class_proposals WHERE id = ?1",
+            &format!("SELECT {} FROM class_proposals WHERE id = ?1", Self::PROPOSAL_COLS),
             params![id],
             Self::row_to_proposal,
         )
@@ -661,6 +591,9 @@ impl PolisStore {
             rationale: r.get(8)?,
             status: r.get(9)?,
             created_at: r.get(10)?,
+            attempts: r.get::<_, Option<i64>>(11)?.unwrap_or(0),
+            next_after_run: r.get(12)?,
+            expires_lake_ts: r.get(13)?,
         })
     }
 
@@ -739,14 +672,10 @@ impl PolisStore {
             }
             "collapse" => {
                 let node = p.node_id.clone().unwrap_or_default();
-                // Hard guard (covers the manual path too): pins are an absolute
-                // anti-decay veto — never collapse a pinned branch. Drop the
-                // proposal as a no-op; unpin first to collapse.
-                if Self::subtree_pinned(&conn, &node)? {
-                    self.drop_proposal_locked(&conn, id)?;
-                    finish_curation(&conn, 0)?;
-                    return Ok(None);
-                }
+                // Whether the branch may collapse is the adjudicator's call
+                // (B3: `auto_collapse_safe` ∧ items ≥ 5 ∧ cold ∧ no note —
+                // warmth, never a pin); by the time a collapse reaches this
+                // apply it has been admitted.
                 // Parent + title of the cold branch, for the digest placement.
                 let (parent, title): (Option<String>, String) = conn.query_row(
                     "SELECT parent_id, title FROM class_nodes WHERE id = ?1",
@@ -1022,41 +951,6 @@ impl PolisStore {
     pub fn drop_proposal_locked(&self, conn: &rusqlite::Connection, id: i64) -> rusqlite::Result<()> {
         conn.execute("DELETE FROM class_proposals WHERE id = ?1", params![id])?;
         Ok(())
-    }
-
-    pub fn subtree_pinned(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<bool> {
-        let mut stack = vec![id.to_string()];
-        let mut guard = 0;
-        while let Some(nid) = stack.pop() {
-            guard += 1;
-            if guard > 10_000 {
-                break;
-            }
-            let pinned: Option<i64> = conn
-                .query_row("SELECT pinned FROM class_nodes WHERE id = ?1", params![nid], |r| {
-                    r.get(0)
-                })
-                .optional()?;
-            if pinned == Some(1) {
-                return Ok(true);
-            }
-            let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE parent_id = ?1 AND retired_by_run IS NULL")?;
-            let kids: Vec<String> = stmt
-                .query_map(params![nid], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            stack.extend(kids);
-        }
-        Ok(false)
-    }
-
-    /// True if a node or any descendant is pinned — the anti-decay veto the
-    /// collapse guard consults. Production code calls `Self::subtree_pinned`
-    /// under an already-held lock; this locking wrapper exists for tests.
-    // (was `#[cfg(test)]` on `Database`; a store's cfg(test) does not reach a
-    // host's tests, and the wrapper is harmless in production)
-    pub fn subtree_has_pin(&self, id: &str) -> rusqlite::Result<bool> {
-        let conn = self.conn();
-        Self::subtree_pinned(&conn, id)
     }
 
     /// `target_id → (node_id, class title)` for a page of link targets, in one
@@ -1601,5 +1495,112 @@ impl PolisStore {
             }
         }
         Ok(out)
+    }
+}
+
+// --- B3: warmth without pins, and the health report's facts ------------------
+impl PolisStore {
+    /// Bump `last_recalled_at` for the nodes and links an answer pack served
+    /// (the gardener flushes the in-memory recall log through this; the read
+    /// path itself never writes). A later recall never lowers a stamp.
+    pub fn bump_recalled(&self, nodes: &[(String, i64)], links: &[(i64, i64)]) -> rusqlite::Result<usize> {
+        let conn = self.conn();
+        let mut n = 0usize;
+        for (id, ts) in nodes {
+            n += conn.execute(
+                "UPDATE class_nodes SET last_recalled_at = ?2
+                 WHERE id = ?1 AND (last_recalled_at IS NULL OR last_recalled_at < ?2)",
+                params![id, ts],
+            )?;
+        }
+        for (id, ts) in links {
+            n += conn.execute(
+                "UPDATE class_links SET last_recalled_at = ?2
+                 WHERE id = ?1 AND (last_recalled_at IS NULL OR last_recalled_at < ?2)",
+                params![id, ts],
+            )?;
+        }
+        Ok(n)
+    }
+
+    /// Per live node: the newest recall of the node itself or any of its live
+    /// links (`None` = never served). The warmth rule rolls this up the tree.
+    pub fn node_warmth(&self) -> rusqlite::Result<std::collections::HashMap<String, Option<i64>>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT n.id,
+                    MAX(COALESCE(n.last_recalled_at, 0),
+                        COALESCE((SELECT MAX(l.last_recalled_at) FROM class_links l
+                                  WHERE l.node_id = n.id AND l.retired_by_run IS NULL), 0))
+             FROM class_nodes n WHERE n.retired_by_run IS NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (id, ts) = row?;
+            out.insert(id, (ts > 0).then_some(ts));
+        }
+        Ok(out)
+    }
+
+    /// The live nodes a user note targets — the other half of protection.
+    pub fn noted_node_ids(&self) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT un.target_id FROM user_notes un
+             JOIN class_nodes n ON n.id = un.target_id AND n.retired_by_run IS NULL
+             WHERE un.target_kind = 'class_node' AND un.target_id IS NOT NULL AND un.text <> ''",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    /// Every live prompt link with the prompt's own `project_path` — the
+    /// provenance check's input (`catalog_health.provenance_violations`).
+    pub fn prompt_link_provenance(&self) -> rusqlite::Result<Vec<(String, Option<String>)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT l.node_id, p.project_path
+             FROM class_links l
+             JOIN ledger_events le ON le.seq = CAST(l.target_id AS INTEGER)
+             JOIN prompts p ON p.id = le.prompt_id
+             WHERE l.target_kind = 'prompt' AND l.retired_by_run IS NULL AND l.target_id GLOB '[0-9]*'",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?;
+        rows.collect()
+    }
+
+    /// The `project_path` of a lake item by seq (a prompt's), for the file
+    /// op's provenance invariant. `None` when the item carries none.
+    pub fn item_project_path(&self, seq: i64) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn();
+        Ok(conn
+            .query_row(
+                "SELECT p.project_path FROM ledger_events le
+                 LEFT JOIN prompts p ON p.id = le.prompt_id WHERE le.seq = ?1",
+                params![seq],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// A ledger event's `(kind, ref_kind, ref_id)` — the supersede rule's
+    /// subject key. `None` for an unknown seq.
+    pub fn ledger_event_ref(&self, seq: i64) -> rusqlite::Result<Option<(String, Option<String>, Option<String>)>> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT kind, ref_kind, ref_id FROM ledger_events WHERE seq = ?1",
+            params![seq],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+    }
+
+    /// Whether a ledger seq exists.
+    pub fn seq_exists(&self, seq: i64) -> rusqlite::Result<bool> {
+        let conn = self.conn();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM ledger_events WHERE seq = ?1", params![seq], |r| r.get(0))?;
+        Ok(n > 0)
     }
 }

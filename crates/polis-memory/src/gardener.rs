@@ -29,8 +29,9 @@ use polis_store::PolisStore;
 
 #[allow(unused_imports)]
 use crate::agent::{run_classifier, run_keeper_summarizer};
-#[allow(unused_imports)]
-use crate::organize::AUTO_APPLY_KEY;
+use crate::canary::{self, CanaryConfig};
+use crate::fence::Fence;
+use crate::warmth;
 use crate::Polis;
 #[allow(unused_imports)]
 use polis_core::gist::deterministic_gist;
@@ -136,40 +137,22 @@ pub fn group_candidates(rows: Vec<(i64, i64, String, Option<String>)>) -> Vec<Pr
     out
 }
 
-/// The pin-protected node set: every pinned node plus all of its descendants.
-/// A pin is an absolute anti-decay veto for the whole subtree beneath it. (A
-/// prompt linked to an *ancestor* of a pin is already excluded upstream, because
-/// `subtree_stats` rolls a descendant's pin up and `auto_collapse_safe` then
-/// refuses that ancestor — so it never enters the cold set.)
-pub fn pin_protected_nodes(nodes: &[ClassNode]) -> HashSet<String> {
-    let mut kids: HashMap<&str, Vec<&str>> = HashMap::new();
-    for n in nodes {
-        if let Some(p) = &n.parent_id {
-            kids.entry(p.as_str()).or_default().push(n.id.as_str());
-        }
-    }
-    let mut protected: HashSet<String> = HashSet::new();
-    for n in nodes.iter().filter(|n| n.pinned) {
-        // BFS the subtree rooted at the pinned node.
-        let mut stack = vec![n.id.as_str()];
-        let mut guard = 0;
-        while let Some(id) = stack.pop() {
-            guard += 1;
-            if guard > 100_000 {
-                break; // defensive cycle guard
-            }
-            if protected.insert(id.to_string()) {
-                if let Some(cs) = kids.get(id) {
-                    stack.extend(cs.iter().copied());
-                }
-            }
-        }
-    }
-    protected
+/// Protection without pins (B3): the rolled-up branch stats with
+/// `pinned` = "warm or noted somewhere in the branch", and the set of those
+/// protected branches. What `compaction_pass` keeps its blade away from and
+/// what the collapse rule reads.
+pub fn protected_set(polis: &Polis<'_>) -> Result<(HashMap<String, BranchStat>, HashSet<String>, LakeEnvelope), String> {
+    let db = polis.store;
+    let env = db.lake_envelope().map_err(|e| e.to_string())?;
+    let nodes = db.list_class_nodes().map_err(|e| e.to_string())?;
+    let direct = db.node_direct_link_activity().map_err(|e| e.to_string())?;
+    let protected = warmth::direct_protected(db, env);
+    let (stats, branches) = warmth::protected_branches(&nodes, &direct, &protected);
+    Ok((stats, branches, env))
 }
 
 /// Select prompt ids to compact: big enough, NOT the user's own words, not
-/// linked into any PROTECTED (pinned-subtree) node, and cold — either through a
+/// linked into any PROTECTED (warm or noted branch) node, and cold — either through a
 /// cold class node, or (for machine text, which has no class link) by the age
 /// gate the SQL already applied. Deterministic.
 ///
@@ -212,7 +195,7 @@ pub struct CompactionAction {
 
 /// Build the summarizer's first-turn prompt: the cold prompt bodies (byte-
 /// bounded) + a strict JSON output contract. Self-contained (no curl needed).
-pub fn build_keeper_prompt(prompts: &[(i64, String)]) -> String {
+pub fn build_keeper_prompt(prompts: &[(i64, String)], fence: &Fence) -> String {
     let mut p = String::new();
     p.push_str(
         "You are Redline's memory keeper. The prompts below have gone COLD in the \
@@ -221,14 +204,16 @@ pub fn build_keeper_prompt(prompts: &[(i64, String)]) -> String {
          For EACH prompt, write a compact gist (1–3 sentences) that preserves what \
          it was about, any decision or intent it carried, and enough to answer \
          \"what did I do/decide about this\" later. Drop verbatim detail. Never \
-         invent; if a prompt is trivial, a one-line gist is fine.\n\n\
-         ## Cold prompts\n\n",
+         invent; if a prompt is trivial, a one-line gist is fine.\n\n",
     );
-    let mut used = 0usize;
+    p.push_str(&fence.rule());
+    p.push_str("\n## Cold prompts\n\n");
+    let mut used = p.len();
     for (id, body) in prompts {
         let one = body.replace('\n', " ");
         let snippet: String = one.chars().take(3000).collect();
-        let block = format!("### prompt {id}\n{snippet}\n\n");
+        // Compaction only ever targets machine text (`select_compaction_candidates`).
+        let block = format!("### prompt {id}\n{}\n", fence.wrap("prompt", &id.to_string(), "agent", None, &snippet));
         if used + block.len() > MAX_CORPUS_BYTES {
             break;
         }
@@ -290,17 +275,14 @@ pub fn parse_compaction_actions(text: &str) -> Vec<CompactionAction> {
 /// to deterministic gists rather than skipping the pass.
 pub async fn compaction_pass(polis: &Polis<'_>) -> Result<usize, String> {
     let db = polis.store;
-    let env = db.lake_envelope().map_err(|e| e.to_string())?;
-    let nodes = db.list_class_nodes().map_err(|e| e.to_string())?;
-    let direct = db.node_direct_link_activity().map_err(|e| e.to_string())?;
-    let stats = subtree_stats(&nodes, &direct);
+    // B3: protection is warmth or a note, rolled up the branch — never a pin.
+    let (stats, protected, env) = protected_set(polis)?;
 
     let cold_nodes: HashSet<String> = stats
         .iter()
         .filter(|(_, s)| auto_collapse_safe(s, env))
         .map(|(id, _)| id.clone())
         .collect();
-    let protected = pin_protected_nodes(&nodes);
 
     let rows = db
         .list_compaction_candidates(SIZE_FLOOR_BYTES, env.newest - MACHINE_COLD_MS)
@@ -322,7 +304,7 @@ pub async fn compaction_pass(polis: &Polis<'_>) -> Result<usize, String> {
     // Tier 1: the agent summarizer acts. Tier 2 (fallback): deterministic gist
     // for any prompt the agent didn't cover (or if it failed entirely).
     let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let keeper_prompt = build_keeper_prompt(&bodies);
+    let keeper_prompt = build_keeper_prompt(&bodies, &Fence::new());
     let prompt_bytes = keeper_prompt.len() as i64;
     let mut gists: HashMap<i64, (String, String, &'static str)> = HashMap::new();
     let mut llm_calls = 0i64;
@@ -429,9 +411,14 @@ pub fn select_observation_nodes(
 
 /// Build the observation prompt. Self-contained like `build_keeper_prompt` —
 /// the corpus is baked in, no skill load, no curling. Every observation must
-/// cite the exact seqs it derives from; uncited output is rejected.
+/// cite the exact seqs it derives from; uncited output is rejected. The
+/// node's LIVE observations ride along (B3 re-validation): the pass returns
+/// `keep` or `retire` for each, and a pattern the items no longer support is
+/// retired. Items and existing observations are fenced (§5.5).
 pub fn build_observations_prompt(
     corpus: &[(String, String, Vec<(i64, String, i64, Option<String>)>)],
+    live: &[(String, i64, String)],
+    fence: &Fence,
 ) -> String {
     let mut p = String::from(
         "You are Redline's memory keeper, observation pass. For each class of \
@@ -441,20 +428,35 @@ pub fn build_observations_prompt(
          DERIVED note, never ground truth — phrase it as a pattern, not a fact \
          or decision. Every observation MUST cite the exact seqs it derives \
          from — uncited observations are rejected. If a class shows no genuine \
-         pattern, emit nothing for it. At most one observation per class.\n\n",
+         pattern, emit nothing for it. At most one observation per class.\n\n\
+         Some classes carry EXISTING observations from earlier passes. For each \
+         one, say whether the items still support it (`keep`) or not (`retire`, \
+         with the reason) — a retired observation is never shown again.\n\n",
     );
+    p.push_str(&fence.rule());
+    p.push('\n');
     let mut used = p.len();
     for (node_id, title, items) in corpus {
         let mut block = format!("### node {node_id} — {title}\n");
         for (seq, kind, ts, snippet) in items {
-            block.push_str(&format!(
-                "- seq {seq} | {kind} | ts={ts} | {}\n",
-                snippet.as_deref().map(|s| {
+            let role = crate::fence::role_for(kind, None, None);
+            let text = snippet
+                .as_deref()
+                .map(|s| {
                     let one = s.replace('\n', " ");
                     one.chars().take(200).collect::<String>()
                 })
-                .unwrap_or_else(|| format!("[{kind} event]")),
-            ));
+                .unwrap_or_else(|| format!("[{kind} event]"));
+            block.push_str(&format!("- seq {seq} | {kind} | ts={ts}\n"));
+            block.push_str(&fence.wrap("seq", &seq.to_string(), role, None, &text));
+        }
+        let existing: Vec<&(String, i64, String)> = live.iter().filter(|(n, _, _)| n == node_id).collect();
+        if !existing.is_empty() {
+            block.push_str("Existing observations on this node:\n");
+            for (_, id, summary) in existing {
+                block.push_str(&format!("- observation {id}\n"));
+                block.push_str(&fence.wrap("observation", &id.to_string(), "observation", None, summary));
+            }
         }
         block.push('\n');
         if used + block.len() > MAX_CORPUS_BYTES {
@@ -465,9 +467,41 @@ pub fn build_observations_prompt(
     }
     p.push_str(
         "## Output\n\nReturn ONLY a JSON object (optionally in a ```json fence):\n\n\
-         {\"observations\":[{\"nodeId\":\"<node id>\",\"summary\":\"<1–2 sentence pattern>\",\"citeSeqs\":[<seqs from that node's items>]}]}\n",
+         {\"observations\":[{\"nodeId\":\"<node id>\",\"summary\":\"<1–2 sentence pattern>\",\"citeSeqs\":[<seqs from that node's items>]}],\n \
+         \"verdicts\":[{\"observationId\":<id>,\"keep\":true|false,\"reason\":\"<why, when retiring>\"}]}\n",
     );
     p
+}
+
+/// One re-validation verdict from the pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservationVerdict {
+    pub observation_id: i64,
+    pub keep: bool,
+    pub reason: String,
+}
+
+/// Parse the pass's `verdicts` — only ids that were actually shown count
+/// (a verdict on an unknown row is fabrication and is dropped).
+pub fn parse_observation_verdicts(text: &str, shown: &HashSet<i64>) -> Vec<ObservationVerdict> {
+    let Some(obj) = extract_object_with_key(text, "verdicts").or_else(|| extract_object_with_key(text, "observations")) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(arr) = obj.get("verdicts").and_then(Value::as_array) {
+        for v in arr {
+            let id = match v.get("observationId") {
+                Some(Value::Number(n)) => n.as_i64(),
+                Some(Value::String(s)) => s.trim().parse::<i64>().ok(),
+                _ => None,
+            };
+            let Some(id) = id.filter(|id| shown.contains(id)) else { continue };
+            let keep = v.get("keep").and_then(Value::as_bool).unwrap_or(true);
+            let reason = v.get("reason").and_then(Value::as_str).map(str::trim).unwrap_or("").to_string();
+            out.push(ObservationVerdict { observation_id: id, keep, reason });
+        }
+    }
+    out
 }
 
 /// Parse the observation reply — deliberately STRICTER than the compaction
@@ -531,12 +565,31 @@ pub fn parse_observations(
     out
 }
 
-/// The keeper's third idle-tick pass: mine a few active, item-rich nodes for
-/// patterns and write them as `class_observations` rows (each appending its
-/// `observation` ledger event). No deterministic fallback — an observation is
-/// pure judgment, so if the agent is unavailable the pass just skips.
+/// The keeper's third idle-tick pass: retire what no longer stands (a
+/// forgotten citation — deterministic, no model), then mine a few active,
+/// item-rich nodes for patterns and write them as `class_observations` rows
+/// (each appending its `observation` ledger event), re-validating the nodes'
+/// live observations on the way. No deterministic fallback for the mining —
+/// an observation is pure judgment, so if the agent is unavailable that half
+/// just skips.
 pub async fn observations_pass(polis: &Polis<'_>) -> Result<usize, String> {
     let db = polis.store;
+    // --- deterministic re-validation: a citation that was forgotten ---
+    let live = db.list_live_observations().map_err(|e| e.to_string())?;
+    let mut retired = 0usize;
+    for o in &live {
+        let dead = db.dead_citations(&o.cite_seqs).unwrap_or_default();
+        if !dead.is_empty() {
+            let reason = format!("cited seq(s) forgotten or gone: {dead:?}");
+            if db.retire_observation(o.id, &reason, KEEPER_ACTOR).map_err(|e| e.to_string())?.is_some() {
+                retired += 1;
+            }
+        }
+    }
+    if retired > 0 {
+        tracing::info!(retired, "observations retired: citations no longer stand");
+    }
+
     let nodes = db.list_class_nodes().map_err(|e| e.to_string())?;
     let direct = db.node_direct_link_activity().map_err(|e| e.to_string())?;
     let stats = subtree_stats(&nodes, &direct);
@@ -574,9 +627,19 @@ pub async fn observations_pass(polis: &Polis<'_>) -> Result<usize, String> {
     if corpus.is_empty() {
         return Ok(0);
     }
+    // The selected nodes' live observations, for re-validation.
+    let live_rows: Vec<(String, i64, String)> = db
+        .list_live_observations()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|o| allowed.contains_key(&o.node_id))
+        .map(|o| (o.node_id, o.id, o.summary))
+        .collect();
+    let shown_obs: HashSet<i64> = live_rows.iter().map(|(_, id, _)| *id).collect();
     let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let started = std::time::Instant::now();
-    let obs_prompt = build_observations_prompt(&corpus);
+    let fence = Fence::new();
+    let obs_prompt = build_observations_prompt(&corpus, &live_rows, &fence);
     let prompt_bytes = obs_prompt.len() as i64;
     let text = match run_keeper_summarizer(polis, &cwd, obs_prompt).await {
         Ok(text) => text,
@@ -594,18 +657,27 @@ pub async fn observations_pass(polis: &Polis<'_>) -> Result<usize, String> {
     for a in parse_observations(&text, &allowed) {
         match db.insert_class_observation_in_run(run_id, &a.node_id, &a.summary, &a.cite_seqs, KEEPER_ACTOR) {
             Ok(Some(_)) => written += 1,
-            Ok(None) => {} // dedup (incl. previously dismissed) or node gone
+            Ok(None) => {} // dedup (incl. previously retired) or node gone
             Err(e) => tracing::warn!(error = %e, node = %a.node_id, "insert observation failed"),
+        }
+    }
+    let mut revalidated = 0usize;
+    for v in parse_observation_verdicts(&text, &shown_obs) {
+        if !v.keep {
+            let reason = if v.reason.is_empty() { "the pass no longer stands behind it".to_string() } else { v.reason.clone() };
+            if let Ok(Some(_)) = db.retire_observation(v.observation_id, &reason, KEEPER_ACTOR) {
+                revalidated += 1;
+            }
         }
     }
     let _ = db.finish_class_run_with(
         run_id,
         &polis_core::types::ClassRunFinish {
             status: "done".into(),
-            summary: format!("wrote {written} observation(s) over {} node(s)", corpus.len()),
+            summary: format!("wrote {written} observation(s) over {} node(s); retired {revalidated} on re-validation", corpus.len()),
             duration_ms: Some(started.elapsed().as_millis() as i64),
             items: Some(corpus.len() as i64),
-            ops: Some(written as i64),
+            ops: Some((written + revalidated) as i64),
             model: polis.agent.as_ref().map(|a| a.name().to_string()),
             outcome: Some("done".into()),
             mode: Some(polis_store::runs::MODE_OBSERVATIONS.into()),
@@ -650,6 +722,12 @@ pub struct GardenerConfig {
     /// `backup_keep`.
     pub backup_every_ms: i64,
     pub backup_keep: usize,
+    /// The canary around every organize (B3 §5.3): `None` skips it. Frozen
+    /// at run start, evaluated before and after; a regression reverts the
+    /// run and quarantines its failing subjects.
+    pub canary: Option<CanaryConfig>,
+    /// How many runs a regression's subjects stay out of structural ops.
+    pub quarantine_runs: i64,
 }
 
 impl Default for GardenerConfig {
@@ -665,9 +743,14 @@ impl Default for GardenerConfig {
             backup_dir: None,
             backup_every_ms: crate::backup::BackupPolicy::default().every_ms,
             backup_keep: crate::backup::BackupPolicy::default().keep,
+            canary: Some(CanaryConfig::default()),
+            quarantine_runs: QUARANTINE_RUNS,
         }
     }
 }
+
+/// How many runs a canary regression's subjects stay quarantined (§5.3).
+pub const QUARANTINE_RUNS: i64 = 3;
 
 /// What persists between ticks (in memory — the observation counter lives in
 /// `polis_meta`, so it survives a restart as it did in `app_settings`).
@@ -707,6 +790,12 @@ pub struct StepOutcome {
     pub no_model: bool,
     /// The snapshot this tick wrote, when the backup cadence fired (E1).
     pub backed_up: Option<std::path::PathBuf>,
+    /// B3: the canary reverted this tick's organize run.
+    pub reverted_by_canary: bool,
+    /// B3: ops the adjudicator refused this tick.
+    pub refused: usize,
+    /// B3: observations retired on re-validation this tick.
+    pub retired_observations: usize,
 }
 
 /// One tick: the semantic index on its own cadence, then idle → debounce →
@@ -789,14 +878,82 @@ pub async fn step(
     }
     out.gate = Gate::Ran;
 
-    // --- run: organize, then compact, then (occasionally) observe. All
-    // best-effort. ---
-    match crate::latency::timed_async("gardener.organize", crate::organize::organize_once(polis)).await {
-        Ok(o) if o.ran => {
-            out.organized = true;
-            tracing::info!(summary = %o.summary, "gardener organized");
+    // --- B3: warmth — the recall log the read path filled, flushed here ---
+    let flushed = warmth::flush(polis.store);
+    if flushed > 0 {
+        tracing::debug!(flushed, "warmth stamped");
+    }
+
+    // --- run: organize (inside the canary), then compact, then (occasionally)
+    // observe. All best-effort. ---
+    let canary_set = match (&cfg.canary, polis.agent.as_ref()) {
+        (Some(c), Some(_)) => {
+            let set = canary::freeze(polis, now as u64, c);
+            let (before, results) = canary::evaluate(polis, &set, c);
+            Some((set, before, results))
         }
-        Ok(_) => {}
+        _ => None,
+    };
+    match crate::latency::timed_async("gardener.organize", crate::organize::organize_once(polis)).await {
+        Ok(o) => {
+            out.refused += o.refused;
+            if o.ran {
+                out.organized = true;
+                tracing::info!(summary = %o.summary, "gardener organized");
+            }
+            if let (Some((set, before, before_results)), Some(run_id), Some(c)) = (canary_set, o.run_id, cfg.canary.as_ref()) {
+                if o.ran {
+                    let (after, after_results) = canary::evaluate(polis, &set, c);
+                    let regression = canary::regression(&before, &after, c);
+                    let quarantined = if regression.is_some() { canary::regressed_subjects(&set, &before_results, &after_results) } else { Vec::new() };
+                    let verdict = canary::CanaryVerdict { before: before.clone(), after: after.clone(), regression: regression.clone(), quarantined: quarantined.clone() };
+                    let json = serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".into());
+                    match regression {
+                        None => {
+                            let _ = polis.store.set_run_canary_json(run_id, before.recall, after.recall, &json);
+                        }
+                        Some(reason) => {
+                            // §5.3: revert the whole run, release its window,
+                            // quarantine the failing subjects, record it.
+                            match crate::revert::revert_run(polis, run_id) {
+                                Ok(receipt) => {
+                                    out.reverted_by_canary = true;
+                                    out.organized = false;
+                                    let _ = polis.store.mark_run_canary_reverted(run_id, before.recall, after.recall, &json);
+                                    crate::organize::quarantine(polis, run_id, &quarantined, cfg.quarantine_runs);
+                                    let run_s = run_id.to_string();
+                                    let ph = polis_core::ledger::decision_payload_hash(&[
+                                        ("run", &run_s),
+                                        ("before", &format!("{:.4}", before.recall)),
+                                        ("after", &format!("{:.4}", after.recall)),
+                                        ("reason", &reason),
+                                        ("by_run", &receipt.revert_run_id.to_string()),
+                                    ]);
+                                    if let Err(e) = polis.store.append_ledger_event(&polis_core::ledger::LedgerAppend {
+                                        kind: EventKind::GardenerRegression.as_str(),
+                                        author: polis.store.author(),
+                                        ts: clock.now_ms(),
+                                        prompt_id: None,
+                                        session_id: None,
+                                        version_number: None,
+                                        ref_kind: Some("class_run"),
+                                        ref_id: Some(&run_s),
+                                        payload_hash: &ph,
+                                    }) {
+                                        tracing::warn!(error = %e, "could not record the regression");
+                                    }
+                                    tracing::warn!(run = run_id, %reason, quarantined = ?quarantined, "canary regression — run reverted");
+                                }
+                                Err(e) => {
+                                    tracing::warn!(run = run_id, %reason, error = %e, "canary regression but the run could not be reverted");
+                                    let _ = polis.store.set_run_canary_json(run_id, before.recall, after.recall, &json);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Err(e) if e == crate::agent::NO_MODEL => out.no_model = true,
         Err(e) => tracing::warn!(error = %e, "gardener organize pass failed"),
     }
@@ -984,19 +1141,6 @@ mod tests {
     }
 
     #[test]
-    fn pin_protects_the_whole_subtree() {
-        let nodes = vec![
-            node("root", None, false),
-            node("mid", Some("root"), true), // pinned
-            node("leaf", Some("mid"), false),
-            node("other", Some("root"), false),
-        ];
-        let p = pin_protected_nodes(&nodes);
-        assert!(p.contains("mid") && p.contains("leaf"));
-        assert!(!p.contains("root") && !p.contains("other"));
-    }
-
-    #[test]
     fn select_picks_cold_big_unpinned_and_skips_the_rest() {
         let cands = vec![
             // cold + big + unprotected + machine → picked
@@ -1128,11 +1272,30 @@ mod tests {
             "Auth".to_string(),
             vec![(10, "prompt".to_string(), 900, Some("clerk webhook".to_string()))],
         )];
-        let p = build_observations_prompt(&corpus);
+        let fence = Fence::with_nonce("obs1");
+        let live = vec![("cn-a".to_string(), 3i64, "deploys follow auth changes".to_string())];
+        let p = build_observations_prompt(&corpus, &live, &fence);
         assert!(p.contains("observations"));
         assert!(p.contains("citeSeqs"));
         assert!(p.contains("uncited observations are rejected"));
         assert!(p.contains("### node cn-a — Auth"));
         assert!(p.contains("seq 10"));
+        // §5.5: the rule, the fenced item, the fenced existing observation.
+        assert!(p.contains(crate::fence::RULE));
+        let items = fence.split(&p);
+        assert_eq!(items.len(), 2);
+        assert_eq!((items[0].label.as_str(), items[0].id.as_str()), ("seq", "10"));
+        assert_eq!((items[1].label.as_str(), items[1].id.as_str(), items[1].role.as_str()), ("observation", "3", "observation"));
+        assert!(p.contains("\"verdicts\""));
+    }
+
+    #[test]
+    fn observation_verdicts_only_count_for_shown_rows() {
+        let shown: HashSet<i64> = [3, 4].into_iter().collect();
+        let text = r#"{"observations":[],"verdicts":[{"observationId":3,"keep":false,"reason":"the items moved"},{"observationId":"4","keep":true},{"observationId":9,"keep":false}]}"#;
+        let v = parse_observation_verdicts(text, &shown);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0], ObservationVerdict { observation_id: 3, keep: false, reason: "the items moved".into() });
+        assert!(v[1].keep);
     }
 }

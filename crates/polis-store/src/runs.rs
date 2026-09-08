@@ -64,6 +64,16 @@ pub const MODE_OBSERVATIONS: &str = "observations";
 pub const MODE_REVERT: &str = "revert";
 pub const MODE_CURATION: &str = "curation";
 
+// --- B3: the proposal work queue's policy (plan §5.1) --------------------
+/// A proposal the verifier could not adjudicate is retried after this many
+/// runs, by attempt: 1, then 2, then 4.
+pub const PROPOSAL_BACKOFF_RUNS: [i64; 3] = [1, 2, 4];
+/// After this many attempts a proposal is dropped as `expired`.
+pub const PROPOSAL_TTL_ATTEMPTS: i64 = 3;
+/// A proposal older than this on the LAKE's clock (newest event `ts` at
+/// staging + seven lake-days) is dropped as `expired`.
+pub const PROPOSAL_TTL_LAKE_MS: i64 = 7 * 24 * 3600 * 1000;
+
 /// `polis_meta` key: the newest run id whose retired rows were vacuumed —
 /// runs at or below it can no longer be reverted.
 pub const REVERT_HORIZON_KEY: &str = "polis.revert.horizonRun";
@@ -94,6 +104,15 @@ impl<'a> OpRecord<'a> {
     pub fn with_post_image(mut self, post: Value) -> Self {
         self.post_image = Some(post);
         self
+    }
+    /// An op the adjudicator refused (B3): journaled with its reason, no
+    /// image — nothing changed, and today's silent reject has a record.
+    pub fn refused(op: &'a str, subject_ids: Vec<String>, reason: impl Into<String>) -> Self {
+        Self { op, subject_ids, pre_image: None, post_image: None, ledger_seq: None, outcome: "refused", reason: Some(reason.into()) }
+    }
+    /// An op that ran out of retries or lake-days in the queue (B3).
+    pub fn expired(op: &'a str, subject_ids: Vec<String>, reason: impl Into<String>) -> Self {
+        Self { op, subject_ids, pre_image: None, post_image: None, ledger_seq: None, outcome: "expired", reason: Some(reason.into()) }
     }
 }
 
@@ -325,7 +344,7 @@ impl PolisStore {
         else {
             return Ok(RevertOutcome::Rejected(format!("no run #{run_id}")));
         };
-        if run.as_deref() == Some("reverted") {
+        if matches!(run.as_deref(), Some("reverted") | Some("reverted_by_canary")) {
             return Ok(RevertOutcome::Rejected(format!("run #{run_id} was already reverted")));
         }
         if let Some(h) = crate::meta::get(&conn, REVERT_HORIZON_KEY)?.and_then(|v| v.parse::<i64>().ok()) {
@@ -590,3 +609,39 @@ pub mod image {
     }
 }
 
+
+impl PolisStore {
+    /// The canary reverted this run (B3 §5.3): stamp the outcome, the recall
+    /// pair and the frozen verdict, and RELEASE the run's seq window — a
+    /// reverted organize consumed nothing, so the next delta starts where the
+    /// previous good run ended. The revert itself (marks, journal, the
+    /// `gardener_revert` event) is `revert_run`'s; this is the bookkeeping
+    /// beside it.
+    pub fn mark_run_canary_reverted(
+        &self,
+        run_id: i64,
+        before: f64,
+        after: f64,
+        canary_json: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE class_runs
+             SET outcome = 'reverted_by_canary', canary_before = ?2, canary_after = ?3, canary_json = ?4,
+                 seq_from = NULL, seq_to = NULL
+             WHERE id = ?1",
+            params![run_id, before, after, canary_json],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp a finished run's canary pair + verdict without reverting it.
+    pub fn set_run_canary_json(&self, run_id: i64, before: f64, after: f64, canary_json: &str) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE class_runs SET canary_before = ?2, canary_after = ?3, canary_json = ?4 WHERE id = ?1",
+            params![run_id, before, after, canary_json],
+        )?;
+        Ok(())
+    }
+}

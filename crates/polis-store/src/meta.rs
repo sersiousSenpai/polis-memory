@@ -31,20 +31,23 @@ pub const CORPUS_ROLE_VERSION_KEY: &str = "corpus_role_version";
 /// "3" since Session E2 (identity: `principals`, `principal_aliases`, the
 /// scope columns) — the same "3" B2's journal tables land on; both additive
 /// blocks are idempotent, so the merged block runs once.
-pub const STORE_SCHEMA_VERSION: &str = "3";
+/// 4 (B3): the proposal work-queue columns, `last_recalled_at` on nodes and
+/// links, `retired_at` / `retired_reason` on observations, every `proposed`
+/// row flipped live, the organize gate's meta key dropped.
+pub const STORE_SCHEMA_VERSION: &str = "4";
 
 /// The host's legacy `app_settings` keys, read once at adoption.
 pub const LEGACY_LEXICAL_KEY: &str = "redline.memory.lexicalVersion";
 pub const LEGACY_CORPUS_ROLE_KEY: &str = "redline.memory.corpusRoleVersion";
 
 /// Every `(host key, ours)` pair adoption copies: the two versions, and the
-/// four memory settings that moved out of `app_settings` with their code in
-/// Session A5 (the organize gate, the observation counter, the mirror's
-/// directory and high-water mark).
+/// three memory settings that moved out of `app_settings` with their code in
+/// Session A5 (the observation counter, the mirror's directory and high-water
+/// mark). The organize gate (`redline.classmem.autoApply`) is not adopted
+/// since B3: there is no gate.
 pub const LEGACY_PAIRS: &[(&str, &str)] = &[
     (LEGACY_LEXICAL_KEY, LEXICAL_VERSION_KEY),
     (LEGACY_CORPUS_ROLE_KEY, CORPUS_ROLE_VERSION_KEY),
-    ("redline.classmem.autoApply", "polis.classmem.autoApply"),
     ("redline.keeper.observeCounter", "polis.keeper.observeCounter"),
     ("redline.mirrorDir", "polis.mirror.dir"),
     ("redline.mirror.lastSeq", "polis.mirror.lastSeq"),
