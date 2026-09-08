@@ -7,6 +7,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["memory", "sqlite", "ledger", "fts5", "agents"]
+categories = ["database"]
 
 [lints]
 workspace = true

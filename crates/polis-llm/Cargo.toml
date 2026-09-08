@@ -7,6 +7,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["llm", "agents", "claude", "codex", "memory"]
+categories = ["api-bindings"]
 
 [features]
 default = []

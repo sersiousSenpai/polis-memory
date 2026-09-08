@@ -1,0 +1,5 @@
+{
+  "_comment": "Hard ceilings in BYTES for the shipped `polis` binary, checked by scripts/check-size.mjs (warn locally, --strict in CI's size.yml). Ratchet DOWN as levers land; every INCREASE is a deliberate, reviewed diff of this file. Baseline measured 2026-09-07 on macOS arm64 with the `dist` profile (thin LTO, 1 CGU, symbols stripped; features `cli` = the HTTP model backends + the MCP transports + the Apple embedder): 14,907,904 B — inside the plan's 12–16 MB no-model band. The ceiling is the band's top. The int8 embedding model, when C2 bundles it (`--features bundled-model`), gets its own row here from C2's measurement (plan: ≈ 20–24 MB).",
+  "binaryBytes": 16000000,
+  "binaryWithBundledModelBytes": null
+}

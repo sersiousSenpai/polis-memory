@@ -7,6 +7,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["embeddings", "vector-search", "memory", "agents"]
+categories = ["science", "text-processing"]
 
 [features]
 default = []
