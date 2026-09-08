@@ -656,8 +656,11 @@ mod tests {
         let (s, v) = json_of(app.clone().oneshot(post("/v1/memory/forget", r#"{"targetKind":"prompt","targetId":"1","confirm":"forget"}"#)).await.unwrap()).await;
         assert_eq!((s, v["forgotten"].clone()), (StatusCode::OK, serde_json::json!(true)));
 
+        // C1: organize files without a model (the centroid tier, then
+        // `~inbox`), so the route answers 200 with a `ran` run rather than 503.
         let (s, v) = json_of(app.clone().oneshot(post("/v1/memory/organize", "")).await.unwrap()).await;
-        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "no model → 503, {v}");
+        assert_eq!((s, v["ran"].clone()), (StatusCode::OK, serde_json::json!(true)), "no model → the filing tier still runs, {v}");
+        assert!(v["summary"].as_str().unwrap_or("").contains("~inbox"), "{v}");
         let (s, v) = json_of(app.clone().oneshot(post("/v1/memory/reindex", "")).await.unwrap()).await;
         assert_eq!((s, v["provider"].clone()), (StatusCode::OK, serde_json::json!("absent")));
 

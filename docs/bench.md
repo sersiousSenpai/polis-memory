@@ -232,3 +232,21 @@ every run. `catalog_health` (B3) reads them for organize p50/p90, the error
 rate over the last 50 and the canary trend. On the real lake the plan
 measured organize at median 79.6 s, p90 275 s, error 6.1% over the last 50
 — those are the numbers B3 is held to improving.
+
+## Filing (C1, docs/filing.md)
+
+Centroid-first filing, measured 2026-09-08 on this machine (the full
+account is in docs/filing.md):
+
+| Row | Real corpus (apple-sentence-en) | Synthetic 2k (bag-of-words) | Budget |
+|---|---|---|---|
+| Filing consistency (top-1, leave-one-out) | 0.404 | 0.803 | ≥ 0.85 |
+| Chosen (T1, M) at precision ≥ 0.90 | none — tier OFF | (0.45, 0.02): precision 0.914, coverage 76 % | precision ≥ 0.90 |
+| Organize, no model, 400-item window | p50 581 ms · p90 675 ms | — | p50 < 20 s · p90 < 60 s |
+| Ambiguous batch prompt bytes (median) | — | 6,776 B (max 7,139, 16 batches) | ≤ 10 KB |
+| Canary after C1 (B1's instrument, real copy) | recall 0.751, pack p50 18 ms | — | flat |
+
+The real corpus's consistency row is the embedder's number, not the
+mechanism's: the plan's "decided by measurement" gate for embeddings (C2)
+re-runs `real_db_filing_calibration` per provider, and the tier turns on for
+the first one that clears the floor.

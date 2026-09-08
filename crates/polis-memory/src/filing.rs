@@ -53,6 +53,15 @@ pub const ORGANIZE_COUNT_KEY: &str = "polis.filing.organizeCount";
 /// organize to consolidate; cleared when it does.
 pub const HEALTH_PRESSURE_KEY: &str = "polis.health.pressure";
 
+/// The precision a (T1, M) pair must reach on leave-one-out before the
+/// deterministic tier is allowed to file with it (§7.1).
+pub const PRECISION_FLOOR: f32 = 0.90;
+/// Thresholds that switch the centroid tier OFF (no cosine reaches 1.01):
+/// what the calibration writes when no pair clears the floor for the
+/// store's embedder — filing then goes batch-or-inbox until a better
+/// embedder (Program C2) measures in.
+pub const OFF: Thresholds = Thresholds { t1: 1.01, margin: 0.0 };
+
 /// Initial thresholds (plan §7.1) until the calibration writes its own.
 pub const T1_DEFAULT: f32 = 0.55;
 pub const MARGIN_DEFAULT: f32 = 0.10;
@@ -732,6 +741,11 @@ pub struct GridRow {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CalibrationReport {
     pub model: String,
+    /// The precision floor a pair must clear to be chosen.
+    pub precision_floor: f32,
+    /// The best precision any grid point reached (with its coverage) — what
+    /// the report says when nothing clears the floor.
+    pub best: Option<GridRow>,
     /// Live links with a member vector.
     pub population: usize,
     /// Of those, links whose node keeps a centroid with the link held out.
@@ -849,11 +863,18 @@ pub fn leave_one_out(store: &PolisStore, model: &str, tree: &[ClassNode]) -> Res
     }
     let chosen = grid
         .iter()
-        .filter(|g| g.precision >= 0.90 && g.filed > 0)
+        .filter(|g| g.precision >= PRECISION_FLOOR && g.filed > 0)
         .max_by(|a, b| a.coverage.partial_cmp(&b.coverage).unwrap().then(a.t1.partial_cmp(&b.t1).unwrap()))
+        .cloned();
+    let best = grid
+        .iter()
+        .filter(|g| g.filed >= 20)
+        .max_by(|a, b| a.precision.partial_cmp(&b.precision).unwrap().then(a.coverage.partial_cmp(&b.coverage).unwrap()))
         .cloned();
     Ok(CalibrationReport {
         model: model.to_string(),
+        precision_floor: PRECISION_FLOOR,
+        best,
         population,
         coverable,
         consistency: if coverable > 0 { consistent as f32 / coverable as f32 } else { 0.0 },
@@ -978,7 +999,12 @@ mod tests {
 
         fn real_copy() -> Option<(PolisStore, std::path::PathBuf)> {
             let src = std::env::var("POLIS_REAL_DB").ok()?;
-            let dst = std::env::temp_dir().join(format!("polis-c1-{}-{}.db", std::process::id(), polis_core::ledger::now_millis()));
+            // Unique per instrument in one process: two copies in the same
+            // millisecond would share a name (and one would read the other's
+            // half-written file).
+            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dst = std::env::temp_dir().join(format!("polis-c1-{}-{}-{n}.db", std::process::id(), polis_core::ledger::now_millis()));
             std::fs::copy(&src, &dst).expect("copy the real DB (never open the original)");
             let store = PolisStore::open(&dst).expect("open the copy");
             Some((store, dst))
@@ -1029,8 +1055,15 @@ mod tests {
             for g in report.grid.iter().filter(|g| (g.margin - 0.10).abs() < 1e-6) {
                 eprintln!("  t1={:.2} m=0.10 coverage={:.3} precision={:.3} ({}/{})", g.t1, g.coverage, g.precision, g.correct, g.filed);
             }
-            if let Some(c) = &chosen {
-                Thresholds { t1: c.t1, margin: c.margin }.save(&store).unwrap();
+            match &chosen {
+                Some(c) => Thresholds { t1: c.t1, margin: c.margin }.save(&store).unwrap(),
+                None => {
+                    eprintln!(
+                        "  no pair reaches precision {:.2} for {} (best {:?}) — the centroid tier stays OFF for this embedder; filing is batch-or-inbox",
+                        report.precision_floor, report.model, report.best
+                    );
+                    OFF.save(&store).unwrap();
+                }
             }
             let out = results_dir().join(format!("filing-{}.json", chrono_date()));
             let json = serde_json::json!({
@@ -1039,6 +1072,8 @@ mod tests {
                 "population": report.population,
                 "coverable": report.coverable,
                 "consistency_top1": report.consistency,
+                "precision_floor": report.precision_floor,
+                "best": report.best,
                 "chosen": chosen,
                 "grid": report.grid,
                 "elapsed_ms": report.elapsed_ms,
@@ -1059,17 +1094,22 @@ mod tests {
             let store = Arc::new(store);
             let handle = crate::PolisHandle::new(store.clone(), None, Arc::new(NoHost), Arc::new(NoopSink)).with_embedder(Some(Arc::new(StoredOnly(model))));
             let max_seq = store.max_ledger_seq().unwrap();
-            let window: i64 = 150;
+            // Ten distinct windows of the real record, oldest first: rewind
+            // the organizer's cursor on the COPY to `max − 400·k` (the run
+            // takes the 400 oldest items past the cursor, then stamps its
+            // row at the head — so each rewind is a fresh window).
+            let window: i64 = polis_core::types::MAX_DELTA_ITEMS as i64;
             let rt = tokio::runtime::Runtime::new().unwrap();
             let mut wall: Vec<u128> = Vec::new();
             let mut summaries = Vec::new();
             for k in (1..=10).rev() {
-                // Move the cursor back so the next run sees one window of items.
-                let to = max_seq - window * k;
-                let id = store.insert_class_run(0, to).unwrap();
-                store.finish_class_run_with(id, &polis_core::types::ClassRunFinish { status: "done".into(), summary: "cursor".into(), ..Default::default() }).unwrap();
+                let cursor = (max_seq - window * k).max(0);
+                store.conn().execute("UPDATE class_runs SET seq_to = ?1 WHERE seq_to > ?1", rusqlite::params![cursor]).unwrap();
                 let started = std::time::Instant::now();
                 let out = rt.block_on(crate::organize::organize_once(&handle.view())).unwrap();
+                if !out.ran {
+                    continue;
+                }
                 wall.push(started.elapsed().as_millis());
                 summaries.push(out.summary);
             }
@@ -1082,6 +1122,31 @@ mod tests {
             let out = results_dir().join(format!("filing-organize-{}.json", chrono_date()));
             std::fs::write(&out, serde_json::to_string_pretty(&serde_json::json!({"instrument":"real_db_organize_no_model","window":window,"wall_ms":wall,"p50_ms":p(0.5),"p90_ms":p(0.9),"summaries":summaries})).unwrap()).unwrap();
             let _ = std::fs::remove_file(path);
+        }
+
+        /// The mechanism, measured apart from the embedder: leave-one-out over
+        /// B1's synthetic corpus (classes by topic) with the bag-of-words
+        /// embedder. `cargo test -p polis-memory --features eval -- --ignored synthetic_filing_calibration --nocapture`
+        #[test]
+        #[ignore]
+        fn synthetic_filing_calibration() {
+            use super::e2e_support::BagOfWords;
+            let store = PolisStore::open_in_memory().unwrap();
+            crate::corpus::seed_corpus(&store, &crate::corpus::CorpusSpec::new(2_000).with_seed(11)).unwrap();
+            let e = BagOfWords;
+            polis_embed::index_tick(&store, &e, 100_000);
+            let tree = store.list_class_nodes().unwrap();
+            let report = leave_one_out(&store, &e.model_id(), &tree).unwrap();
+            eprintln!(
+                "synthetic_filing_calibration: population={} coverable={} consistency={:.3} chosen={:?} best={:?}",
+                report.population, report.coverable, report.consistency, report.chosen, report.best
+            );
+            let out = results_dir().join(format!("filing-synthetic-{}.json", chrono_date()));
+            std::fs::write(&out, serde_json::to_string_pretty(&serde_json::json!({
+                "instrument": "synthetic_filing_calibration", "corpus": {"prompts": 2000, "seed": 11}, "embedder": e.model_id(),
+                "population": report.population, "coverable": report.coverable, "consistency_top1": report.consistency,
+                "precision_floor": report.precision_floor, "chosen": report.chosen, "best": report.best,
+            })).unwrap()).unwrap();
         }
 
         fn chrono_date() -> String {
@@ -1106,18 +1171,13 @@ mod tests {
         }
     }
 
-    // --- end to end: the tiers over a real in-memory store -----------------
-    mod e2e {
+    /// Shared by the end-to-end tests and the instruments.
+    pub(super) mod e2e_support {
         use super::super::*;
-        use polis_core::api::{IngestItem, IngestRequest};
-        use polis_core::host::NoHost;
-        use polis_core::MemoryApi;
-        use polis_llm::{async_trait, Agent, AgentError, AgentReply, AgentRequest, NoopSink, Usage};
-        use std::sync::Mutex;
 
         /// A deterministic hashed bag-of-words embedder (the bench's): 64
         /// dims, one bucket per token hash, unit length.
-        struct BagOfWords;
+        pub struct BagOfWords;
         impl Embedder for BagOfWords {
             fn model_id(&self) -> String {
                 "test-bag-of-words-64".into()
@@ -1144,6 +1204,17 @@ mod tests {
                     .collect())
             }
         }
+    }
+
+    // --- end to end: the tiers over a real in-memory store -----------------
+    mod e2e {
+        use super::super::*;
+        use super::e2e_support::BagOfWords;
+        use polis_core::api::{IngestItem, IngestRequest};
+        use polis_core::host::NoHost;
+        use polis_core::MemoryApi;
+        use polis_llm::{async_trait, Agent, AgentError, AgentReply, AgentRequest, NoopSink, Usage};
+        use std::sync::Mutex;
 
         /// A recorded-reply agent: answers every batch from `replies` (a
         /// function of the prompt) and keeps every prompt it saw.
@@ -1385,6 +1456,7 @@ mod tests {
             assert!(!sizes.is_empty(), "no batch ran");
             sizes.sort();
             let median = sizes[sizes.len() / 2];
+            eprintln!("batch prompt bytes over the 300-prompt corpus: batches={} median={median} max={}", sizes.len(), sizes.last().unwrap());
             assert!(median <= 10_000, "median batch prompt {median} B over 10 KB (max {})", sizes.last().unwrap());
             for p in prompts.iter().filter(|p| p.contains("candidates for seq")) {
                 assert!(p.matches("<<<ITEM seq=").count() <= BATCH_MAX);

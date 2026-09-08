@@ -1,0 +1,203 @@
+{
+  "schema": 1,
+  "date": "2026-09-08",
+  "sha": "125b20905e08",
+  "machine": "macos aarch64 (16 cpus)",
+  "lake": {
+    "source": "real-db-copy",
+    "prompts": 2164,
+    "events": 5735,
+    "nodes": 229,
+    "browseEvents": 1483,
+    "notes": 0
+  },
+  "runId": 1,
+  "probes": 251,
+  "recallAt": {
+    "10": 0.7,
+    "20": 0.7,
+    "5": 0.66
+  },
+  "mrr": 0.5883333333333334,
+  "packContainsGold": 0.701195219123506,
+  "bytesPerPack": {
+    "n": 251,
+    "mean": 15445.430278884462,
+    "p50": 14341.0,
+    "p95": 29304.0,
+    "max": 29979.0
+  },
+  "tokensPerPack": {
+    "n": 251,
+    "mean": 3861.3575697211154,
+    "p50": 3585.25,
+    "p95": 7326.0,
+    "max": 7494.75
+  },
+  "armAttribution": {
+    "lexical_only": 45
+  },
+  "subjects": [
+    {
+      "subject": "decision",
+      "n": 100,
+      "hits": 55,
+      "recall": 0.55
+    },
+    {
+      "subject": "supersession",
+      "n": 1,
+      "hits": 1,
+      "recall": 1.0
+    },
+    {
+      "subject": "prompt_span",
+      "n": 50,
+      "hits": 45,
+      "recall": 0.9
+    },
+    {
+      "subject": "class_reach",
+      "n": 50,
+      "hits": 50,
+      "recall": 1.0
+    },
+    {
+      "subject": "browse_title",
+      "n": 50,
+      "hits": 25,
+      "recall": 0.5
+    }
+  ],
+  "canary": {
+    "run_id": 1,
+    "head_seq": 5735,
+    "n": 201,
+    "hits": 151,
+    "recall": 0.7512437810945274,
+    "subjects": [
+      {
+        "subject": "decision",
+        "n": 100,
+        "hits": 55,
+        "recall": 0.55
+      },
+      {
+        "subject": "supersession",
+        "n": 1,
+        "hits": 1,
+        "recall": 1.0
+      },
+      {
+        "subject": "prompt_span",
+        "n": 50,
+        "hits": 45,
+        "recall": 0.9
+      },
+      {
+        "subject": "class_reach",
+        "n": 50,
+        "hits": 50,
+        "recall": 1.0
+      }
+    ],
+    "unfiled_decisions": 0,
+    "packs": 201,
+    "elapsed_ms": 4158,
+    "p50_ms": 19,
+    "p95_ms": 38
+  },
+  "latency": [
+    {
+      "op": "context",
+      "n": 20,
+      "p50Ms": 21,
+      "p95Ms": 36,
+      "maxMs": 39
+    },
+    {
+      "op": "grep",
+      "n": 5,
+      "p50Ms": 10,
+      "p95Ms": 12,
+      "maxMs": 12
+    },
+    {
+      "op": "ingest",
+      "n": 1,
+      "p50Ms": 103,
+      "p95Ms": 103,
+      "maxMs": 103
+    },
+    {
+      "op": "ingest.item",
+      "n": 100,
+      "p50Ms": 0,
+      "p95Ms": 3,
+      "maxMs": 16
+    },
+    {
+      "op": "pack",
+      "n": 517,
+      "p50Ms": 18,
+      "p95Ms": 31,
+      "maxMs": 40
+    },
+    {
+      "op": "pack.browse",
+      "n": 517,
+      "p50Ms": 12,
+      "p95Ms": 19,
+      "maxMs": 23
+    },
+    {
+      "op": "pack.grep",
+      "n": 517,
+      "p50Ms": 0,
+      "p95Ms": 11,
+      "maxMs": 20
+    },
+    {
+      "op": "pack.lexical",
+      "n": 518,
+      "p50Ms": 1,
+      "p95Ms": 3,
+      "maxMs": 5
+    },
+    {
+      "op": "pack.node",
+      "n": 518,
+      "p50Ms": 0,
+      "p95Ms": 1,
+      "maxMs": 2
+    },
+    {
+      "op": "pack.notes",
+      "n": 518,
+      "p50Ms": 0,
+      "p95Ms": 0,
+      "maxMs": 0
+    },
+    {
+      "op": "pack.resolve",
+      "n": 518,
+      "p50Ms": 0,
+      "p95Ms": 0,
+      "maxMs": 1
+    },
+    {
+      "op": "pack.semantic",
+      "n": 518,
+      "p50Ms": 0,
+      "p95Ms": 0,
+      "maxMs": 0
+    }
+  ],
+  "filingConsistency": null,
+  "notes": [
+    "Measures reachability of what Polis recorded through the answer pack, by the words written — not human relevance.",
+    "Unfiled decisions are unreachable today (no text of their own in the store); the Decision subject covers filed ones.",
+    "Leave-one-out filing consistency: deferred to the C-program (needs class centroids).",
+    "No embedder configured: the semantic arm was absent for every probe."
+  ]
+}
