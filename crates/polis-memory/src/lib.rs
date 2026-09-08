@@ -27,6 +27,7 @@ pub mod canary;
 pub mod envelope;
 pub mod corpus;
 pub mod eval;
+pub mod filing;
 pub mod gardener;
 pub mod identity;
 pub mod latency;
@@ -585,6 +586,9 @@ impl MemoryApi for PolisHandle {
         let view = self.view();
         let provider = view.provider_kind().as_str().to_string();
         let embedded = index_tick(&view, REINDEX_MAX_TARGETS);
+        // C1: the filing cache follows the index (docs/filing.md).
+        let centroids = filing::rebuild_centroids(&view);
+        tracing::info!(embedded, centroids, "reindex rebuilt the class centroids");
         Ok(ReindexReceipt { embedded, provider })
     }
 
@@ -741,7 +745,8 @@ mod tests {
         assert!(!block.terms.is_empty(), "the plan names what it searched");
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let o = rt.block_on(api.organize(&Scope::default()));
-        assert!(matches!(o, Err(MemoryError::Unavailable(_))), "no model → unavailable, never a fault: {o:?}");
+        let o = rt.block_on(api.organize(&Scope::default())).expect("C1: organize files without a model (R12)");
+        assert!(o.ran);
+        assert!(o.summary.contains(filing::INBOX_TITLE), "no model, no embedder → the item is parked: {}", o.summary);
     }
 }
