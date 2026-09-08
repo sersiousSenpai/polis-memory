@@ -408,9 +408,11 @@ pub struct ClassProposalRow {
     pub created_at: i64,
 }
 
-/// One classifier pass over the lake delta.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// One gardener run: a classifier pass over the lake delta (`mode =
+/// organize`), a compaction pass, an observation pass, or — since B2 — a
+/// revert of an earlier run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct ClassRun {
     pub id: i64,
     pub started_at: i64,
@@ -433,6 +435,16 @@ pub struct ClassRun {
     pub canary_before: Option<f64>,
     pub canary_after: Option<f64>,
     pub error: Option<String>,
+    // --- B2 (§5.2): what kind of run, and what it cost ---
+    /// `organize | compaction | observations | revert | curation`.
+    pub mode: Option<String>,
+    pub llm_calls: Option<i64>,
+    pub prompt_bytes: Option<i64>,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+    pub wall_ms: Option<i64>,
+    /// The canary's frozen set + verdict as JSON (B3 writes it).
+    pub canary_json: Option<String>,
 }
 
 /// What `finish_class_run_with` records about a completed run.
@@ -447,6 +459,59 @@ pub struct ClassRunFinish {
     pub model: Option<String>,
     pub outcome: Option<String>,
     pub error: Option<String>,
+    // --- B2 ---
+    pub mode: Option<String>,
+    pub llm_calls: Option<i64>,
+    pub prompt_bytes: Option<i64>,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+    pub wall_ms: Option<i64>,
+    pub canary_json: Option<String>,
+}
+
+/// One journaled op of a run (`class_run_ops`), without its image blobs —
+/// what `GET /v1/memory/runs/:id` shows. `subject_ids` are the rows the op
+/// touched, as `node:<id>` / `link:<id>` / `obs:<id>` / `prompt:<id>` /
+/// `seq:<n>`; a later run whose subjects overlap blocks the revert.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RunOpView {
+    pub run_id: i64,
+    pub op_ix: i64,
+    /// `file | create | promote | split | merge | collapse | supersede | compact | observe`.
+    pub op: String,
+    pub subject_ids: Vec<String>,
+    /// `applied | refused | expired | reverted`.
+    pub outcome: String,
+    pub reason: Option<String>,
+    /// sha256 of the pre-image JSON — what a revert restores from.
+    pub pre_hash: Option<String>,
+    /// The ledger event the op appended, when it appended one.
+    pub ledger_seq: Option<i64>,
+    pub reverted_by_run: Option<i64>,
+}
+
+/// A run with its journal — the timeline's detail row.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RunView {
+    pub run: ClassRun,
+    pub ops: Vec<RunOpView>,
+}
+
+/// What `revert_run` did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RevertReceipt {
+    /// The run that was reverted.
+    pub run_id: i64,
+    /// How many of its ops were undone (every applied one).
+    pub reverted_ops: i64,
+    /// The `gardener_revert` ledger event.
+    pub event_seq: i64,
+    /// The revert's own `class_runs` row (`mode = revert`); the retire-marks
+    /// and the ops' `reverted_by_run` point at it.
+    pub revert_run_id: i64,
 }
 
 /// What `Database::stage_proposal` did with one proposal.

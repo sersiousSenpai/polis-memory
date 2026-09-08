@@ -217,3 +217,60 @@ pub fn verify_bundle(bundle: &ContextBundle) -> BundleVerdict {
         recomputed_head,
     }
 }
+
+#[cfg(test)]
+mod b2_kinds {
+    //! `verify_bundle` never whitelists kinds (plan §11 asked); the B2 kinds
+    //! — `gardener_revert`, `gardener_regression` — ride the chain like any
+    //! other and a bundle carrying them verifies. Pinned here so a future
+    //! whitelist cannot silently make every reverted lake un-exportable.
+    use super::*;
+    use crate::ledger::{compute_entry_hash, EventKind, LedgerEventRow, GENESIS_PREV};
+
+    fn chain(kinds: &[&str]) -> Vec<LedgerEventRow> {
+        let mut prev = GENESIS_PREV.to_string();
+        let mut out = Vec::new();
+        for (i, kind) in kinds.iter().enumerate() {
+            let seq = i as i64 + 1;
+            let mut row = LedgerEventRow {
+                seq,
+                ts: 1_000 + seq,
+                kind: kind.to_string(),
+                author: "keeper".into(),
+                prompt_id: None,
+                session_id: None,
+                version_number: None,
+                ref_kind: Some("class_run".into()),
+                ref_id: Some("7".into()),
+                payload_hash: "0".repeat(64),
+                prev_hash: prev.clone(),
+                entry_hash: String::new(),
+            };
+            row.entry_hash = compute_entry_hash(&prev, &canonical_of(&row));
+            prev = row.entry_hash.clone();
+            out.push(row);
+        }
+        out
+    }
+
+    #[test]
+    fn a_full_bundle_with_the_b2_kinds_verifies() {
+        let events = chain(&["prompt", EventKind::GardenerRevert.as_str(), EventKind::GardenerRegression.as_str()]);
+        let head = events.last().unwrap().entry_hash.clone();
+        let bundle = ContextBundle {
+            schema: "polis.bundle/1".into(),
+            scope: "full".into(),
+            head_hash: head,
+            verified_at: 0,
+            events,
+            prompts: vec![],
+            revisions: vec![],
+            tree: BundleTree::default(),
+            notes: vec![],
+        };
+        let v = verify_bundle(&bundle);
+        assert!(v.ok && v.full_chain && v.checked == 3, "{v:?}");
+        assert_eq!(EventKind::GardenerRevert.as_str(), "gardener_revert");
+        assert_eq!(EventKind::GardenerRegression.as_str(), "gardener_regression");
+    }
+}

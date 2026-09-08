@@ -35,12 +35,54 @@ impl PolisStore {
         cite_seqs: &[i64],
         actor: &str,
     ) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn();
+        Self::insert_class_observation_locked(&conn, node_id, summary, cite_seqs, actor)
+    }
+
+    /// `insert_class_observation` journaled under a gardener run (B2): the
+    /// `observe` op's inverse retires the row.
+    pub fn insert_class_observation_in_run(
+        &self,
+        run_id: i64,
+        node_id: &str,
+        summary: &str,
+        cite_seqs: &[i64],
+        actor: &str,
+    ) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn();
+        let row = Self::insert_class_observation_locked(&conn, node_id, summary, cite_seqs, actor)?;
+        if let Some(id) = row {
+            let seq: Option<i64> = conn
+                .query_row("SELECT created_seq FROM class_observations WHERE id = ?1", params![id], |r| r.get(0))
+                .optional()?
+                .flatten();
+            Self::journal_op_locked(
+                &conn,
+                run_id,
+                &crate::runs::OpRecord::applied(
+                    "observe",
+                    vec![crate::runs::subject::obs(id), crate::runs::subject::node(node_id)],
+                    crate::runs::image::observe(id, node_id, seq.unwrap_or(0)),
+                )
+                .with_ledger_seq(seq),
+            )?;
+        }
+        Ok(row)
+    }
+
+    /// The core, under an already-held lock.
+    pub fn insert_class_observation_locked(
+        conn: &rusqlite::Connection,
+        node_id: &str,
+        summary: &str,
+        cite_seqs: &[i64],
+        actor: &str,
+    ) -> rusqlite::Result<Option<i64>> {
         if cite_seqs.is_empty() || summary.trim().is_empty() {
             return Ok(None);
         }
-        let conn = self.conn();
         let node_exists: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM class_nodes WHERE id = ?1",
+            "SELECT COUNT(*) FROM class_nodes WHERE id = ?1 AND retired_by_run IS NULL",
             params![node_id],
             |r| r.get(0),
         )?;
@@ -72,7 +114,7 @@ impl PolisStore {
         ]);
         let author = actor.to_string();
         let ev = Self::append_ledger_event_locked(
-            &conn,
+            conn,
             &polis_core::ledger::LedgerAppend {
                 kind: polis_core::ledger::EventKind::Observation.as_str(),
                 author: &author,
@@ -101,7 +143,7 @@ impl PolisStore {
         let mut stmt = conn.prepare(
             "SELECT id, node_id, summary, cite_seqs, created_seq, pinned, dismissed, created_at
              FROM class_observations
-             WHERE node_id = ?1 AND (?2 OR dismissed = 0)
+             WHERE node_id = ?1 AND (?2 OR dismissed = 0) AND retired_by_run IS NULL
              ORDER BY pinned DESC, created_at DESC, id DESC",
         )?;
         let rows = stmt.query_map(params![node_id, include_dismissed], |r| {
@@ -128,7 +170,7 @@ impl PolisStore {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT node_id, MAX(created_at) FROM class_observations
-             WHERE dismissed = 0 GROUP BY node_id",
+             WHERE dismissed = 0 AND retired_by_run IS NULL GROUP BY node_id",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
@@ -143,7 +185,7 @@ impl PolisStore {
         let conn = self.conn();
         let node: Option<String> = conn
             .query_row(
-                "SELECT node_id FROM class_observations WHERE id = ?1",
+                "SELECT node_id FROM class_observations WHERE id = ?1 AND retired_by_run IS NULL",
                 params![id],
                 |r| r.get(0),
             )
@@ -167,7 +209,7 @@ impl PolisStore {
         let conn = self.conn();
         let node: Option<String> = conn
             .query_row(
-                "SELECT node_id FROM class_observations WHERE id = ?1 AND dismissed = 0",
+                "SELECT node_id FROM class_observations WHERE id = ?1 AND dismissed = 0 AND retired_by_run IS NULL",
                 params![id],
                 |r| r.get(0),
             )

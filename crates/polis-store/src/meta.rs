@@ -26,7 +26,9 @@ pub const CORPUS_ROLE_VERSION_KEY: &str = "corpus_role_version";
 /// idempotent DDL then re-runs once on every existing store.
 /// 2 (B1): `class_runs` gained duration_ms / items / ops / model / outcome /
 /// canary_before / canary_after / error.
-pub const STORE_SCHEMA_VERSION: &str = "2";
+/// 3 (B2): retire-marks on class_nodes / class_links / class_observations,
+/// the `class_run_ops` journal, and `class_runs`' mode / cost columns.
+pub const STORE_SCHEMA_VERSION: &str = "3";
 
 /// The host's legacy `app_settings` keys, read once at adoption.
 pub const LEGACY_LEXICAL_KEY: &str = "redline.memory.lexicalVersion";

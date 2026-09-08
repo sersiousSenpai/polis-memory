@@ -734,12 +734,12 @@ impl PolisStore {
         if let Some(node) = f.class_node.as_deref().filter(|s| !s.is_empty()) {
             sql.push_str(
                 " AND (EXISTS (SELECT 1 FROM class_links cl
-                        WHERE cl.status = 'accepted' AND cl.node_id = ?
+                        WHERE cl.status = 'accepted' AND cl.retired_by_run IS NULL AND cl.node_id = ?
                           AND cl.target_kind IN ('prompt', 'decision', 'revision', 'note')
                           AND cl.target_id = CAST(le.seq AS TEXT))
                     OR (le.ref_kind = 'browse_event'
                         AND EXISTS (SELECT 1 FROM class_links cl
-                        WHERE cl.status = 'accepted' AND cl.node_id = ?
+                        WHERE cl.status = 'accepted' AND cl.retired_by_run IS NULL AND cl.node_id = ?
                           AND cl.target_kind = 'browse_event'
                           AND cl.target_id = le.ref_id)))",
             );

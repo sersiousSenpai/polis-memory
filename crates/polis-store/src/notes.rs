@@ -106,7 +106,7 @@ impl PolisStore {
                         > 0,
                     "class_node" => conn
                         .query_row(
-                            "SELECT COUNT(*) FROM class_nodes WHERE id = ?1",
+                            "SELECT COUNT(*) FROM class_nodes WHERE id = ?1 AND retired_by_run IS NULL",
                             params![tid],
                             |r| r.get::<_, i64>(0),
                         )?

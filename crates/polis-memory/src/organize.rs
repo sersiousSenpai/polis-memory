@@ -468,6 +468,7 @@ pub async fn organize_once(polis: &Polis<'_>) -> Result<OrganizeOutcome, String>
     let envelope = db.lake_envelope().map_err(|e| e.to_string())?;
     let stats = subtree_stats(&tree, &direct);
     let prompt = build_classifier_prompt(&tree, &delta, &stats, envelope);
+    let prompt_bytes = prompt.len();
     let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     // Default: the orchestrator organizes directly (no required human approval);
     // the ledger's taxonomy-reorg time-travel is the safety net. A reviewer who
@@ -525,7 +526,7 @@ pub async fn organize_once(polis: &Polis<'_>) -> Result<OrganizeOutcome, String>
                         }
                     }
                     if let Some(a) = db
-                        .apply_class_proposal(prop.id, CLASSIFIER_ACTOR)
+                        .apply_class_proposal_in_run(prop.id, CLASSIFIER_ACTOR, Some(run_id))
                         .map_err(|e| e.to_string())?
                     {
                         record_reorg(db, CLASSIFIER_ACTOR, &a.op, &a.node_id, &a.detail);
@@ -539,9 +540,11 @@ pub async fn organize_once(polis: &Polis<'_>) -> Result<OrganizeOutcome, String>
             // the apply; refuted ones are dropped; if the verifier can't run,
             // the rows stay staged in the review strip as the fallback.
             let mut superseded = 0usize;
+            let mut verifier_calls = 0usize;
             if auto_apply {
-                let (sup_applied, _sup_dropped) = verify_supersede_proposals(polis, &cwd).await;
+                let (sup_applied, _sup_dropped, calls) = verify_supersede_proposals(polis, &cwd, Some(run_id)).await;
                 superseded = sup_applied;
+                verifier_calls = calls;
             }
             let summary = if auto_apply {
                 format!(
@@ -583,6 +586,14 @@ pub async fn organize_once(polis: &Polis<'_>) -> Result<OrganizeOutcome, String>
                     model: model.clone(),
                     outcome: Some("done".into()),
                     error: None,
+                    // B2's cost columns. Token counts ride the UsageSink
+                    // (booked per turn by the host), not this row: None here
+                    // means "see the sink", never zero.
+                    mode: Some(polis_store::runs::MODE_ORGANIZE.into()),
+                    llm_calls: Some(1 + verifier_calls as i64),
+                    prompt_bytes: Some(prompt_bytes as i64),
+                    wall_ms: Some(started.elapsed().as_millis() as i64),
+                    ..Default::default()
                 },
             )
             .map_err(|e| e.to_string())?;
@@ -607,6 +618,10 @@ pub async fn organize_once(polis: &Polis<'_>) -> Result<OrganizeOutcome, String>
                     model: model.clone(),
                     outcome: Some("error".into()),
                     error: Some(e.clone()),
+                    mode: Some(polis_store::runs::MODE_ORGANIZE.into()),
+                    llm_calls: Some(1),
+                    prompt_bytes: Some(prompt_bytes as i64),
+                    wall_ms: Some(started.elapsed().as_millis() as i64),
                     ..Default::default()
                 },
             );
@@ -664,19 +679,20 @@ pub fn build_supersede_verifier_prompt(polis: &Polis<'_>, pending: &[ClassPropos
 /// Adjudicate every pending `supersede` proposal with one verifier spawn.
 /// Applied ops append their `supersede` ledger event inside
 /// `apply_supersession_locked` — no `taxonomy_reorg` is recorded for them.
-/// Returns `(applied, dropped)`. Best-effort: on spawn/parse failure the
-/// proposals stay staged (the review strip is the graceful fallback).
-pub async fn verify_supersede_proposals(polis: &Polis<'_>, cwd: &str) -> (usize, usize) {
+/// Returns `(applied, dropped, verifier calls)`. Best-effort: on spawn/parse
+/// failure the proposals stay staged (the review strip is the graceful
+/// fallback). Applied ops are journaled under `run` (B2).
+pub async fn verify_supersede_proposals(polis: &Polis<'_>, cwd: &str, run: Option<i64>) -> (usize, usize, usize) {
     let db = polis.store;
     let pending: Vec<ClassProposalRow> = match db.list_class_proposals() {
         Ok(rows) => rows.into_iter().filter(|p| p.op == "supersede").collect(),
         Err(e) => {
             tracing::warn!(error = %e, "could not list supersede proposals");
-            return (0, 0);
+            return (0, 0, 0);
         }
     };
     if pending.is_empty() {
-        return (0, 0);
+        return (0, 0, 0);
     }
     let prompt = build_supersede_verifier_prompt(polis, &pending);
     let text = match run_classifier(polis, cwd, prompt).await {
@@ -684,7 +700,7 @@ pub async fn verify_supersede_proposals(polis: &Polis<'_>, cwd: &str) -> (usize,
         Err(e) => {
             tracing::info!(error = %e,
                 "supersede verifier unavailable — proposals stay staged for review");
-            return (0, 0);
+            return (0, 0, 1);
         }
     };
     let verdicts = parse_supersede_verdicts(&text);
@@ -695,7 +711,7 @@ pub async fn verify_supersede_proposals(polis: &Polis<'_>, cwd: &str) -> (usize,
             continue; // no verdict → stays staged
         };
         if v.apply && v.confidence >= SUPERSEDE_CONFIDENCE_MIN {
-            match db.apply_class_proposal(prop.id, CLASSIFIER_ACTOR) {
+            match db.apply_class_proposal_in_run(prop.id, CLASSIFIER_ACTOR, run) {
                 Ok(Some(a)) => {
                     tracing::info!(target: "redline::classmem", detail = %a.detail,
                         confidence = v.confidence, "supersession applied");
@@ -716,7 +732,7 @@ pub async fn verify_supersede_proposals(polis: &Polis<'_>, cwd: &str) -> (usize,
             dropped += 1;
         }
     }
-    (applied, dropped)
+    (applied, dropped, 1)
 }
 
 #[cfg(test)]

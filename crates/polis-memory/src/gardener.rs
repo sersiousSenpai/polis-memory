@@ -317,13 +317,18 @@ pub async fn compaction_pass(polis: &Polis<'_>) -> Result<usize, String> {
         return Ok(0);
     }
     let body_map: HashMap<i64, String> = bodies.iter().cloned().collect();
+    let started = std::time::Instant::now();
 
     // Tier 1: the agent summarizer acts. Tier 2 (fallback): deterministic gist
     // for any prompt the agent didn't cover (or if it failed entirely).
     let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let keeper_prompt = build_keeper_prompt(&bodies);
+    let prompt_bytes = keeper_prompt.len() as i64;
     let mut gists: HashMap<i64, (String, String, &'static str)> = HashMap::new();
-    match run_keeper_summarizer(polis, &cwd, build_keeper_prompt(&bodies)).await {
+    let mut llm_calls = 0i64;
+    match run_keeper_summarizer(polis, &cwd, keeper_prompt).await {
         Ok(text) => {
+            llm_calls = 1;
             for a in parse_compaction_actions(&text) {
                 if body_map.contains_key(&a.prompt_id) {
                     gists.insert(a.prompt_id, (a.gist, a.reason, GIST_SOURCE_AGENT));
@@ -338,13 +343,46 @@ pub async fn compaction_pass(polis: &Polis<'_>) -> Result<usize, String> {
         });
     }
 
+    // B2: the pass is a run of its own (`mode = compaction`), every
+    // compaction journaled under it, so a bad pass is one `revert_run` away
+    // (the archive is the pre-image; `restore_prompt_body` the inverse).
+    let run_id = db
+        .insert_class_run_with(polis_store::runs::MODE_COMPACTION, None, None)
+        .map_err(|e| e.to_string())?;
     let mut applied = 0usize;
     for (id, (gist, reason, source)) in &gists {
-        match db.compact_prompt_body(*id, gist, reason, source, KEEPER_ACTOR) {
+        match db.compact_prompt_body_in_run(run_id, *id, gist, reason, source, KEEPER_ACTOR) {
             Ok(Some(_)) => applied += 1,
             Ok(None) => {} // raced / already compacted
             Err(e) => tracing::warn!(error = %e, prompt = id, "compact_prompt_body failed"),
         }
+    }
+    let _ = db.finish_class_run_with(
+        run_id,
+        &polis_core::types::ClassRunFinish {
+            status: "done".into(),
+            summary: format!("compacted {applied} cold prompt(s)"),
+            duration_ms: Some(started.elapsed().as_millis() as i64),
+            items: Some(bodies.len() as i64),
+            ops: Some(applied as i64),
+            model: polis.agent.as_ref().map(|a| a.name().to_string()),
+            outcome: Some("done".into()),
+            mode: Some(polis_store::runs::MODE_COMPACTION.into()),
+            llm_calls: Some(llm_calls),
+            prompt_bytes: Some(prompt_bytes),
+            wall_ms: Some(started.elapsed().as_millis() as i64),
+            ..Default::default()
+        },
+    );
+    // Retired rows past the revert horizon are physically deleted here —
+    // the gardener's housekeeping, never a reader's.
+    match db.vacuum_retired(polis_store::runs::REVERT_HORIZON_RUNS) {
+        Ok(v) if v.nodes + v.links + v.observations + v.images > 0 => {
+            tracing::info!(nodes = v.nodes, links = v.links, observations = v.observations, images = v.images,
+                horizon = v.horizon_run, "vacuumed retired rows past the revert horizon");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "vacuum_retired failed"),
     }
     Ok(applied)
 }
@@ -537,21 +575,46 @@ pub async fn observations_pass(polis: &Polis<'_>) -> Result<usize, String> {
         return Ok(0);
     }
     let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let text = match run_keeper_summarizer(polis, &cwd, build_observations_prompt(&corpus)).await {
+    let started = std::time::Instant::now();
+    let obs_prompt = build_observations_prompt(&corpus);
+    let prompt_bytes = obs_prompt.len() as i64;
+    let text = match run_keeper_summarizer(polis, &cwd, obs_prompt).await {
         Ok(text) => text,
         Err(e) => {
             tracing::info!(error = %e, "observation agent unavailable — skipping the pass");
             return Ok(0);
         }
     };
+    // B2: a run of its own (`mode = observations`); each row journaled as
+    // an `observe` op whose inverse retires it.
+    let run_id = db
+        .insert_class_run_with(polis_store::runs::MODE_OBSERVATIONS, None, None)
+        .map_err(|e| e.to_string())?;
     let mut written = 0usize;
     for a in parse_observations(&text, &allowed) {
-        match db.insert_class_observation(&a.node_id, &a.summary, &a.cite_seqs, KEEPER_ACTOR) {
+        match db.insert_class_observation_in_run(run_id, &a.node_id, &a.summary, &a.cite_seqs, KEEPER_ACTOR) {
             Ok(Some(_)) => written += 1,
             Ok(None) => {} // dedup (incl. previously dismissed) or node gone
             Err(e) => tracing::warn!(error = %e, node = %a.node_id, "insert observation failed"),
         }
     }
+    let _ = db.finish_class_run_with(
+        run_id,
+        &polis_core::types::ClassRunFinish {
+            status: "done".into(),
+            summary: format!("wrote {written} observation(s) over {} node(s)", corpus.len()),
+            duration_ms: Some(started.elapsed().as_millis() as i64),
+            items: Some(corpus.len() as i64),
+            ops: Some(written as i64),
+            model: polis.agent.as_ref().map(|a| a.name().to_string()),
+            outcome: Some("done".into()),
+            mode: Some(polis_store::runs::MODE_OBSERVATIONS.into()),
+            llm_calls: Some(1),
+            prompt_bytes: Some(prompt_bytes),
+            wall_ms: Some(started.elapsed().as_millis() as i64),
+            ..Default::default()
+        },
+    );
     Ok(written)
 }
 

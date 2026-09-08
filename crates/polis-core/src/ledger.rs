@@ -217,6 +217,21 @@ pub enum EventKind {
     /// `payload_hash`; the readable sidecar lives in `app_settings` under
     /// `redline.router.verdict.<review id>`.
     RouterVerdict,
+    // --- B2 ---
+    /// Reversibility (§5.2): a gardener run was reverted — every op it
+    /// applied was undone through its journaled pre-image, in one
+    /// transaction. References the run by `(ref_kind="class_run", ref_id)`
+    /// and commits to `{run, ops_reverted, by_run}` via `payload_hash`.
+    /// Nothing is ever deleted from the chain: the run's own events (its
+    /// `class_curate` / `taxonomy_reorg` / `supersede` / `compaction` /
+    /// `observation` rows) stay, and this event is the record that the
+    /// catalog no longer reflects them.
+    GardenerRevert,
+    /// Reserved for B3: the canary measured a recall regression after a run
+    /// and the run was auto-reverted (`class_runs.outcome =
+    /// reverted_by_canary`). Same reference shape as `GardenerRevert`, with
+    /// the before/after recall in the payload.
+    GardenerRegression,
 }
 
 impl EventKind {
@@ -243,6 +258,9 @@ impl EventKind {
             EventKind::WorkClose => "work_close",
             EventKind::MootTurn => "moot_turn",
             EventKind::RouterVerdict => "router_verdict",
+            // --- B2 ---
+            EventKind::GardenerRevert => "gardener_revert",
+            EventKind::GardenerRegression => "gardener_regression",
         }
     }
 }

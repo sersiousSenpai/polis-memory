@@ -463,7 +463,7 @@ impl PolisStore {
                         n.ip_name, n.status, n.pinned, n.curated_by, n.created_at, n.updated_at
                  FROM class_nodes_fts
                  JOIN class_nodes n ON n.rowid = class_nodes_fts.rowid
-                 WHERE class_nodes_fts MATCH ?1
+                 WHERE class_nodes_fts MATCH ?1 AND n.retired_by_run IS NULL
                  ORDER BY (-bm25(class_nodes_fts, 5.0, 1.0)
                            + 0.2 * MAX(0.0, 1.0 - (?2 - n.updated_at) / 2592000000.0)
                            + CASE WHEN n.status = 'accepted' THEN 0.1 ELSE 0.0 END) DESC,

@@ -118,7 +118,7 @@ impl PolisStore {
             "SELECT n.rowid, n.title || COALESCE(' — ' || n.summary, ''),
                     n.title || COALESCE(n.summary, '')
              FROM class_nodes n
-             WHERE NOT EXISTS (
+             WHERE n.retired_by_run IS NULL AND NOT EXISTS (
                  SELECT 1 FROM embeddings e
                  WHERE e.target_kind = 'class_node' AND e.target_id = n.rowid
                    AND e.model = ?1

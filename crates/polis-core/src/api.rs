@@ -28,8 +28,9 @@ use crate::ledger::{ChainVerdict, Origin};
 use crate::pack::AnswerPack;
 use crate::proposal::Proposal;
 use crate::types::{
-    BrowseHit, ClassLink, ClassNode, ClassObservation, ContextStats, GrepHit, GrepScope,
-    LakeItem, LedgerFilters, MemoryMapView, PromptFilters, StageResult, TimelineItem,
+    BrowseHit, ClassLink, ClassNode, ClassObservation, ClassRun, ContextStats, GrepHit,
+    GrepScope, LakeItem, LedgerFilters, MemoryMapView, PromptFilters, RevertReceipt, RunView,
+    StageResult, TimelineItem,
 };
 
 /// The one asynchronous return in the surface: a boxed, `Send` future, so the
@@ -460,6 +461,19 @@ pub trait MemoryApi: Send + Sync {
     fn organize(&self, scope: &Scope) -> BoxFuture<'_, Result<OrganizeReceipt, MemoryError>>;
     /// Embed one call's worth of the semantic backlog.
     fn reindex(&self, scope: &Scope) -> Result<ReindexReceipt, MemoryError>;
+
+    // --- B2: the gardener's runs, reversible ------------------------------
+
+    /// The newest `limit` runs, newest first (every mode).
+    fn list_runs(&self, limit: i64, scope: &Scope) -> Result<Vec<ClassRun>, MemoryError>;
+    /// One run with its journaled ops (no image blobs).
+    fn run(&self, id: i64) -> Result<Option<RunView>, MemoryError>;
+    /// Undo one run: every applied op, in reverse, in one transaction, from
+    /// its journaled pre-image; appends `gardener_revert`. `Rejected` when a
+    /// later run touched the same subjects ("revert run N+k first"), when the
+    /// run is past the vacuum horizon, or when an op cannot be inverted.
+    /// A GUI / HTTP action only — never an MCP tool (§5.4).
+    fn revert_run(&self, id: i64) -> Result<RevertReceipt, MemoryError>;
 }
 
 #[cfg(test)]

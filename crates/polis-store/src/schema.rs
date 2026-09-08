@@ -560,6 +560,56 @@ impl Migration {
         let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN canary_before REAL", []);
         let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN canary_after REAL", []);
         let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN error TEXT", []);
+
+        // ---- B2 (docs/ledger.md "Reversibility") ------------------------
+        // Retire-marks instead of deletes: a destructive op stamps the run
+        // that retired the row; every reader filters `retired_by_run IS
+        // NULL`; a revert clears the marks it made; `vacuum_retired`
+        // physically deletes past the revert horizon. `retired_into` names
+        // the digest a collapsed node's sourcing moved to (or the merge
+        // target), for the timeline.
+        let _ = conn.execute("ALTER TABLE class_nodes ADD COLUMN retired_by_run INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_nodes ADD COLUMN retired_into TEXT", []);
+        let _ = conn.execute("ALTER TABLE class_links ADD COLUMN retired_by_run INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_observations ADD COLUMN retired_by_run INTEGER", []);
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_class_nodes_retired ON class_nodes (retired_by_run)",
+            [],
+        );
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_class_links_retired ON class_links (retired_by_run)",
+            [],
+        );
+        // What kind of run, and what it cost (B1's duration_ms / items / ops /
+        // model / outcome / canary_* / error stay as they are).
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN mode TEXT", []);
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN llm_calls INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN prompt_bytes INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN tokens_in INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN tokens_out INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN wall_ms INTEGER", []);
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN canary_json TEXT", []);
+        // The per-op journal: one row per op a run applied, with the exact
+        // rows the inverse needs deflated into `pre_image` (sha256 in
+        // `pre_hash`), what it produced in `post_image`, the ledger event it
+        // appended, and — once undone — which revert run undid it.
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS class_run_ops (
+                run_id INTEGER NOT NULL,
+                op_ix INTEGER NOT NULL,
+                op TEXT NOT NULL,             -- file | create | promote | split | merge | collapse | supersede | compact | observe
+                subject_ids TEXT NOT NULL,    -- JSON array: node:<id> link:<id> obs:<id> prompt:<id> seq:<n>
+                outcome TEXT NOT NULL,        -- applied | refused | expired | reverted
+                reason TEXT,
+                pre_image BLOB,               -- deflate(JSON), NULL once vacuumed
+                pre_hash TEXT,
+                post_image BLOB,
+                ledger_seq INTEGER,
+                reverted_by_run INTEGER,
+                PRIMARY KEY (run_id, op_ix)
+            );",
+        );
+        // ---- end B2 -----------------------------------------------------
         Ok(())
     }
 

@@ -66,6 +66,48 @@ impl PolisStore {
         actor: &str,
     ) -> rusqlite::Result<Option<i64>> {
         let conn = self.conn();
+        Self::compact_prompt_body_locked(&conn, prompt_id, gist, reason, gist_source, actor)
+    }
+
+    /// `compact_prompt_body` journaled under a gardener run (B2): the
+    /// `compact` op's inverse is `restore_prompt_body`, hash-verified against
+    /// the archive, so a `cold` compaction is revertible for as long as its
+    /// archive row lives. Journal and swap happen under one lock.
+    pub fn compact_prompt_body_in_run(
+        &self,
+        run_id: i64,
+        prompt_id: i64,
+        gist: &str,
+        reason: &str,
+        gist_source: &str,
+        actor: &str,
+    ) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn();
+        let seq = Self::compact_prompt_body_locked(&conn, prompt_id, gist, reason, gist_source, actor)?;
+        if let Some(seq) = seq {
+            Self::journal_op_locked(
+                &conn,
+                run_id,
+                &crate::runs::OpRecord::applied(
+                    "compact",
+                    vec![crate::runs::subject::prompt(prompt_id)],
+                    crate::runs::image::compact(prompt_id, seq),
+                )
+                .with_ledger_seq(Some(seq)),
+            )?;
+        }
+        Ok(seq)
+    }
+
+    /// The core, under an already-held lock.
+    pub fn compact_prompt_body_locked(
+        conn: &rusqlite::Connection,
+        prompt_id: i64,
+        gist: &str,
+        reason: &str,
+        gist_source: &str,
+        actor: &str,
+    ) -> rusqlite::Result<Option<i64>> {
         // Read the original body + hash under the same lock, then swap — all
         // atomic with the ledger append below so the chain can't race.
         let row: Option<(String, String)> = conn
@@ -129,7 +171,7 @@ impl PolisStore {
         let author = actor.to_string();
         let pid_str = prompt_id.to_string();
         let ev = Self::append_ledger_event_locked(
-            &conn,
+            conn,
             &polis_core::ledger::LedgerAppend {
                 kind: polis_core::ledger::EventKind::Compaction.as_str(),
                 author: &author,
@@ -157,6 +199,12 @@ impl PolisStore {
     /// the record.
     pub fn restore_prompt_body(&self, prompt_id: i64) -> rusqlite::Result<bool> {
         let conn = self.conn();
+        Self::restore_prompt_body_locked(&conn, prompt_id)
+    }
+
+    /// The core, under an already-held lock (a revert runs it inside its
+    /// one transaction).
+    pub fn restore_prompt_body_locked(conn: &rusqlite::Connection, prompt_id: i64) -> rusqlite::Result<bool> {
         let row: Option<(String, String, Vec<u8>)> = conn
             .query_row(
                 "SELECT body_hash, algo, blob FROM prompt_archive WHERE prompt_id = ?1",
@@ -182,10 +230,13 @@ impl PolisStore {
         }
         // The prompt's own `body_hash` is the chain's commitment and is never
         // rewritten by compaction, so restoring is a pure re-inflation: put the
-        // words back, clear the compaction marks, drop the archive row.
+        // words back, clear the compaction marks (all four — a restored row is
+        // warm again, and `gist_source` is a compaction fact), drop the
+        // archive row.
         let changed = conn.execute(
             "UPDATE prompts
-                SET body = ?2, gist = NULL, compacted_at = NULL, original_bytes = NULL
+                SET body = ?2, gist = NULL, compacted_at = NULL, original_bytes = NULL,
+                    gist_source = NULL
              WHERE id = ?1 AND body_hash = ?3",
             params![prompt_id, body, archived_hash],
         )?;
@@ -239,7 +290,7 @@ impl PolisStore {
              LEFT JOIN class_links l
                ON l.target_kind = 'prompt'
               AND CAST(l.target_id AS INTEGER) = le.seq
-              AND l.status = 'accepted'
+              AND l.status = 'accepted' AND l.retired_by_run IS NULL
              WHERE p.gist IS NULL
                AND LENGTH(CAST(p.body AS BLOB)) >= ?1
                AND (l.node_id IS NOT NULL

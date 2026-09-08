@@ -364,6 +364,27 @@ impl MemoryApi for RemoteApi {
     fn reindex(&self, _scope: &Scope) -> Result<ReindexReceipt, MemoryError> {
         unavailable()
     }
+
+    // --- B2: the runs (reads over the routes; the revert is a POST) ----------
+
+    fn list_runs(&self, limit: i64, _scope: &Scope) -> Result<Vec<ClassRun>, MemoryError> {
+        let v: Value = self.get_json("/v1/memory/runs", &[("limit", limit.to_string())])?;
+        serde_json::from_value(v.get("runs").cloned().unwrap_or(Value::Array(vec![])))
+            .map_err(|e| MemoryError::Store(format!("runs: unexpected body: {e}")))
+    }
+
+    fn run(&self, id: i64) -> Result<Option<RunView>, MemoryError> {
+        match self.get_json::<RunView>(&format!("/v1/memory/runs/{id}"), &[]) {
+            Ok(v) => Ok(Some(v)),
+            Err(MemoryError::NotFound) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn revert_run(&self, id: i64) -> Result<RevertReceipt, MemoryError> {
+        let (_, v) = self.post_json(&format!("/v1/memory/runs/{id}/revert"), &serde_json::json!({}))?;
+        serde_json::from_value(v).map_err(|e| MemoryError::Store(format!("revert: unexpected body: {e}")))
+    }
 }
 
 #[cfg(test)]

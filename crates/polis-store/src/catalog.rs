@@ -95,7 +95,7 @@ impl PolisStore {
         let mut stmt = conn.prepare(
             "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
                     status, pinned, curated_by, created_at, updated_at
-             FROM class_nodes ORDER BY title ASC",
+             FROM class_nodes WHERE retired_by_run IS NULL ORDER BY title ASC",
         )?;
         let rows = stmt.query_map([], PolisStore::row_to_class_node)?;
         rows.collect()
@@ -106,7 +106,7 @@ impl PolisStore {
         conn.query_row(
             "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
                     status, pinned, curated_by, created_at, updated_at
-             FROM class_nodes WHERE id = ?1",
+             FROM class_nodes WHERE id = ?1 AND retired_by_run IS NULL",
             params![id],
             PolisStore::row_to_class_node,
         )
@@ -121,7 +121,7 @@ impl PolisStore {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id, node_id, target_kind, target_id, note, status, created_at
-             FROM class_links WHERE node_id = ?1 ORDER BY id ASC",
+             FROM class_links WHERE node_id = ?1 AND retired_by_run IS NULL ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![node_id], |r| {
             Ok(polis_core::types::ClassLink {
@@ -148,7 +148,7 @@ impl PolisStore {
         let mut stmt = conn.prepare(
             "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
                     status, pinned, curated_by, created_at, updated_at
-             FROM class_nodes WHERE parent_id = ?1 ORDER BY title ASC",
+             FROM class_nodes WHERE parent_id = ?1 AND retired_by_run IS NULL ORDER BY title ASC",
         )?;
         let rows = stmt.query_map(params![parent_id], PolisStore::row_to_class_node)?;
         rows.collect()
@@ -177,7 +177,7 @@ impl PolisStore {
             let mut stmt = conn.prepare(&format!(
                 "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
                         status, pinned, curated_by, created_at, updated_at
-                 FROM class_nodes WHERE parent_id IN ({marks})
+                 FROM class_nodes WHERE parent_id IN ({marks}) AND retired_by_run IS NULL
                  ORDER BY parent_id ASC, title ASC"
             ))?;
             let refs: Vec<&dyn rusqlite::ToSql> =
@@ -203,11 +203,20 @@ impl PolisStore {
         let now = polis_core::ledger::now_millis();
         let exists = |id: &str| -> rusqlite::Result<bool> {
             let n: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM class_nodes WHERE id = ?1",
+                "SELECT COUNT(*) FROM class_nodes WHERE id = ?1 AND retired_by_run IS NULL",
                 params![id],
                 |r| r.get(0),
             )?;
             Ok(n > 0)
+        };
+        // B2: every row this proposal creates is journaled under the run, so
+        // `revert_run` can undo it (a `create` retires the node, a `file`
+        // deletes — or re-retires — the link).
+        let journal = |op: &str, subjects: Vec<String>, pre: serde_json::Value| -> rusqlite::Result<()> {
+            if let Some(run) = run_id {
+                Self::journal_op_locked(&conn, run, &crate::runs::OpRecord::applied(op, subjects, pre))?;
+            }
+            Ok(())
         };
         match p {
             Proposal::Create { parent_id, title, .. } => {
@@ -216,7 +225,7 @@ impl PolisStore {
                 }
                 // Don't re-propose an identical child.
                 let dup: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM class_nodes WHERE parent_id = ?1 AND title = ?2",
+                    "SELECT COUNT(*) FROM class_nodes WHERE parent_id = ?1 AND title = ?2 AND retired_by_run IS NULL",
                     params![parent_id, title],
                     |r| r.get(0),
                 )?;
@@ -232,6 +241,7 @@ impl PolisStore {
                              'classifier', ?4, ?4)",
                     params![id, parent_id, title, now],
                 )?;
+                journal("create", vec![crate::runs::subject::node(&id)], crate::runs::image::create(&id, Some(parent_id), title))?;
                 Ok(StagedOutcome::Node)
             }
             Proposal::File {
@@ -251,7 +261,7 @@ impl PolisStore {
                     Some(sc) if !sc.trim().is_empty() => {
                         let existing: Option<String> = conn
                             .query_row(
-                                "SELECT id FROM class_nodes WHERE parent_id = ?1 AND title = ?2 LIMIT 1",
+                                "SELECT id FROM class_nodes WHERE parent_id = ?1 AND title = ?2 AND retired_by_run IS NULL LIMIT 1",
                                 params![parent_id, sc.trim()],
                                 |r| r.get(0),
                             )
@@ -269,20 +279,53 @@ impl PolisStore {
                                     params![id, parent_id, sc.trim(), now],
                                 )?;
                                 created_node = true;
+                                journal("create", vec![crate::runs::subject::node(&id)], crate::runs::image::create(&id, Some(parent_id), sc.trim()))?;
                                 id
                             }
                         }
                     }
                     _ => parent_id.clone(),
                 };
-                let changed = conn.execute(
-                    "INSERT INTO class_links
-                        (node_id, target_kind, target_id, note, status, created_at)
-                     VALUES (?1, ?2, ?3, ?4, 'proposed', ?5)
-                     ON CONFLICT(node_id, target_kind, target_id) DO NOTHING",
-                    params![target_node, target_kind, target_id, note, now],
-                )?;
-                if changed == 0 && !created_node {
+                // The dedup index sees retired links too: an identical link a
+                // revert (or a collapse) retired is REVIVED rather than
+                // duplicated, and the journal remembers which run had
+                // retired it so a revert of this filing re-retires it.
+                let prior: Option<(i64, Option<i64>)> = conn
+                    .query_row(
+                        "SELECT id, retired_by_run FROM class_links
+                         WHERE node_id = ?1 AND target_kind = ?2 AND target_id = ?3",
+                        params![target_node, target_kind, target_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                let link_id = match prior {
+                    Some((_, None)) => None, // live already: nothing to do
+                    Some((id, Some(retired_by))) => {
+                        conn.execute("UPDATE class_links SET retired_by_run = NULL WHERE id = ?1", params![id])?;
+                        journal(
+                            "file",
+                            vec![crate::runs::subject::node(&target_node), crate::runs::subject::link(id)],
+                            crate::runs::image::file(id, &target_node, target_kind, target_id, Some(retired_by)),
+                        )?;
+                        Some(id)
+                    }
+                    None => {
+                        conn.execute(
+                            "INSERT INTO class_links
+                                (node_id, target_kind, target_id, note, status, created_at)
+                             VALUES (?1, ?2, ?3, ?4, 'proposed', ?5)",
+                            params![target_node, target_kind, target_id, note, now],
+                        )?;
+                        let id = conn.last_insert_rowid();
+                        journal(
+                            "file",
+                            vec![crate::runs::subject::node(&target_node), crate::runs::subject::link(id)],
+                            crate::runs::image::file(id, &target_node, target_kind, target_id, None),
+                        )?;
+                        Some(id)
+                    }
+                };
+                if link_id.is_none() && !created_node {
                     return Ok(StagedOutcome::Skipped);
                 }
                 Ok(StagedOutcome::Link { created_node })
@@ -455,18 +498,18 @@ impl PolisStore {
         let conn = self.conn();
         let now = polis_core::ledger::now_millis();
         let author = actor.to_string();
-        let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE status = 'proposed'")?;
+        let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE status = 'proposed' AND retired_by_run IS NULL")?;
         let ids: Vec<String> = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<_>>()?;
         drop(stmt);
         conn.execute(
             "UPDATE class_nodes SET status = 'accepted', curated_by = ?1, updated_at = ?2
-             WHERE status = 'proposed'",
+             WHERE status = 'proposed' AND retired_by_run IS NULL",
             params![author, now],
         )?;
         conn.execute(
-            "UPDATE class_links SET status = 'accepted' WHERE status = 'proposed'",
+            "UPDATE class_links SET status = 'accepted' WHERE status = 'proposed' AND retired_by_run IS NULL",
             [],
         )?;
         Ok(ids)
@@ -516,37 +559,9 @@ impl PolisStore {
         Ok(row)
     }
 
-    pub fn delete_node_subtree(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<()> {
-        // Gather the subtree (BFS) so we delete children before/with the root.
-        let mut stack = vec![id.to_string()];
-        let mut all = Vec::new();
-        let mut guard = 0;
-        while let Some(nid) = stack.pop() {
-            guard += 1;
-            if guard > 10_000 {
-                break;
-            }
-            all.push(nid.clone());
-            let mut stmt =
-                conn.prepare("SELECT id FROM class_nodes WHERE parent_id = ?1")?;
-            let kids: Vec<String> = stmt
-                .query_map(params![nid], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            stack.extend(kids);
-        }
-        for nid in &all {
-            conn.execute("DELETE FROM class_links WHERE node_id = ?1", params![nid])?;
-            // Observations retire with their node (collapse/merge/reject) —
-            // they are re-derived, and their `observation` ledger events
-            // remain as the tamper-evident history.
-            conn.execute(
-                "DELETE FROM class_observations WHERE node_id = ?1",
-                params![nid],
-            )?;
-            conn.execute("DELETE FROM class_nodes WHERE id = ?1", params![nid])?;
-        }
-        Ok(())
-    }
+    // `delete_node_subtree` is gone (B2): the one destructive primitive is
+    // `runs::retire_node_subtree`, which marks the rows under a run so the
+    // run can be reverted; `vacuum_retired` deletes past the horizon.
 
     pub fn reject_class_link(&self, link_id: i64) -> rusqlite::Result<()> {
         let conn = self.conn();
@@ -554,11 +569,27 @@ impl PolisStore {
         Ok(())
     }
 
-    /// Reject (delete) a node and its whole proposed/accepted subtree + links.
-    /// Used to reject a proposed node; also the cleanup primitive for merges.
+    /// Reject (retire) a node and its whole proposed/accepted subtree + links,
+    /// under a `curation` run of its own so the rejection is journaled and
+    /// revertible like any gardener op.
     pub fn reject_class_node(&self, id: &str) -> rusqlite::Result<()> {
+        let run = self.insert_class_run_with(crate::runs::MODE_CURATION, None, None)?;
         let conn = self.conn();
-        Self::delete_node_subtree(&conn, id)
+        let set = Self::retire_node_subtree(&conn, id, run, None)?;
+        let mut subjects: Vec<String> = set.nodes.iter().map(|n| crate::runs::subject::node(n)).collect();
+        subjects.extend(set.links.iter().map(|l| crate::runs::subject::link(*l)));
+        let pre = serde_json::json!({
+            "nodeId": id, "digestId": serde_json::Value::Null,
+            "retiredNodes": set.nodes, "retiredLinks": set.links,
+            "retiredObservations": set.observations, "citationLinks": Vec::<i64>::new(),
+        });
+        Self::journal_op_locked(&conn, run, &crate::runs::OpRecord::applied("collapse", subjects, pre))?;
+        conn.execute(
+            "UPDATE class_runs SET status = 'done', finished_at = ?2, outcome = 'done', ops = 1,
+                    summary = ?3 WHERE id = ?1",
+            params![run, polis_core::ledger::now_millis(), format!("rejected node {id}")],
+        )?;
+        Ok(())
     }
 
     pub fn set_class_node_pinned(&self, id: &str, pinned: bool) -> rusqlite::Result<()> {
@@ -636,28 +667,73 @@ impl PolisStore {
     /// Apply (accept) a structural proposal: mutate the accepted tree and drop
     /// the proposal row. Returns the facts for the `taxonomy_reorg` ledger event.
     /// Promotion re-parents preserving id/links/pins/subtree; collapse creates a
-    /// digest node citing exact ledger seqs and removes the cold subtree.
+    /// digest node citing exact ledger seqs and retires the cold subtree.
     /// `actor` is who applied it — the classifier's seat name on the
     /// auto-organize path, the local human on a review-strip accept — and lands
     /// in `curated_by` plus the `supersede` event's hashed `author`.
+    ///
+    /// Journaled (B2) under the proposal's own `run_id`, else a fresh
+    /// `curation` run — see `apply_class_proposal_in_run`.
     pub fn apply_class_proposal(
         &self,
         id: i64,
         actor: &str,
     ) -> rusqlite::Result<Option<polis_core::types::AppliedReorg>> {
+        self.apply_class_proposal_in_run(id, actor, None)
+    }
+
+    /// `apply_class_proposal`, journaled under `run` (B2): every op writes a
+    /// `class_run_ops` row with the pre-image its inverse needs, and every
+    /// destructive step is a retire-mark stamped with that run. The journal
+    /// run is `run`, else the proposal's `run_id`, else a `curation` run made
+    /// here — so nothing ever applies without a run it can be reverted through.
+    pub fn apply_class_proposal_in_run(
+        &self,
+        id: i64,
+        actor: &str,
+        run: Option<i64>,
+    ) -> rusqlite::Result<Option<polis_core::types::AppliedReorg>> {
+        use crate::runs::{image, subject, OpRecord, MODE_CURATION};
         let p = match self.get_class_proposal(id)? {
             Some(p) => p,
             None => return Ok(None),
         };
+        let (run, made_run) = match run.or(p.run_id) {
+            Some(r) => (r, false),
+            None => (self.insert_class_run_with(MODE_CURATION, None, None)?, true),
+        };
         let conn = self.conn();
         let now = polis_core::ledger::now_millis();
+        let finish_curation = |conn: &rusqlite::Connection, ops: i64| -> rusqlite::Result<()> {
+            if made_run {
+                conn.execute(
+                    "UPDATE class_runs SET status = 'done', finished_at = ?2, outcome = 'done', ops = ?3,
+                            summary = ?4 WHERE id = ?1",
+                    params![run, polis_core::ledger::now_millis(), ops, format!("applied proposal #{id}")],
+                )?;
+            }
+            Ok(())
+        };
         let detail: String = match p.op.as_str() {
             "promote" => {
                 let node = p.node_id.clone().unwrap_or_default();
+                let old_parent: Option<String> = conn
+                    .query_row("SELECT parent_id FROM class_nodes WHERE id = ?1", params![node], |r| r.get(0))
+                    .optional()?
+                    .flatten();
                 // new_parent may be NULL → promote to a root.
                 conn.execute(
                     "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE id = ?1",
                     params![node, p.parent_id, now],
+                )?;
+                Self::journal_op_locked(
+                    &conn,
+                    run,
+                    &OpRecord::applied(
+                        "promote",
+                        vec![subject::node(&node)],
+                        image::promote(&node, old_parent.as_deref(), p.parent_id.as_deref()),
+                    ),
                 )?;
                 format!("→ parent {}", p.parent_id.as_deref().unwrap_or("(root)"))
             }
@@ -668,6 +744,7 @@ impl PolisStore {
                 // proposal as a no-op; unpin first to collapse.
                 if Self::subtree_pinned(&conn, &node)? {
                     self.drop_proposal_locked(&conn, id)?;
+                    finish_curation(&conn, 0)?;
                     return Ok(None);
                 }
                 // Parent + title of the cold branch, for the digest placement.
@@ -687,22 +764,42 @@ impl PolisStore {
                     params![digest_id, parent, digest_title, p.summary, actor, now],
                 )?;
                 // Citation links to the exact ledger seqs.
+                let mut citations: Vec<i64> = Vec::new();
                 if let Some(extra) = &p.extra_json {
                     if let Ok(seqs) = serde_json::from_str::<Vec<i64>>(extra) {
                         for seq in &seqs {
-                            conn.execute(
+                            let changed = conn.execute(
                                 "INSERT INTO class_links
                                     (node_id, target_kind, target_id, note, status, created_at)
                                  VALUES (?1, 'ledger', ?2, NULL, 'accepted', ?3)
                                  ON CONFLICT(node_id, target_kind, target_id) DO NOTHING",
                                 params![digest_id, seq.to_string(), now],
                             )?;
+                            if changed == 1 {
+                                citations.push(conn.last_insert_rowid());
+                            }
                         }
                     }
                 }
-                // Remove the cold subtree (its sourcing now lives in the digest's
-                // citations, one hop away).
-                Self::delete_node_subtree(&conn, &node)?;
+                // Retire the cold subtree (its sourcing now lives in the
+                // digest's citations, one hop away). Marks, not deletes: the
+                // revert clears them.
+                let set = Self::retire_node_subtree(&conn, &node, run, Some(&digest_id))?;
+                let mut subjects: Vec<String> = vec![subject::node(&node), subject::node(&digest_id)];
+                subjects.extend(set.nodes.iter().filter(|n| *n != &node).map(|n| subject::node(n)));
+                Self::journal_op_locked(
+                    &conn,
+                    run,
+                    &OpRecord::applied(
+                        "collapse",
+                        subjects,
+                        serde_json::json!({
+                            "nodeId": node, "digestId": digest_id,
+                            "retiredNodes": set.nodes, "retiredLinks": set.links,
+                            "retiredObservations": set.observations, "citationLinks": citations,
+                        }),
+                    ),
+                )?;
                 format!("digest {digest_id}")
             }
             "merge" => {
@@ -713,9 +810,15 @@ impl PolisStore {
                     .unwrap_or_default();
                 if ids.is_empty() {
                     self.drop_proposal_locked(&conn, id)?;
+                    finish_curation(&conn, 0)?;
                     return Ok(None);
                 }
                 let target = ids[0].clone();
+                let (old_title, old_parent): (String, Option<String>) = conn.query_row(
+                    "SELECT title, parent_id FROM class_nodes WHERE id = ?1",
+                    params![target],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
                 if let Some(t) = &p.title {
                     conn.execute(
                         "UPDATE class_nodes SET title = ?2, updated_at = ?3 WHERE id = ?1",
@@ -728,28 +831,79 @@ impl PolisStore {
                         params![target, parent, now],
                     )?;
                 }
+                let mut absorbed: Vec<serde_json::Value> = Vec::new();
+                let mut moved: Vec<serde_json::Value> = Vec::new();
+                let mut leftover: Vec<i64> = Vec::new();
+                let mut children: Vec<serde_json::Value> = Vec::new();
+                let mut observations: Vec<i64> = Vec::new();
+                let mut subjects: Vec<String> = vec![subject::node(&target)];
                 for other in ids.iter().skip(1) {
-                    // Move links and children onto the target, then delete it.
-                    conn.execute(
-                        "UPDATE OR IGNORE class_links SET node_id = ?2 WHERE node_id = ?1",
-                        params![other, target],
-                    )?;
-                    conn.execute(
-                        "DELETE FROM class_links WHERE node_id = ?1",
-                        params![other],
-                    )?;
+                    let row: Option<(Option<String>, String)> = conn
+                        .query_row(
+                            "SELECT parent_id, title FROM class_nodes WHERE id = ?1 AND retired_by_run IS NULL",
+                            params![other],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
+                        .optional()?;
+                    let Some((oparent, otitle)) = row else { continue };
+                    subjects.push(subject::node(other));
+                    // Move links onto the target; a duplicate the target
+                    // already holds stays behind as a MARKED row (it used to
+                    // be silently deleted), so the revert can bring it back.
+                    let mut stmt = conn.prepare("SELECT id FROM class_links WHERE node_id = ?1 AND retired_by_run IS NULL")?;
+                    let links: Vec<i64> = stmt.query_map(params![other], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+                    drop(stmt);
+                    for l in links {
+                        let changed = conn.execute(
+                            "UPDATE OR IGNORE class_links SET node_id = ?2 WHERE id = ?1",
+                            params![l, target],
+                        )?;
+                        if changed == 1 {
+                            moved.push(serde_json::json!({ "linkId": l, "from": other }));
+                        } else {
+                            conn.execute("UPDATE class_links SET retired_by_run = ?2 WHERE id = ?1", params![l, run])?;
+                            leftover.push(l);
+                        }
+                        subjects.push(subject::link(l));
+                    }
                     // Merged-away nodes retire their observations (re-derived;
                     // ledger `observation` events remain as history).
+                    let mut stmt = conn.prepare("SELECT id FROM class_observations WHERE node_id = ?1 AND retired_by_run IS NULL")?;
+                    let obs: Vec<i64> = stmt.query_map(params![other], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+                    drop(stmt);
+                    for o in &obs {
+                        conn.execute("UPDATE class_observations SET retired_by_run = ?2 WHERE id = ?1", params![o, run])?;
+                    }
+                    observations.extend(obs);
+                    let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE parent_id = ?1 AND retired_by_run IS NULL")?;
+                    let kids: Vec<String> = stmt.query_map(params![other], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+                    drop(stmt);
+                    for k in &kids {
+                        conn.execute(
+                            "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE id = ?1",
+                            params![k, target, now],
+                        )?;
+                        children.push(serde_json::json!({ "id": k, "oldParent": other }));
+                    }
                     conn.execute(
-                        "DELETE FROM class_observations WHERE node_id = ?1",
-                        params![other],
+                        "UPDATE class_nodes SET retired_by_run = ?2, retired_into = ?3 WHERE id = ?1",
+                        params![other, run, target],
                     )?;
-                    conn.execute(
-                        "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE parent_id = ?1",
-                        params![other, target, now],
-                    )?;
-                    conn.execute("DELETE FROM class_nodes WHERE id = ?1", params![other])?;
+                    absorbed.push(serde_json::json!({ "id": other, "parentId": oparent, "title": otitle }));
                 }
+                Self::journal_op_locked(
+                    &conn,
+                    run,
+                    &OpRecord::applied(
+                        "merge",
+                        subjects,
+                        serde_json::json!({
+                            "target": target, "oldTitle": old_title, "oldParent": old_parent,
+                            "absorbed": absorbed, "movedLinks": moved, "leftoverLinks": leftover,
+                            "children": children, "observations": observations,
+                        }),
+                    ),
+                )?;
                 format!("merged {} into {target}", ids.len())
             }
             "split" => {
@@ -765,6 +919,8 @@ impl PolisStore {
                     .and_then(|e| serde_json::from_str(e).ok())
                     .unwrap_or_default();
                 let mut made = 0;
+                let mut created: Vec<serde_json::Value> = Vec::new();
+                let mut subjects: Vec<String> = vec![subject::node(&node)];
                 for part in &parts {
                     let nid = crate::catalog::new_node_id();
                     conn.execute(
@@ -775,14 +931,30 @@ impl PolisStore {
                                  ?4, ?5, ?5)",
                         params![nid, parent, part.title, actor, now],
                     )?;
+                    let mut moved_ids: Vec<i64> = Vec::new();
                     for lid in &part.link_ids {
-                        conn.execute(
-                            "UPDATE OR IGNORE class_links SET node_id = ?2 WHERE id = ?1 AND node_id = ?3",
+                        let changed = conn.execute(
+                            "UPDATE OR IGNORE class_links SET node_id = ?2
+                             WHERE id = ?1 AND node_id = ?3 AND retired_by_run IS NULL",
                             params![lid, nid, node],
                         )?;
+                        if changed == 1 {
+                            moved_ids.push(*lid);
+                        }
                     }
+                    subjects.push(subject::node(&nid));
+                    created.push(serde_json::json!({ "id": nid, "title": part.title, "linkIds": moved_ids }));
                     made += 1;
                 }
+                Self::journal_op_locked(
+                    &conn,
+                    run,
+                    &OpRecord::applied(
+                        "split",
+                        subjects,
+                        serde_json::json!({ "nodeId": node, "parentId": parent, "created": created }),
+                    ),
+                )?;
                 format!("split into {made}")
             }
             "supersede" => {
@@ -797,6 +969,7 @@ impl PolisStore {
                     None => {
                         // Malformed payload — drop, never retry forever.
                         self.drop_proposal_locked(&conn, id)?;
+                        finish_curation(&conn, 0)?;
                         return Ok(None);
                     }
                 };
@@ -805,27 +978,40 @@ impl PolisStore {
                     polis_core::types::SupersessionOutcome::Applied {
                         effective_old,
                         new_seq,
-                        ..
+                        event_seq,
                     } => {
                         // The supersede ledger event was appended inside
                         // apply_supersession_locked — callers must NOT also
                         // record a taxonomy_reorg for this op.
+                        Self::journal_op_locked(
+                            &conn,
+                            run,
+                            &OpRecord::applied(
+                                "supersede",
+                                vec![subject::seq(effective_old), subject::seq(new_seq)],
+                                image::supersede(effective_old, new_seq, event_seq),
+                            )
+                            .with_ledger_seq(Some(event_seq)),
+                        )?;
                         format!("#{effective_old} → #{new_seq}")
                     }
                     polis_core::types::SupersessionOutcome::Rejected(msg) => {
                         tracing::info!(target: "redline::classmem", old_seq, new_seq, %msg,
                             "supersede proposal rejected at apply");
                         self.drop_proposal_locked(&conn, id)?;
+                        finish_curation(&conn, 0)?;
                         return Ok(None);
                     }
                 }
             }
             _ => {
                 self.drop_proposal_locked(&conn, id)?;
+                finish_curation(&conn, 0)?;
                 return Ok(None);
             }
         };
         self.drop_proposal_locked(&conn, id)?;
+        finish_curation(&conn, 1)?;
         Ok(Some(polis_core::types::AppliedReorg {
             op: p.op,
             node_id: p.node_id.unwrap_or_default(),
@@ -854,7 +1040,7 @@ impl PolisStore {
             if pinned == Some(1) {
                 return Ok(true);
             }
-            let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE parent_id = ?1")?;
+            let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE parent_id = ?1 AND retired_by_run IS NULL")?;
             let kids: Vec<String> = stmt
                 .query_map(params![nid], |r| r.get::<_, String>(0))?
                 .collect::<rusqlite::Result<_>>()?;
@@ -891,11 +1077,12 @@ impl PolisStore {
             let mut stmt = conn.prepare(&format!(
                 "SELECT cl.target_id, cl.node_id, cn.title FROM class_links cl
                  JOIN class_nodes cn ON cn.id = cl.node_id
-                 WHERE cl.status = 'accepted'
+                 WHERE cl.status = 'accepted' AND cl.retired_by_run IS NULL
+                   AND cn.retired_by_run IS NULL
                    AND cl.target_kind IN ({kind_marks})
                    AND cl.target_id IN ({target_marks})
                    AND cl.id = (SELECT MIN(earlier.id) FROM class_links earlier
-                                WHERE earlier.status = 'accepted'
+                                WHERE earlier.status = 'accepted' AND earlier.retired_by_run IS NULL
                                   AND earlier.target_kind IN ({kind_marks})
                                   AND earlier.target_id = cl.target_id)"
             ))?;
@@ -941,7 +1128,7 @@ impl PolisStore {
              LEFT JOIN prompts p ON p.id = le.prompt_id
              WHERE l.node_id = ?1
                AND l.target_kind IN ('prompt', 'decision', 'ledger')
-               AND l.status = 'accepted'
+               AND l.status = 'accepted' AND l.retired_by_run IS NULL
              ORDER BY le.ts DESC
              LIMIT ?2",
         )?;
@@ -977,6 +1164,7 @@ impl PolisStore {
             "SELECT n.id, n.title, CAST(l.target_id AS INTEGER)
              FROM class_links l JOIN class_nodes n ON n.id = l.node_id
              WHERE l.status = 'accepted' AND n.status = 'accepted'
+               AND l.retired_by_run IS NULL AND n.retired_by_run IS NULL
                AND l.target_kind IN ('decision', 'resolution', 'approval', 'review_verdict')
                AND l.target_id GLOB '[0-9]*'
              ORDER BY l.id DESC LIMIT ?1",
@@ -994,9 +1182,9 @@ impl PolisStore {
         let mut stmt = conn.prepare(
             "SELECT n.id, n.parent_id, n.kind, n.title, n.summary, n.project_path, n.ip_name,
                     n.status, n.pinned, n.curated_by, n.created_at, n.updated_at,
-                    (SELECT COUNT(*) FROM class_links l WHERE l.node_id = n.id AND l.status = 'accepted') AS links
+                    (SELECT COUNT(*) FROM class_links l WHERE l.node_id = n.id AND l.status = 'accepted' AND l.retired_by_run IS NULL) AS links
              FROM class_nodes n
-             WHERE n.status = 'accepted' AND n.parent_id IS NOT NULL AND links > 0
+             WHERE n.status = 'accepted' AND n.parent_id IS NOT NULL AND n.retired_by_run IS NULL AND links > 0
              ORDER BY n.id ASC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -1029,6 +1217,7 @@ impl PolisStore {
         let mut stmt = conn.prepare(
             "SELECT n.id, n.title FROM class_links l JOIN class_nodes n ON n.id = l.node_id
              WHERE l.status = 'accepted' AND n.status = 'accepted'
+               AND l.retired_by_run IS NULL AND n.retired_by_run IS NULL
                AND l.target_kind IN ('prompt', 'decision', 'ledger', 'resolution', 'approval', 'review_verdict')
                AND l.target_id = ?1
              ORDER BY l.id ASC",
@@ -1040,9 +1229,9 @@ impl PolisStore {
     pub fn insert_class_run(&self, seq_from: i64, seq_to: i64) -> rusqlite::Result<i64> {
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO class_runs (started_at, status, seq_from, seq_to)
-             VALUES (?1, 'running', ?2, ?3)",
-            params![polis_core::ledger::now_millis(), seq_from, seq_to],
+            "INSERT INTO class_runs (started_at, status, seq_from, seq_to, mode)
+             VALUES (?1, 'running', ?2, ?3, ?4)",
+            params![polis_core::ledger::now_millis(), seq_from, seq_to, crate::runs::MODE_ORGANIZE],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -1071,7 +1260,10 @@ impl PolisStore {
         let conn = self.conn();
         conn.execute(
             "UPDATE class_runs SET status = ?2, finished_at = ?3, claude_session_id = ?4, summary = ?5,
-                    duration_ms = ?6, items = ?7, ops = ?8, model = ?9, outcome = ?10, error = ?11
+                    duration_ms = ?6, items = ?7, ops = ?8, model = ?9, outcome = ?10, error = ?11,
+                    mode = COALESCE(?12, mode), llm_calls = ?13, prompt_bytes = ?14,
+                    tokens_in = ?15, tokens_out = ?16, wall_ms = COALESCE(?17, ?6),
+                    canary_json = COALESCE(?18, canary_json)
              WHERE id = ?1",
             params![
                 id,
@@ -1084,7 +1276,14 @@ impl PolisStore {
                 f.ops,
                 f.model,
                 f.outcome,
-                f.error
+                f.error,
+                f.mode,
+                f.llm_calls,
+                f.prompt_bytes,
+                f.tokens_in,
+                f.tokens_out,
+                f.wall_ms,
+                f.canary_json
             ],
         )?;
         Ok(())
@@ -1114,7 +1313,8 @@ impl PolisStore {
     }
 
     pub const CLASS_RUN_COLS: &'static str = "id, started_at, finished_at, status, seq_from, seq_to, claude_session_id, summary,
-             duration_ms, items, ops, model, outcome, canary_before, canary_after, error";
+             duration_ms, items, ops, model, outcome, canary_before, canary_after, error,
+             mode, llm_calls, prompt_bytes, tokens_in, tokens_out, wall_ms, canary_json";
 
     pub fn row_to_class_run(r: &rusqlite::Row) -> rusqlite::Result<polis_core::types::ClassRun> {
         Ok(polis_core::types::ClassRun {
@@ -1134,6 +1334,13 @@ impl PolisStore {
             canary_before: r.get(13)?,
             canary_after: r.get(14)?,
             error: r.get(15)?,
+            mode: r.get(16)?,
+            llm_calls: r.get(17)?,
+            prompt_bytes: r.get(18)?,
+            tokens_in: r.get(19)?,
+            tokens_out: r.get(20)?,
+            wall_ms: r.get(21)?,
+            canary_json: r.get(22)?,
         })
     }
 
@@ -1249,8 +1456,8 @@ impl PolisStore {
         let mut stmt = conn.prepare(
             "SELECT n.id, n.parent_id, n.kind, n.title, n.summary, n.project_path,
                     n.ip_name, n.status, n.pinned, n.curated_by, n.created_at, n.updated_at,
-                    (SELECT COUNT(*) FROM class_links l WHERE l.node_id = n.id) AS link_count
-             FROM class_nodes n ORDER BY n.title ASC",
+                    (SELECT COUNT(*) FROM class_links l WHERE l.node_id = n.id AND l.retired_by_run IS NULL) AS link_count
+             FROM class_nodes n WHERE n.retired_by_run IS NULL ORDER BY n.title ASC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((PolisStore::row_to_class_node(r)?, r.get::<_, i64>(12)?))
@@ -1312,7 +1519,7 @@ impl PolisStore {
                         THEN (SELECT le.ts FROM ledger_events le
                               WHERE le.seq = CAST(l.target_id AS INTEGER))
                         ELSE NULL END)
-             FROM class_links l GROUP BY l.node_id",
+             FROM class_links l WHERE l.retired_by_run IS NULL GROUP BY l.node_id",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?))
@@ -1352,13 +1559,13 @@ impl PolisStore {
             "SELECT DISTINCT l.node_id, le.session_id
                FROM class_links l
                JOIN ledger_events le ON le.seq = CAST(l.target_id AS INTEGER)
-              WHERE l.status = 'accepted'
+              WHERE l.status = 'accepted' AND l.retired_by_run IS NULL
                 AND l.target_kind IN ('prompt', 'decision', 'revision', 'note', 'ledger')
                 AND le.session_id IS NOT NULL
              UNION
              SELECT DISTINCT l.node_id, l.target_id
                FROM class_links l
-              WHERE l.status = 'accepted' AND l.target_kind = 'session'
+              WHERE l.status = 'accepted' AND l.retired_by_run IS NULL AND l.target_kind = 'session'
              ORDER BY 1, 2",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -1376,7 +1583,7 @@ impl PolisStore {
         let mut stmt = conn.prepare(
             "SELECT le.session_id,
                     (SELECT cl.node_id FROM class_links cl
-                      WHERE cl.status = 'accepted'
+                      WHERE cl.status = 'accepted' AND cl.retired_by_run IS NULL
                         AND cl.target_kind IN ('prompt', 'decision', 'revision', 'note', 'ledger')
                         AND cl.target_id = CAST(le.seq AS TEXT)
                       ORDER BY cl.id ASC LIMIT 1)

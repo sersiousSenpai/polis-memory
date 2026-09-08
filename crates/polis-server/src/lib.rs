@@ -301,6 +301,31 @@ pub const ROUTES: &[RouteSpec] = &[
         request: "kind + id in path",
         response: "JSON tree node",
     },
+    // --- B2 ---
+    RouteSpec {
+        method: "GET",
+        path: "/v1/memory/runs",
+        class: RouteClass::Open,
+        purpose: "The gardener's runs, newest first (organize / compaction / observations / revert)",
+        request: "?limit=",
+        response: "JSON {runs}",
+    },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/memory/runs/:id",
+        class: RouteClass::Open,
+        purpose: "One run with its journaled ops (what it did, to what, whether undone)",
+        request: "id in path",
+        response: "JSON {run, ops}",
+    },
+    RouteSpec {
+        method: "POST",
+        path: "/v1/memory/runs/:id/revert",
+        class: RouteClass::Write(scopes::MEMORY_ORGANIZE),
+        purpose: "Undo one run from its journal, in one transaction; appends gardener_revert (never an MCP tool)",
+        request: "id in path",
+        response: "JSON {runId, revertedOps, eventSeq, revertRunId}; 400 with the reason when blocked",
+    },
 ];
 
 /// Look up the row for a request. `path` must be the registered axum pattern
@@ -362,6 +387,10 @@ where
         // with its parent + child digests).
         .route("/v1/context/threads/:kind/:id", get(routes::handle_context_thread))
         .route("/v1/context/tree/:kind/:id", get(routes::handle_context_tree))
+        // B2: the runs and their journal; the one undo (GUI/HTTP only).
+        .route("/v1/memory/runs", get(routes::handle_memory_runs))
+        .route("/v1/memory/runs/:id", get(routes::handle_memory_run))
+        .route("/v1/memory/runs/:id/revert", post(routes::handle_memory_run_revert))
         // Per-route latency (`route:<pattern>`) into the same ring the arms
         // record in — `/v1/context/stats` reports both. `route_layer`, so a
         // host's own routes merged beside these are not counted here.

@@ -584,6 +584,56 @@ pub async fn handle_memory_reindex(State(state): State<PolisState>) -> Response 
     }
 }
 
+// ===========================================================================
+// B2 — the gardener's runs, reversible (§5.2)
+// ===========================================================================
+
+#[derive(Deserialize)]
+pub struct RunsQ {
+    limit: Option<i64>,
+}
+
+/// `GET /v1/memory/runs?limit=` — the newest runs, newest first, every mode
+/// (organize / compaction / observations / revert / curation): the timeline.
+pub async fn handle_memory_runs(State(state): State<PolisState>, Query(q): Query<RunsQ>) -> Response {
+    let api = state.api.clone();
+    let limit = q.limit.unwrap_or(50);
+    match tokio::task::spawn_blocking(move || api.list_runs(limit, &Scope::default())).await {
+        Ok(Ok(runs)) => Json(serde_json::json!({ "runs": runs })).into_response(),
+        Ok(Err(e)) => memory_error(e),
+        Err(e) => error_response(format!("runs query failed: {e}")),
+    }
+}
+
+/// `GET /v1/memory/runs/:id` — one run with its journaled ops (no image
+/// blobs): what it did, to what, and whether it was undone.
+pub async fn handle_memory_run(State(state): State<PolisState>, Path(id): Path<i64>) -> Response {
+    let api = state.api.clone();
+    match tokio::task::spawn_blocking(move || api.run(id)).await {
+        Ok(Ok(Some(view))) => Json(view).into_response(),
+        Ok(Ok(None)) => memory_error(MemoryError::NotFound),
+        Ok(Err(e)) => memory_error(e),
+        Err(e) => error_response(format!("run query failed: {e}")),
+    }
+}
+
+/// `POST /v1/memory/runs/:id/revert` — undo one run in one transaction;
+/// appends `gardener_revert`. 400 with the reason when a later run touched
+/// the same subjects ("revert run N first"), when the run is past the
+/// vacuum horizon, or when an op cannot be inverted. A GUI/HTTP action
+/// only — deliberately not an MCP tool (§5.4).
+pub async fn handle_memory_run_revert(State(state): State<PolisState>, Path(id): Path<i64>) -> Response {
+    let api = state.api.clone();
+    match tokio::task::spawn_blocking(move || api.revert_run(id)).await {
+        Ok(Ok(receipt)) => {
+            state.events.changed(&[Change::Catalog, Change::Ledger, Change::Memory]);
+            Json(receipt).into_response()
+        }
+        Ok(Err(e)) => memory_error(e),
+        Err(e) => error_response(format!("revert failed: {e}")),
+    }
+}
+
 // The trait is named in the module docs; keep the import honest under
 // `#![deny(unused)]`-style builds.
 #[allow(dead_code)]

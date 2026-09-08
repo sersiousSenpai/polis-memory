@@ -31,6 +31,7 @@ pub mod latency;
 pub mod mirror;
 pub mod organize;
 pub mod retrieval;
+pub mod revert;
 pub mod skill;
 
 use std::sync::Arc;
@@ -51,8 +52,9 @@ use polis_core::ledger::{ChainVerdict, CorpusRole, Origin, PromptSource};
 use polis_core::pack::{clamp_answer_pack_limit, AnswerPack};
 use polis_core::proposal::Proposal;
 use polis_core::types::{
-    BrowseHit, ContextStats, GrepHit, LakeItem, LedgerFilters, MemoryMapView, NoteOutcome,
-    NoteWrite, PromptFilters, StageResult, SupersessionOutcome, TimelineItem,
+    BrowseHit, ClassRun, ContextStats, GrepHit, LakeItem, LedgerFilters, MemoryMapView,
+    NoteOutcome, NoteWrite, PromptFilters, RevertReceipt, RunView, StageResult,
+    SupersessionOutcome, TimelineItem,
 };
 use polis_core::{MemoryApi, MemoryError};
 use polis_embed::{Embedder, ProviderKind, SemanticHit};
@@ -514,6 +516,20 @@ impl MemoryApi for PolisHandle {
         let provider = view.provider_kind().as_str().to_string();
         let embedded = index_tick(&view, REINDEX_MAX_TARGETS);
         Ok(ReindexReceipt { embedded, provider })
+    }
+
+    // --- B2: the runs, reversible ------------------------------------------
+
+    fn list_runs(&self, limit: i64, _scope: &Scope) -> Result<Vec<ClassRun>, MemoryError> {
+        self.store.list_class_runs(limit.clamp(1, revert::RUNS_PAGE_MAX)).map_err(store_err)
+    }
+
+    fn run(&self, id: i64) -> Result<Option<RunView>, MemoryError> {
+        revert::run_view(&self.view(), id)
+    }
+
+    fn revert_run(&self, id: i64) -> Result<RevertReceipt, MemoryError> {
+        revert::revert_run(&self.view(), id)
     }
 }
 

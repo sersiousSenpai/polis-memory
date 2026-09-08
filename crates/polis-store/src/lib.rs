@@ -32,6 +32,7 @@ pub mod chain;
 pub mod compaction;
 pub mod prompts;
 pub mod record;
+pub mod runs;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -283,12 +284,13 @@ mod tests {
 
     /// B1: `class_runs` carries what a run cost and did; the old finisher
     /// still writes (status → outcome), the new one writes every column, and
-    /// both readers see them. Schema version 2 re-runs the additive block
-    /// once on a version-1 store.
+    /// both readers see them. A fresh store stamps the crate's current
+    /// schema version (2 for B1's columns, 3 for B2's marks + journal), and
+    /// an older store re-runs the additive block once to reach it.
     #[test]
     fn class_runs_carry_the_b1_accounting_and_the_schema_version_moved() {
         let store = PolisStore::open_in_memory().unwrap();
-        assert_eq!(store.meta(meta::SCHEMA_VERSION_KEY).unwrap().as_deref(), Some("2"));
+        assert_eq!(store.meta(meta::SCHEMA_VERSION_KEY).unwrap().as_deref(), Some(meta::STORE_SCHEMA_VERSION));
         let id = store.insert_class_run(0, 10).unwrap();
         store.finish_class_run(id, "done", None, "legacy call").unwrap();
         let run = store.latest_class_run().unwrap().unwrap();
@@ -323,7 +325,7 @@ mod tests {
         store.set_meta(meta::SCHEMA_VERSION_KEY, "1").unwrap();
         let again = PolisStore::attach(store.shared_connection(), AttachOptions::standalone()).unwrap();
         assert!(again.last_attach().migrated);
-        assert_eq!(again.meta(meta::SCHEMA_VERSION_KEY).unwrap().as_deref(), Some("2"));
+        assert_eq!(again.meta(meta::SCHEMA_VERSION_KEY).unwrap().as_deref(), Some(meta::STORE_SCHEMA_VERSION));
         let third = PolisStore::attach(store.shared_connection(), AttachOptions::standalone()).unwrap();
         assert!(!third.last_attach().migrated, "a current store is a no-op");
     }
