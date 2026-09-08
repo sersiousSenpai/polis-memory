@@ -125,12 +125,33 @@ fn quote(term: &str) -> String {
 /// neither alphanumeric nor a `tokenchars` member, and drop tokens with no
 /// alphanumeric content at all (a bare `--`, a lone `/`).
 fn tokenize(raw: &str) -> Vec<String> {
-    raw.to_lowercase()
+    let all: Vec<String> = raw
+        .to_lowercase()
         .split(|c: char| !c.is_alphanumeric() && !TOKEN_CHARS.contains(&c))
         .map(|t| t.trim_matches(|c: char| TOKEN_CHARS.contains(&c)))
         .filter(|t| t.chars().any(char::is_alphanumeric))
         .map(str::to_string)
-        .collect()
+        .collect();
+    // A lone ASCII letter is the tail of a possessive or a contraction
+    // ("Redline's" → "s", "don't" → "t"), never a term worth matching: it is
+    // how "what repos did I look at for Redline's memory?" resolved to an
+    // astronomy node whose title carried "Polymathic's". Digits and
+    // non-ASCII single characters (a CJK word) stay. Dropped only when
+    // something else survives, like the stopword rule.
+    // (A one-letter stopword — "i", "a" — is left to the stopword rule, which
+    // keeps it when the whole query is stopwords.)
+    let kept: Vec<String> = all
+        .iter()
+        .filter(|t| {
+            !(t.len() == 1 && t.chars().all(|c| c.is_ascii_alphabetic()) && !STOPWORDS.contains(&t.as_str()))
+        })
+        .cloned()
+        .collect();
+    if kept.is_empty() {
+        all
+    } else {
+        kept
+    }
 }
 
 /// Pull `"quoted phrases"` out of the raw query, returning them plus the
@@ -215,6 +236,35 @@ pub fn plan_fts_query(raw: &str) -> Option<FtsPlan> {
     })
 }
 
+/// How many of a plan's `terms` a piece of curated text (a class title and
+/// summary) actually carries — whole tokens, or, for terms the planner would
+/// prefix-match (≥ `MIN_PREFIX_LEN` chars), a token starting with the term.
+/// Tokenized the way queries are, so "Redline's" and "redline" agree.
+pub fn term_coverage(terms: &[String], text: &str) -> usize {
+    let tokens = tokenize(text);
+    terms
+        .iter()
+        .filter(|term| {
+            tokens.iter().any(|tok| tok == *term || (term.chars().count() >= MIN_PREFIX_LEN && tok.starts_with(term.as_str())))
+        })
+        .count()
+}
+
+/// Whether a title match is strong enough to be THE class a question is
+/// about. The OR stage of the cascade finds a node on any single term, and a
+/// single loose term is how "what repos did I look at for Redline's memory?"
+/// resolved to "Payload CMS lookup" (`look*` → `lookup`): one term of four.
+/// A class is claimed only when the text covers at least two of the query's
+/// terms — or its one term, for a one-term query. Anything weaker is a
+/// candidate the pack may list, never the node it answers from; the lexical
+/// and semantic arms still answer (the miss path).
+pub fn resolves_class(terms: &[String], text: &str) -> bool {
+    if terms.is_empty() {
+        return false;
+    }
+    term_coverage(terms, text) >= terms.len().min(2)
+}
+
 /// Plan a follow-up question that is only a fragment ("and the beta?"), by
 /// borrowing terms from the previous turn. A fragment carries its subject
 /// implicitly; without this, turn two of a conversation retrieves against two
@@ -289,6 +339,43 @@ mod tests {
         let p = plan_fts_query("what did I do").unwrap();
         assert!(p.all_stopwords);
         assert_eq!(p.terms, vec!["what", "did", "i", "do"]);
+    }
+
+    /// A class is the answer only when it covers the question, not when one
+    /// loose term happens to prefix a word in its title.
+    #[test]
+    fn a_class_resolves_on_coverage_not_on_one_loose_term() {
+        let p = plan_fts_query("what repos did i look at for Redline's memory?").unwrap();
+        assert!(!resolves_class(&p.terms, "Payload CMS lookup"), "one prefix hit (look → lookup) is not a resolution");
+        assert!(!resolves_class(&p.terms, "AION-1 — Polymathic's astronomy foundation model"));
+        assert!(resolves_class(&p.terms, "Redline memory research — repos compared"));
+        assert_eq!(term_coverage(&p.terms, "Redline memory research — repos compared"), 3);
+        // One-term queries resolve on their one term.
+        let one = plan_fts_query("sqlite").unwrap();
+        assert!(resolves_class(&one.terms, "SQLite FTS5 and the trigram tokenizer"));
+        assert!(!resolves_class(&one.terms, "Payload CMS lookup"));
+        // Prefixes count only at the planner's threshold.
+        let short = plan_fts_query("tab suspension").unwrap();
+        assert!(resolves_class(&short.terms, "browser tab suspension"));
+        assert!(!resolves_class(&short.terms, "tables and suspense"), "`tab` is too short to prefix `tables`");
+    }
+
+    /// The possessive and contraction tails. "Redline's memory" must plan to
+    /// `redline` and `memory`, never to a lone `s` that an unrelated title's
+    /// own possessive also tokenizes to — the answer pack resolved a question
+    /// about Redline's memory to "Polymathic's astronomy foundation model"
+    /// on exactly that match.
+    #[test]
+    fn possessive_and_contraction_tails_are_not_terms() {
+        let p = plan_fts_query("what repos did i look at for Redline's memory?").unwrap();
+        let terms: Vec<&str> = p.terms.iter().map(String::as_str).collect();
+        assert!(terms.contains(&"redline"), "{terms:?}");
+        assert!(terms.contains(&"memory"), "{terms:?}");
+        assert!(!terms.contains(&"s"), "the possessive tail became a term: {terms:?}");
+        let p = plan_fts_query("don't merge the classes").unwrap();
+        assert!(!p.terms.iter().any(|t| t == "t"), "{:?}", p.terms);
+        // A one-letter query still matches its letter rather than nothing.
+        assert!(plan_fts_query("s").is_some());
     }
 
     /// `tokenchars` must mean the same thing in the planner as in the index, or
