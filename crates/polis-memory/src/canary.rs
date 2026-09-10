@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use crate::corpus::Rng;
 use crate::retrieval::build_answer_pack;
 use crate::Polis;
+mod policy;
 
 #[derive(Debug, Clone)]
 pub struct CanaryConfig {
@@ -80,6 +81,10 @@ pub enum Subject {
     /// Not part of the canary (no gardener op touches browse titles); the
     /// eval adds it for the reachability picture.
     BrowseTitle,
+    /// Source role/scope, budget and deliberate empty-scope invariants.
+    EvidencePolicy,
+    /// Cited assertions at independently frozen valid/known boundaries.
+    TemporalClaim,
 }
 
 impl Subject {
@@ -91,12 +96,14 @@ impl Subject {
             Subject::PromptSpan => "prompt_span",
             Subject::ClassReach => "class_reach",
             Subject::BrowseTitle => "browse_title",
+            Subject::EvidencePolicy => "evidence_policy",
+            Subject::TemporalClaim => "temporal_claim",
         }
     }
 
     /// Zero tolerance: any drop is a regression.
     pub fn zero_tolerance(self) -> bool {
-        matches!(self, Subject::Supersession | Subject::Note)
+        matches!(self, Subject::Supersession | Subject::Note | Subject::EvidencePolicy | Subject::TemporalClaim)
     }
 }
 
@@ -117,6 +124,8 @@ pub enum Gold {
     /// pack keeps one hit per page, so a revisit's seq is absorbed by an
     /// earlier view of the same page).
     Browse { seq: i64, url: String },
+    ClaimAt { id: String, scope: polis_core::api::Scope, roles: Vec<String>, valid_at: i64, known_at: i64, expected: bool },
+    EvidencePolicy { scope: polis_core::api::Scope, roles: Vec<String>, max_bytes: usize, expected_seq: Option<i64>, expect_empty: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +271,7 @@ pub fn freeze(polis: &Polis<'_>, run_id: u64, cfg: &CanaryConfig) -> CanarySet {
         probes.push(Probe { subject: Subject::ClassReach, query: node.title.clone(), gold: Gold::Node { node_id: node.id } });
     }
 
+    probes.extend(policy::freeze(polis, run_id, head_seq));
     CanarySet { run_id, head_seq, probes, unfiled_decisions: unfiled }
 }
 
@@ -282,6 +292,7 @@ pub fn browse_title_probes(polis: &Polis<'_>, n: usize) -> Vec<Probe> {
 
 /// Run one probe.
 pub fn run_probe(polis: &Polis<'_>, probe: &Probe, limit: i64) -> ProbeResult {
+    if let Some(result) = policy::run(polis, probe, limit) { return result; }
     let start = Instant::now();
     let pack = build_answer_pack(polis, Some(&probe.query), None, limit);
     let ms = start.elapsed().as_millis().min(u32::MAX as u128) as u32;
@@ -339,6 +350,7 @@ pub fn run_probe(polis: &Polis<'_>, probe: &Probe, limit: i64) -> ProbeResult {
             let pos = pack.browse_hits.iter().position(|h| h.seq == Some(*seq) || &h.url == url);
             (pos.is_some(), pos.map(|i| i + 1))
         }
+        Gold::ClaimAt { .. } | Gold::EvidencePolicy { .. } => unreachable!("policy probes return before ordinary pack matching"),
     };
     ProbeResult { subject: probe.subject, hit, rank, ms, pack_bytes, arms }
 }

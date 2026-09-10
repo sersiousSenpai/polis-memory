@@ -41,9 +41,13 @@ impl StampReport {
 
 /// The identity-scope filter a read path binds. Every field is an id or a
 /// name resolved to an id through the alias table before binding.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ScopeFilter {
     pub principal: Option<String>,
+    pub project: Option<String>,
+    pub roles: Vec<String>,
+    pub after: Option<i64>,
+    pub before: Option<i64>,
     pub agent: Option<String>,
     pub run: Option<String>,
     pub org: Option<String>,
@@ -54,11 +58,11 @@ pub struct ScopeFilter {
 impl ScopeFilter {
     /// The identity half of a [`polis_core::api::Scope`].
     pub fn from_scope(scope: &polis_core::api::Scope) -> Self {
-        ScopeFilter { principal: scope.principal.clone(), agent: scope.agent.clone(), run: scope.run.clone(), org: scope.org.clone(), include_shared: scope.include_shared }
+        ScopeFilter { principal: scope.principal.clone(), agent: scope.agent.clone(), run: scope.run.clone(), org: scope.org.clone(), include_shared: scope.include_shared, project: scope.project.clone(), ..Default::default() }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.principal.is_none() && self.agent.is_none() && self.run.is_none() && self.org.is_none()
+        self.project.is_none() && self.roles.is_empty() && self.after.is_none() && self.before.is_none() && self.principal.is_none() && self.agent.is_none() && self.run.is_none() && self.org.is_none()
     }
 }
 
@@ -69,7 +73,96 @@ pub struct ScopeSql {
     pub binds: Vec<Box<dyn rusqlite::ToSql>>,
 }
 
+impl ScopeSql {
+    /// Number placeholders explicitly when a caller's later LIMIT reserves slots.
+    pub fn numbered(mut self, first: usize) -> Self {
+        let mut next = first;
+        self.sql = self.sql.chars().fold(String::new(), |mut out, c| {
+            if c == '?' { out.push_str(&format!("?{next}")); next += 1; } else { out.push(c); }
+            out
+        });
+        self
+    }
+}
+
 impl PolisStore {
+    /// Monotonic identity for process-local caches; never reused after a store is dropped.
+    pub fn cache_identity(&self) -> usize { self.cache_id }
+
+    /// Eligible ledger evidence, resolved from its authoritative source row.
+    /// Unmapped bookkeeping never acquires another source's scope by proximity.
+    pub fn ledger_scope_clause_locked(conn: &Connection, alias: &str, f: &ScopeFilter) -> rusqlite::Result<ScopeSql> {
+        if f.is_empty() { return Ok(ScopeSql { sql: String::new(), binds: Vec::new() }); }
+        let p = Self::scope_clause_locked(conn, "p", f)?;
+        let be = Self::scope_clause_locked(conn, "be", f)?;
+        let un = Self::scope_clause_locked(conn, "un", f)?;
+        let decision = Self::scope_clause_locked(conn, "p", f)?;
+        let sql = format!(" AND (EXISTS (SELECT 1 FROM prompts p WHERE p.id = {alias}.prompt_id{})
+            OR EXISTS (SELECT 1 FROM browse_events be WHERE {alias}.ref_kind = 'browse_event' AND CAST(be.id AS TEXT) = {alias}.ref_id{})
+            OR EXISTS (SELECT 1 FROM user_notes un WHERE (un.seq = {alias}.seq OR un.id IN
+                (SELECT ne.note_id FROM note_events ne WHERE ne.seq={alias}.seq AND ne.payload_hash={alias}.payload_hash
+                    AND ((un.target_kind='none' AND {alias}.ref_kind='none' AND {alias}.ref_id=CAST(un.id AS TEXT))
+                        OR (un.target_kind<>'none' AND {alias}.ref_kind=un.target_kind AND {alias}.ref_id=un.target_id)
+                        OR ({alias}.ref_kind='user_note' AND {alias}.ref_id=CAST(un.id AS TEXT))))) {})
+            OR EXISTS (SELECT 1 FROM decision_evidence d JOIN ledger_events src ON src.seq = d.source_seq JOIN prompts p ON p.id = src.prompt_id WHERE d.seq = {alias}.seq{}))", p.sql, be.sql, un.sql, decision.sql);
+        let mut binds = p.binds; binds.extend(be.binds); binds.extend(un.binds); binds.extend(decision.binds);
+        Ok(ScopeSql { sql, binds })
+    }
+
+    pub fn eligible_seqs(&self, seqs: &[i64], scope: &ScopeFilter) -> rusqlite::Result<std::collections::HashSet<i64>> {
+        if seqs.is_empty() { return Ok(Default::default()); }
+        let conn = self.conn();
+        let scoped = Self::ledger_scope_clause_locked(&conn, "le", scope)?;
+        let mut out = std::collections::HashSet::new();
+        for chunk in seqs.chunks(400) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut stmt = conn.prepare(&format!("SELECT le.seq FROM ledger_events le WHERE le.seq IN ({marks}){}", scoped.sql))?;
+            let mut refs: Vec<&dyn rusqlite::ToSql> = chunk.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+            refs.extend(scoped.binds.iter().map(|v| v.as_ref()));
+            out.extend(stmt.query_map(refs.as_slice(), |r| r.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?);
+        }
+        Ok(out)
+    }
+
+    /// The model index's eligible source targets, before cosine top-k.
+    pub fn eligible_embedding_targets(&self, scope: &ScopeFilter) -> rusqlite::Result<std::collections::HashSet<(String, i64)>> {
+        let conn = self.conn();
+        let mut out = std::collections::HashSet::new();
+        for (table, alias, kind, id) in [("prompts", "p", "prompt", "id"), ("browse_events", "be", "browse_event", "id"), ("class_nodes", "n", "class_node", "rowid")] {
+            let scoped = Self::scope_clause_locked(&conn, alias, scope)?;
+            let live = if table == "class_nodes" { format!(" AND {alias}.retired_by_run IS NULL") } else { String::new() };
+            let mut stmt = conn.prepare(&format!("SELECT {alias}.{id} FROM {table} {alias} WHERE 1=1{live}{}", scoped.sql))?;
+            let refs: Vec<&dyn rusqlite::ToSql> = scoped.binds.iter().map(|v| v.as_ref()).collect();
+            for id in stmt.query_map(refs.as_slice(), |r| r.get::<_, i64>(0))? { out.insert((kind.to_string(), id?)); }
+        }
+        if scope.include_shared {
+            let scoped = Self::foreign_scope_clause_locked(&conn, scope)?;
+            let mut stmt = conn.prepare(&format!("SELECT p.id FROM foreign_prompts p WHERE p.tombstoned = 0{}", scoped.sql))?;
+            let refs: Vec<&dyn rusqlite::ToSql> = scoped.binds.iter().map(|v| v.as_ref()).collect();
+            for id in stmt.query_map(refs.as_slice(), |r| r.get::<_, i64>(0))? { out.insert(("foreign_prompt".to_string(), id?)); }
+        }
+        Ok(out)
+    }
+
+    pub fn context_stats_scoped(&self, scope: &ScopeFilter) -> rusqlite::Result<polis_core::types::ContextStats> {
+        let conn = self.conn();
+        let scoped = Self::ledger_scope_clause_locked(&conn, "le", scope)?;
+        let from = format!("FROM ledger_events le LEFT JOIN prompts p ON p.id = le.prompt_id WHERE 1=1{}", scoped.sql);
+        let refs: Vec<&dyn rusqlite::ToSql> = scoped.binds.iter().map(|v| v.as_ref()).collect();
+        let count = |extra: &str| conn.query_row(&format!("SELECT COUNT(*) {from} {extra}"), refs.as_slice(), |r| r.get::<_, i64>(0));
+        let group = |expr: &str, extra: &str| -> rusqlite::Result<Vec<(String, i64)>> {
+            let mut stmt = conn.prepare(&format!("SELECT COALESCE({expr}, 'unknown'), COUNT(*) {from} {extra} GROUP BY 1 ORDER BY 1"))?;
+            let rows = stmt.query_map(refs.as_slice(), |r| Ok((r.get(0)?, r.get(1)?)))?.collect();
+            rows
+        };
+        Ok(polis_core::types::ContextStats {
+            generated_ts: polis_core::ledger::now_millis(), total_prompts: count("AND le.kind = 'prompt'")?, total_events: count("")?,
+            by_day: group("strftime('%Y-%m-%d', le.ts / 1000, 'unixepoch')", "AND le.kind = 'prompt'")?,
+            by_surface: group("p.surface", "AND le.kind = 'prompt'")?, by_kind: group("le.kind", "")?, by_author: group("le.author", "")?,
+            by_class: Vec::new(), latency: Vec::new(),
+        })
+    }
+
     pub fn upsert_principal(&self, p: &Principal) -> rusqlite::Result<()> {
         Self::upsert_principal_locked(&self.conn(), p)
     }
@@ -377,6 +470,29 @@ impl PolisStore {
             sql.push_str(&format!(" AND {table_alias}.org_id = ?"));
             binds.push(Box::new(o.trim().to_string()));
         }
+        if let Some(project) = f.project.as_deref().filter(|s| !s.trim().is_empty()) {
+            if table_alias == "n" {
+                sql.push_str(" AND EXISTS (WITH RECURSIVE scope_ancestors(id,parent_id,project_path) AS (SELECT id,parent_id,project_path FROM class_nodes WHERE id = n.id UNION SELECT cn.id,cn.parent_id,cn.project_path FROM class_nodes cn JOIN scope_ancestors a ON cn.id=a.parent_id) SELECT 1 FROM scope_ancestors WHERE project_path = ?)");
+            } else {
+                sql.push_str(&format!(" AND {table_alias}.project_path = ?"));
+            }
+            binds.push(Box::new(project.trim().to_string()));
+        }
+        if table_alias == "p" {
+            if !f.roles.is_empty() {
+                let marks = vec!["?"; f.roles.len()].join(",");
+                sql.push_str(&format!(" AND COALESCE(p.role, 'user') IN ({marks})"));
+                for role in &f.roles { binds.push(Box::new(role.clone())); }
+            }
+            if let Some(ts) = f.after { sql.push_str(" AND p.ts >= ?"); binds.push(Box::new(ts)); }
+            if let Some(ts) = f.before { sql.push_str(" AND p.ts < ?"); binds.push(Box::new(ts)); }
+        } else {
+            let timestamp = match table_alias { "be" => Some("be.ts"), "un" => Some("un.updated_at"), "o" => Some("o.created_at"), _ => None };
+            if let Some(column) = timestamp {
+                if let Some(ts) = f.after { sql.push_str(&format!(" AND {column} >= ?")); binds.push(Box::new(ts)); }
+                if let Some(ts) = f.before { sql.push_str(&format!(" AND {column} < ?")); binds.push(Box::new(ts)); }
+            }
+        }
         Ok(ScopeSql { sql, binds })
     }
 }
@@ -440,7 +556,6 @@ mod tests {
         let (h, d) = (principal_id(&pk), device_id(&pk, "box"));
         store.upsert_principal(&principal(&h, PrincipalKind::Human, None)).unwrap();
         store.upsert_principal(&principal(&d, PrincipalKind::Device, Some(&h))).unwrap();
-        store.set_alias("local", &d).unwrap();
         // two prompts by the store's default author ("local" via the alias)
         for body in ["one", "two"] {
             crate::record::record_prompt(
@@ -464,6 +579,8 @@ mod tests {
             )
             .unwrap();
         }
+        // Legacy evidence captured before an alias existed is backfilled.
+        store.set_alias("local", &d).unwrap();
         let r = store.stamp_unscoped().unwrap();
         assert_eq!(r.prompts, 2);
         let again = store.stamp_unscoped().unwrap();

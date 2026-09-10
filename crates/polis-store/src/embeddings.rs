@@ -58,6 +58,7 @@ impl PolisStore {
             "SELECT p.id, p.fts_text, p.body_hash
              FROM prompts p
              WHERE COALESCE(p.role, 'user') <> 'agent'
+               AND NOT EXISTS (SELECT 1 FROM forgotten_sources fs WHERE fs.prompt_id = p.id)
                AND LENGTH(p.fts_text) > 0
                AND NOT EXISTS (
                    SELECT 1 FROM embeddings e
@@ -253,11 +254,15 @@ impl PolisStore {
         conn.execute("DELETE FROM embeddings WHERE model = ?1", params![model])
     }
 
-    /// The vector index's high-water mark — the cache key. One monotonic
-    /// number, so invalidation never depends on anyone remembering to clear it
-    /// (the `build_stats_cached` idiom).
+    /// The vector index's high-water mark, used to detect an empty index.
     pub fn max_embedding_id(&self) -> rusqlite::Result<i64> {
         let conn = self.conn();
         conn.query_row("SELECT COALESCE(MAX(id), 0) FROM embeddings", [], |r| r.get(0))
+    }
+
+    /// Every embedding mutation advances this value in its own transaction.
+    /// A read snapshot observes the revision of its exact vector contents.
+    pub fn embedding_revision(&self) -> rusqlite::Result<i64> {
+        self.conn().query_row("SELECT revision FROM embedding_index_state WHERE singleton = 1", [], |r| r.get(0))
     }
 }

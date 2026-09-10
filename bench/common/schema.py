@@ -14,7 +14,7 @@ import subprocess
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
-SCHEMA = "polis.bench/1"
+SCHEMA = "polis.bench/2"
 BENCHMARK = "longmemeval-s"
 TYPES = [
     "single-session-user", "single-session-assistant", "single-session-preference",
@@ -48,6 +48,8 @@ class QuestionResult:
     sessions: int
     messages: int
     response_head: str = ""
+    readiness: dict[str, Any] = field(default_factory=dict)
+    namespace: str = ""
 
 
 @dataclass
@@ -67,6 +69,8 @@ class Result:
     partial: bool = False
     partial_reason: str | None = None
     questions: list[dict[str, Any]] = field(default_factory=list)
+    manifest: dict[str, Any] = field(default_factory=dict)
+    failures: list[dict[str, Any]] = field(default_factory=list)
     schema: str = SCHEMA
     benchmark: str = BENCHMARK
 
@@ -78,8 +82,13 @@ class Result:
         self.accuracy = {
             "overall": _mean([r.correct for r in results]),
             "byType": {t: _mean(v) for t, v in sorted(by_type.items())},
+            "categoryN": {t: len(v) for t, v in sorted(by_type.items())},
             "abstention": _mean([r.correct for r in results if r.abstention]),
         }
+        if self.stub:
+            self.accuracy["fixtureReachability"] = self.accuracy.pop("overall")
+            self.accuracy["fixtureByType"] = self.accuracy.pop("byType")
+            self.accuracy["abstention"] = None
         q_ms = sorted(r.query_ms for r in results)
         ctx = sorted(r.context_tokens for r in results)
         self.cost = {
@@ -96,7 +105,7 @@ class Result:
 
     def write(self, out_dir: str) -> str:
         os.makedirs(out_dir, exist_ok=True)
-        name = f"{self.date}-{self.commit[:12]}-longmemeval-{self.system}.json"
+        name = f"{self.date}-{self.commit[:12]}-longmemeval-{self.system}-{self.manifest.get('invocationId', self.manifest.get('runId', 'legacy'))}.json"
         path = os.path.join(out_dir, name)
         with open(path, "w") as f:
             json.dump(asdict(self), f, indent=2)
@@ -236,10 +245,12 @@ def messages_of(question: dict[str, Any], roles: set[str]) -> list[dict[str, Any
                 continue
             items.append({
                 "body": turn.get("content", ""),
-                "ts": (ts + j * 60_000) if ts is not None else None,
-                "role": "user" if role == "user" else "agent",
+                "ts": ts,
+                "sourceDate": dates[i] if i < len(dates) else None,
+                "turnIndex": j,
+                "role": role,
                 "session": sid,
-                "run": question["question_id"],
+                "run": question.get("namespace", question["question_id"]),
             })
     return items
 

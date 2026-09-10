@@ -49,6 +49,7 @@ fn item_line(item: &LakeItem, superseded_by: Option<i64>) -> String {
         item.kind,
         item.surface.as_deref().map(|s| format!("/{s}")).unwrap_or_default()
     );
+    line.push_str(&format!(" [role {}; session {}]",item.role.as_deref().unwrap_or("unknown"),item.session_id.as_deref().unwrap_or("unknown")));
     if let Some(p) = &item.project_path {
         line.push_str(&format!(" [{p}]"));
     }
@@ -63,6 +64,22 @@ fn item_line(item: &LakeItem, superseded_by: Option<i64>) -> String {
 }
 
 pub fn pack(p: &AnswerPack) -> String {
+    pack_with_budget(p,polis_core::pack::MAX_CONTEXT_BYTES)
+}
+
+pub fn pack_with_budget(p: &AnswerPack,max_bytes:usize) -> String {
+    let mut out=pack_text(p);
+    if out.len()>max_bytes {
+        let marker="[text clipped to budget]\n";
+        let mut end=max_bytes.saturating_sub(marker.len());while end>0&&!out.is_char_boundary(end) {end-=1;}
+        if let Some(line)=out[..end].rfind('\n') {end=line;}
+        out.truncate(end);
+        if max_bytes>=marker.len() {out.insert_str(0,marker);}
+    }
+    out
+}
+
+fn pack_text(p: &AnswerPack) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "answer pack · head #{}{}\n",
@@ -95,7 +112,7 @@ pub fn pack(p: &AnswerPack) -> String {
                 ));
             }
             for o in n.observations.iter().take(6) {
-                out.push_str(&format!("  ◇ {}\n", head(&o.summary, 200)));
+                out.push_str(&format!("  ◇ {} [sources {}]\n",head(&o.summary,200),o.cite_seqs.iter().map(|s|format!("#{s}")).collect::<Vec<_>>().join(", ")));
             }
         }
         None => {
@@ -125,7 +142,7 @@ pub fn pack(p: &AnswerPack) -> String {
     if !p.browse_hits.is_empty() {
         out.push_str(&format!("browse hits ({}):\n", p.browse_hits.len()));
         for b in p.browse_hits.iter().take(15) {
-            out.push_str(&format!("  {} {}{}\n", b.seq.map(|s| format!("#{s}")).unwrap_or_else(|| format!("browse:{}", b.id)), b.url, b.title.as_deref().map(|t| format!(" — {}", head(t, 80))).unwrap_or_default()));
+            out.push_str(&format!("  {} [page] {}{}: {}\n", b.seq.map(|s| format!("#{s}")).unwrap_or_else(|| format!("browse:{}", b.id)), b.url, b.title.as_deref().map(|t| format!(" — {}", head(t, 80))).unwrap_or_default(),head(&b.snippet,400)));
         }
     }
     if !p.grep_hits.is_empty() {
@@ -142,6 +159,15 @@ pub fn pack(p: &AnswerPack) -> String {
             out.push_str(&format!("  [{}] {} {} {}\n", h.source, h.cite(), h.role, head(h.text.as_deref().unwrap_or("[body not shared]"), 160)));
         }
     }
+    if !p.claims.is_empty() {
+        out.push_str("cited claims (derived assertions; unresolved alternatives retained):\n");
+        for claim in &p.claims {
+            let c=&claim.assertion;
+            out.push_str(&format!("  {} {:?}: {} [sources {}]{}\n",head(&c.subject,100),c.predicate,head(&c.value.supporting_text(),200),c.sources.iter().map(|s|format!("{}:{} ({:?})",s.chain_id,s.seq,s.role)).collect::<Vec<_>>().join(", "),if claim.unresolved_alternatives.is_empty(){String::new()}else{format!(" CONFLICT: {}",claim.unresolved_alternatives.join(", "))}));
+        }
+    }
+    for error in &p.retrieval.errors {out.push_str(&format!("retrieval error: {}\n",head(error,200)));}
+    if let Some(id)=&p.retrieval.trace_id {out.push_str(&format!("trace: {id}\n"));}
     let arms: Vec<String> = p
         .arm_coverage
         .iter()
@@ -181,10 +207,20 @@ pub fn grep(hits: &[GrepHit]) -> String {
 }
 
 pub fn context(b: &ContextBlock) -> String {
-    match &b.text {
-        Some(t) => t.clone(),
-        None => format!("nothing on record for {}", if b.terms.is_empty() { "this question".to_string() } else { b.terms.join(" ") }),
-    }
+    context_with_budget(b,12000)
+}
+
+pub fn context_with_budget(b: &ContextBlock,max_bytes:usize) -> String {
+    let mut text=match &b.text {
+        Some(text)=>text.clone(),
+        None=>{
+            let mut summary="No matching evidence in the searched arms.".to_string();
+            for error in &b.retrieval.errors {summary.push_str(&format!(" Retrieval error: {}.",head(error,200)));}
+            for arm in &b.coverage {if !arm.ran {if let Some(reason)=&arm.absent_because {summary.push_str(&format!(" {:?}: {}.",arm.arm,head(reason,160)));}}}
+            summary
+        }
+    };
+    let mut end=text.len().min(max_bytes);while !text.is_char_boundary(end) {end-=1;}text.truncate(end);text
 }
 
 pub fn tree(nodes: &[TreeNodeView]) -> String {

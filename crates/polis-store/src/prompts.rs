@@ -29,41 +29,36 @@ use crate::search::{GrepError, GREP_MIN_LITERAL};
 pub const PROMPT_TEXT: &str = "COALESCE(NULLIF(p.body, ''), p.gist)";
 
 impl PolisStore {
-    /// Insert a prompt row, deduped on (body_hash, claude_session_id). Returns
+    /// Insert a prompt row, deduped by body, session, role and namespace. Returns
     /// the new row id, or `None` if an identical prompt was already stored.
     pub fn insert_prompt(&self, p: &polis_core::ledger::PromptRow) -> rusqlite::Result<Option<i64>> {
-        let conn = self.conn();
+        Self::insert_prompt_scoped_locked(&self.conn(), p, &Default::default(), &Default::default())
+    }
+
+    /// Namespace columns are present before deduplication, so identical text
+    /// captured by a different speaker/project/agent remains separate evidence.
+    /// The statement checks duplicates atomically; the supporting index is not
+    /// unique because later identity adoption must never collapse historical rows.
+    pub fn insert_prompt_scoped_locked(conn: &rusqlite::Connection, p: &polis_core::ledger::PromptRow, ids: &crate::principals::ScopeIds, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Option<i64>> {
+        let principal = ids.principal_id.as_ref().or(scope.principal.as_ref());
+        let agent = match ids.agent_id.clone().or(scope.agent.clone()) {
+            Some(id) => Some(Self::resolve_author_locked(conn, &id)?.unwrap_or(id)), None => None,
+        };
         let changed = conn.execute(
             "INSERT INTO prompts
                 (ts, source, origin, surface, role, user_text, session_id, claude_session_id,
-                 mission_id, project_path, body, body_hash,
-                 thread_kind, thread_id, parent_session_id, model, model_source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
-             ON CONFLICT(body_hash, claude_session_id) DO NOTHING",
-            params![
-                p.ts,
-                p.source,
-                p.origin,
-                p.surface,
-                p.role,
-                p.user_text,
-                p.session_id,
-                p.claude_session_id,
-                p.mission_id,
-                p.project_path,
-                p.body,
-                p.body_hash,
-                p.thread_kind,
-                p.thread_id,
-                p.parent_session_id,
-                p.model,
-                p.model_source,
-            ],
+                 mission_id, project_path, body, body_hash, thread_kind, thread_id,
+                 parent_session_id, model, model_source, principal_id, device_id, agent_id, run_id, org_id)
+             SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22
+             WHERE ?8 IS NULL OR NOT EXISTS (
+                SELECT 1 FROM prompts WHERE body_hash=?12 AND claude_session_id=?8
+                  AND COALESCE(role,'user')=?5 AND COALESCE(project_path,'')=COALESCE(?10,'')
+                  AND COALESCE(principal_id,'')=COALESCE(?18,'') AND COALESCE(device_id,'')=COALESCE(?19,'')
+                  AND COALESCE(agent_id,'')=COALESCE(?20,'') AND COALESCE(run_id,'')=COALESCE(?21,'')
+                  AND COALESCE(org_id,'')=COALESCE(?22,''))",
+            params![p.ts,p.source,p.origin,p.surface,p.role,p.user_text,p.session_id,p.claude_session_id,p.mission_id,p.project_path.or(scope.project.as_deref()),p.body,p.body_hash,p.thread_kind,p.thread_id,p.parent_session_id,p.model,p.model_source,principal,ids.device_id,agent,scope.run.as_deref().or(p.claude_session_id),scope.org],
         )?;
-        if changed == 0 {
-            return Ok(None);
-        }
-        Ok(Some(conn.last_insert_rowid()))
+        Ok((changed > 0).then(|| conn.last_insert_rowid()))
     }
 
     /// Whether any prompt captured under this claude session still lacks a
@@ -141,9 +136,8 @@ impl PolisStore {
     /// Bind a drafter-launched prompt row to the session that eventually ran
     /// it. The launch records with `claude_session_id = NULL` (claude hasn't
     /// spawned yet); the ingest hook's claim is the first moment the id is
-    /// known. `OR IGNORE` respects the `(body_hash, claude_session_id)` unique
-    /// index — if the hook already captured the same body under that session,
-    /// the drafter row simply stays a launch record.
+    /// known. Both historical rows remain if the hook has already captured the
+    /// same body under that session; binding must never delete prior evidence.
     pub fn bind_drafter_prompt_session(
         &self,
         body_hash: &str,
@@ -247,10 +241,15 @@ impl PolisStore {
         &self,
         seqs: &[i64],
     ) -> rusqlite::Result<Vec<polis_core::types::LakeItem>> {
+        self.lake_items_for_seqs_scoped(seqs, &Default::default())
+    }
+
+    pub fn lake_items_for_seqs_scoped(&self, seqs: &[i64], scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Vec<polis_core::types::LakeItem>> {
         if seqs.is_empty() {
             return Ok(Vec::new());
         }
         let conn = self.conn();
+        let scoped = Self::scope_clause_locked(&conn, "p", scope)?;
         let marks = vec!["?"; seqs.len()].join(", ");
         let mut stmt = conn.prepare(&format!(
             "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
@@ -259,18 +258,25 @@ impl PolisStore {
                     p.thread_kind, p.thread_id, p.parent_session_id, p.model
              FROM ledger_events le
              JOIN prompts p ON p.id = le.prompt_id
-             WHERE le.kind = 'prompt' AND le.seq IN ({marks})
-             ORDER BY le.seq DESC"
+             WHERE le.kind = 'prompt' AND le.seq IN ({marks}){}
+             ORDER BY le.seq DESC", scoped.sql
         ))?;
-        let refs: Vec<&dyn rusqlite::ToSql> =
+        let mut refs: Vec<&dyn rusqlite::ToSql> =
             seqs.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-        let rows = stmt.query_map(refs.as_slice(), Self::row_to_lake_item)?;
+        refs.extend(scoped.binds.iter().map(|v| v.as_ref()));
+        let rows = stmt.query_map(refs.as_slice(), Self::row_to_lake_item_full)?;
         rows.collect()
     }
 
     /// Row → `LakeItem` over the canonical projection every lake reader
     /// selects (`le.seq … p.model`), so the readers can't drift.
     pub fn row_to_lake_item(r: &rusqlite::Row) -> rusqlite::Result<polis_core::types::LakeItem> {
+        let mut item = Self::row_to_lake_item_full(r)?;
+        item.body = item.body.map(|body| if body.chars().count() > 4000 { body.chars().take(4000).collect::<String>() + "…" } else { body });
+        Ok(item)
+    }
+
+    pub fn row_to_lake_item_full(r: &rusqlite::Row) -> rusqlite::Result<polis_core::types::LakeItem> {
         let body: Option<String> = r.get(11)?;
         Ok(polis_core::types::LakeItem {
             seq: r.get(0)?,
@@ -284,13 +290,7 @@ impl PolisStore {
             role: r.get(8)?,
             mission_id: r.get(9)?,
             project_path: r.get(10)?,
-            body: body.map(|b| {
-                if b.chars().count() > 4000 {
-                    b.chars().take(4000).collect::<String>() + "…"
-                } else {
-                    b
-                }
-            }),
+            body,
             thread_kind: r.get(12)?,
             thread_id: r.get(13)?,
             parent_session_id: r.get(14)?,
@@ -424,7 +424,7 @@ impl PolisStore {
         let scope = Self::scope_clause_locked(
             &conn,
             "p",
-            &crate::principals::ScopeFilter { principal: f.principal.clone(), agent: f.agent.clone(), run: f.run.clone(), org: f.org.clone(), include_shared: false },
+            &crate::principals::ScopeFilter { principal: f.principal.clone(), agent: f.agent.clone(), run: f.run.clone(), org: f.org.clone(), include_shared: false, ..Default::default() },
         )?;
         sql.push_str(&scope.sql);
         binds.extend(scope.binds);

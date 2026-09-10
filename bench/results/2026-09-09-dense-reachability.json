@@ -1,0 +1,89 @@
+{
+  "schema": "polis.dense-reachability/1",
+  "date": "2026-09-09",
+  "baselineCommit": "911d24e4348e9906b4fe6cc7a57d44e1dceceede",
+  "afterRevision": "uncommitted implementation working tree; measured before final integration cleanup",
+  "metric": "relevant class-link preview reachability at every insertion position; not answer accuracy",
+  "buildProfile": "debug",
+  "modelCalls": 0,
+  "provider": "none",
+  "hardware": "macOS-14.3-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "fixture": "crates/polis-memory/tests/dense_measurement.rs",
+  "configuration": {
+    "query": "one unique marker per source",
+    "responseLimit": 1,
+    "serializedByteCeiling": 60000,
+    "store": "in-memory SQLite; isolated fixture per class size"
+  },
+  "before": [
+    {
+      "links": 40,
+      "queries": 40,
+      "reachable": 20,
+      "queryBatchMs": 26
+    },
+    {
+      "links": 100,
+      "queries": 100,
+      "reachable": 20,
+      "queryBatchMs": 71
+    },
+    {
+      "links": 317,
+      "queries": 317,
+      "reachable": 20,
+      "queryBatchMs": 293
+    },
+    {
+      "links": 407,
+      "queries": 407,
+      "reachable": 20,
+      "queryBatchMs": 414
+    },
+    {
+      "links": 1000,
+      "queries": 1000,
+      "reachable": 20,
+      "queryBatchMs": 1638
+    }
+  ],
+  "after": [
+    {
+      "links": 40,
+      "queries": 40,
+      "reachable": 40,
+      "queryBatchMs": 34
+    },
+    {
+      "links": 100,
+      "queries": 100,
+      "reachable": 100,
+      "queryBatchMs": 109
+    },
+    {
+      "links": 317,
+      "queries": 317,
+      "reachable": 317,
+      "queryBatchMs": 613
+    },
+    {
+      "links": 407,
+      "queries": 407,
+      "reachable": 407,
+      "queryBatchMs": 938
+    },
+    {
+      "links": 1000,
+      "queries": 1000,
+      "reachable": 1000,
+      "queryBatchMs": 4784
+    }
+  ],
+  "limitations": [
+    "No external data or model answer/judge calls.",
+    "Debug wall-clock timings are descriptive, not a release latency acceptance gate.",
+    "Baseline uses the identical fixture copied into an isolated git archive of the baseline commit.",
+    "All eligible links are scored, so relevance work increases with class size."
+  ]
+}

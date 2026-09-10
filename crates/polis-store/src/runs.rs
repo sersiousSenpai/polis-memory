@@ -176,6 +176,7 @@ impl PolisStore {
     /// Journal one op under `run_id`; returns its `op_ix`. Under an already
     /// held lock — the apply paths call it inside their own statements.
     pub fn journal_op_locked(conn: &Connection, run_id: i64, rec: &OpRecord<'_>) -> rusqlite::Result<i64> {
+        if Self::run_source_forgotten_locked(conn, run_id)? { return Ok(0); }
         let ix: i64 = conn.query_row(
             "SELECT COALESCE(MAX(op_ix), 0) + 1 FROM class_run_ops WHERE run_id = ?1",
             params![run_id],
@@ -439,6 +440,10 @@ impl PolisStore {
         let pre = pre.ok_or_else(|| "no pre-image (vacuumed or never journaled)".to_string())?;
         let db = |e: rusqlite::Error| e.to_string();
         match op {
+            "claim" => {
+                let id = str_of(pre, "claimId").ok_or("pre-image lacks claimId")?;
+                Self::retire_claim_locked(conn, id, polis_core::ledger::now_millis(), "gardener_revert").map_err(db)?;
+            }
             "file" => {
                 let link = pre.get("linkId").and_then(Value::as_i64).ok_or("pre-image lacks linkId")?;
                 match pre.get("revivedFromRun").and_then(Value::as_i64) {

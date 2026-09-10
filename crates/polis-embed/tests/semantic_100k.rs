@@ -3,8 +3,8 @@
 //! The §6.1 row "semantic search alone, 100k chunks: p50 < 60 ms, p95 <
 //! 120 ms", measured directly: 100,000 stored int8 vectors, a fixed query
 //! vector, brute force over all of them (the crossover the crate's ceiling
-//! constant documents). Stores nothing but vectors, so it needs no
-//! embedder and runs anywhere. The assertion is armed by `POLIS_BENCH_100K=1`
+//! constant documents). Seeds authoritative ledger-backed prompt sources with
+//! synthetic vectors, so it needs no downloaded embedder and runs anywhere. The assertion is armed by `POLIS_BENCH_100K=1`
 //! (CI's Ubuntu job); without it the numbers are printed and the budget
 //! is not enforced, because a loaded laptop is not a benchmark machine.
 
@@ -58,15 +58,20 @@ fn run(dim: usize, rows: usize) -> (f64, f64, f64) {
         let mut conn = store.conn();
         let tx = conn.transaction().unwrap();
         {
+            let mut prompts = tx.prepare("INSERT INTO prompts(id,ts,source,origin,surface,role,body,body_hash) VALUES(?1,?1,'api','external','bench','user',?2,?3)").unwrap();
             let mut ins = tx
                 .prepare(
                     "INSERT INTO embeddings (target_kind, target_id, chunk_ix, char_start, char_len, dim, scale, vec, model, source_hash, created_at)
-                     VALUES ('prompt', ?1, 0, 0, 1, ?2, ?3, ?4, ?5, 'h', 0)",
+                     VALUES ('prompt', ?1, 0, 0, 1, ?2, ?3, ?4, ?5, ?6, 0)",
                 )
                 .unwrap();
             for id in 1..=rows as i64 {
+                let body = format!("benchmark memory source {id}");
+                let hash = polis_core::ledger::body_hash(&body);
+                prompts.execute(rusqlite::params![id, body, hash]).unwrap();
+                polis_store::ledger::append_event(&tx, &polis_core::ledger::LedgerAppend { kind:"prompt",author:"benchmark",ts:id,prompt_id:Some(id),session_id:None,version_number:None,ref_kind:None,ref_id:None,payload_hash:&hash }).unwrap();
                 let q = quantize(&noise(&mut seed, dim));
-                ins.execute(rusqlite::params![id, dim as i64, q.scale as f64, polis_embed::pack(&q), model]).unwrap();
+                ins.execute(rusqlite::params![id, dim as i64, q.scale as f64, polis_embed::pack(&q), model, hash]).unwrap();
             }
         }
         tx.commit().unwrap();

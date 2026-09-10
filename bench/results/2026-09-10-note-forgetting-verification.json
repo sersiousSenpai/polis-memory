@@ -1,0 +1,100 @@
+{
+  "schema": "polis.note-forgetting-verification/1",
+  "date": "2026-09-10T06:22:09.493633+00:00",
+  "baselineCommit": "911d24e4348e9906b4fe6cc7a57d44e1dceceede",
+  "revision": "uncommitted working tree",
+  "schemaVersion": 10,
+  "checks": [
+    {
+      "command": "cargo test --workspace --features polis-memory/cli,polis-memory/eval --locked --offline",
+      "status": "passed",
+      "tests": 312,
+      "failed": 0,
+      "ignored": 15,
+      "suites": 30,
+      "notes": "Includes 12 note lifecycle regressions and 3 peer note redaction regressions, plus the full existing workspace suite."
+    },
+    {
+      "command": "cargo clippy --workspace --features polis-memory/cli,polis-memory/eval --all-targets --locked --offline -- -D warnings",
+      "status": "passed"
+    },
+    {
+      "command": "cargo +1.88.0 check --workspace --all-features --locked --offline",
+      "status": "passed",
+      "notes": "Compile check with placeholder bundled model assets; not a model runtime measurement."
+    },
+    {
+      "command": "cargo build -p polis-memory --features cli --locked --offline",
+      "status": "passed"
+    },
+    {
+      "command": "python3 sdk/schema/generate.py --check",
+      "status": "passed"
+    },
+    {
+      "command": "python3 sdk/schema/types.py --check",
+      "status": "passed"
+    },
+    {
+      "command": "python3 -m unittest discover -s sdk/python/tests -v",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "command": "node --test sdk/typescript/test/client.test.mjs",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "command": "python3 -m unittest discover -s bench/tests -v",
+      "status": "passed",
+      "tests": 10
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "manualChecks": [
+    {
+      "name": "Fresh isolated actual stdio MCP note lifecycle",
+      "status": "passed",
+      "steps": [
+        "memory_annotate",
+        "resolve available citation",
+        "forget by ledger citation",
+        "resolve redacted citation",
+        "search excludes forgotten note",
+        "verify ledger",
+        "confirm empty pending redaction outbox"
+      ],
+      "result": {
+        "surface": "actual stdio MCP",
+        "schemaVersion": "10",
+        "before": "available",
+        "after": "redacted",
+        "searchNotes": 0,
+        "chainOk": true,
+        "pendingRedactions": 0,
+        "binarySha256": "4ab013ade75f9e65cb08b6b19eb3dabae27f5461ba187341455f65438c2e2a26"
+      },
+      "notes": "Rebuilt local debug CLI; synthetic temporary home; embeddings and network disabled."
+    }
+  ],
+  "coverage": [
+    "Standalone and targeted note histories, including edits and star changes",
+    "Scoped atomic creation and updates; forged history mapping rejection",
+    "Copied proposal, observation, journal and digest removal; delayed writer suppression",
+    "Signed source-chain peer redactions, retry, replay, and payload validation",
+    "Managed restore from before edits or forgetting, including corrupt live stores"
+  ],
+  "limits": [
+    "Peer removal occurs when upgraded peers import the signed redactions.",
+    "Existing exported bundle files are not rewritten; original backup files follow their retention policy. Managed restore reapplies the durable forget registry.",
+    "Shared-note exact citation retrieval remains unavailable; imported note bodies and vectors are redacted.",
+    "Checks ran locally on macOS; cross-platform clean installation and release validation were not performed.",
+    "Earlier schema 9 performance measurements are retained separately and were not remeasured for schema 10."
+  ],
+  "paidModelCalls": 0,
+  "publishingPerformed": false
+}

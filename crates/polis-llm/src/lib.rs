@@ -87,6 +87,8 @@ pub struct AgentRequest {
     /// Clip the reply text to this many bytes (on a char boundary); 0 = no
     /// clip. The clip is reported, never silent: `AgentReply::clipped`.
     pub max_output_bytes: usize,
+    /// Whole request deadline, including reading stdout/HTTP response body.
+    pub timeout_ms: u64,
 }
 
 impl AgentRequest {
@@ -98,6 +100,7 @@ impl AgentRequest {
             resume: None,
             response_key: None,
             max_output_bytes: 0,
+            timeout_ms: 120_000,
         }
     }
 
@@ -120,6 +123,24 @@ impl AgentRequest {
         self.max_output_bytes = n;
         self
     }
+
+    pub fn timeout_ms(mut self, ms: u64) -> Self {
+        self.timeout_ms = ms.clamp(1, 600_000);
+        self
+    }
+}
+
+/// HTTP readers stop allocating before parsing an oversized provider body.
+#[cfg(any(feature = "anthropic", feature = "openai-compat"))]
+pub async fn bounded_json(mut response: reqwest::Response) -> Result<Value, AgentError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| AgentError::transport(e.to_string()))? {
+        if bytes.len().saturating_add(chunk.len()) > process::STDOUT_CAP {
+            return Err(AgentError::transport("model response exceeded wire byte limit"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|e| AgentError::transport(format!("model response was not JSON: {e}")))
 }
 
 /// What came back.
@@ -196,6 +217,11 @@ pub trait Agent: Send + Sync {
     /// `codex-cli`, `anthropic`, …).
     fn name(&self) -> &'static str;
     async fn run(&self, req: AgentRequest) -> Result<AgentReply, AgentError>;
+}
+
+/// Bound a whole background operation using the same runtime as model calls.
+pub async fn deadline<T>(milliseconds: u64, future: impl std::future::Future<Output = T>) -> Result<T, &'static str> {
+    tokio::time::timeout(std::time::Duration::from_millis(milliseconds), future).await.map_err(|_| "background operation deadline exceeded")
 }
 
 /// Where a turn's cost goes. Redline books it onto the seat's daily burn row;

@@ -179,6 +179,8 @@ pub fn role_for(kind: &str, surface: Option<&str>, corpus_role: Option<&str>) ->
         (_, Some("foreign"), _) | ("foreign", _, _) => "foreign",
         (_, Some("note"), _) | ("note", _, _) => "note",
         ("prompt", _, Some("system")) => "system",
+        ("prompt", _, Some("assistant")) => "assistant",
+        ("prompt", _, Some("tool")) => "tool",
         ("prompt", _, Some("agent")) => "agent",
         ("prompt", _, _) => "user",
         (k, _, _) if polis_core::types::DECISION_KINDS.contains(&k) => "decision",

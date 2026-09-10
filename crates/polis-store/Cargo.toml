@@ -22,7 +22,7 @@ polis-core = { workspace = true }
 # feature flag; both arrive with the amalgamation's defaults, and
 # `PolisStore::require_capabilities` checks for them at attach rather than
 # trusting the build.
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 tracing = "0.1"
 serde_json = "1"
 # E3: the foreign-row and trust types are wire shapes too (the CLI prints them,

@@ -603,6 +603,10 @@ impl PolisStore {
         &self,
         f: &polis_core::types::LedgerFilters,
     ) -> rusqlite::Result<Vec<polis_core::types::TimelineItem>> {
+        self.query_ledger_events_scoped(f, &Default::default())
+    }
+
+    pub fn query_ledger_events_scoped(&self, f: &polis_core::types::LedgerFilters, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Vec<polis_core::types::TimelineItem>> {
         let conn = self.conn();
         // Two user_notes probes, joined once for the whole page: `n_on` is the
         // note/star ANNOTATING this event (target_kind='ledger_event'); `n_own`
@@ -782,6 +786,9 @@ impl PolisStore {
             sql.push_str(" AND le.seq < ?");
             binds.push(Box::new(seq));
         }
+        let scoped = Self::ledger_scope_clause_locked(&conn, "le", scope)?;
+        sql.push_str(&scoped.sql);
+        binds.extend(scoped.binds);
         sql.push_str(" ORDER BY le.seq DESC LIMIT ?");
         binds.push(Box::new(polis_core::types::clamp_ledger_limit(f.limit)));
 

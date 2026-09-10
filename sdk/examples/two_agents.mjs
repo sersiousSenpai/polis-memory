@@ -1,0 +1,10 @@
+import {Client} from '../typescript/src/index.js';
+const {POLIS_TOKEN: token, POLIS_PRINCIPAL: principal, POLIS_URL: baseUrl} = process.env;
+if (!token || !principal) throw new Error('Set POLIS_TOKEN and POLIS_PRINCIPAL from the local daemon');
+const writer = new Client({baseUrl, token, scope: {principal, agent: 'planner'}});
+const reader = new Client({baseUrl, token, scope: {principal}});
+const receipt = await writer.ingest([{body: 'We decided to use SQLite for the project database.', role: 'user'}], {idempotencyKey: 'two-agents-database-v1'});
+if (receipt.recorded.length) await writer.decide(receipt.recorded[0]);
+const context = await reader.context('Which database did we decide to use?', {traceId: 'two-agents-read'});
+console.log(context);
+if (context.retrieval?.traceId) console.log(await reader.traces({id: context.retrieval.traceId}));

@@ -33,13 +33,19 @@ class StubMemory:
 
     def __init__(self):
         self.rows: list[str] = []
+        self.namespace = None
 
     def add(self, messages, user_id):
+        if self.namespace not in (None, user_id):
+            raise RuntimeError("namespace collision")
+        self.namespace = user_id
         for m in messages:
             self.rows.append(m["content"])
         return {"results": []}
 
     def search(self, query, user_id, limit=10):
+        if self.namespace not in (None, user_id):
+            raise RuntimeError("namespace mismatch")
         words = {w for w in query.lower().split() if len(w) > 3}
         scored = sorted(self.rows, key=lambda r: -len(words & set(r.lower().split())))
         return {"results": [{"memory": r} for r in scored[:limit]]}
@@ -47,8 +53,12 @@ class StubMemory:
 
 class Mem0Backend:
     def __init__(self, args):
+        if args.processing_profile != "immediate":
+            raise ValueError("this backend supports the immediate processing profile only")
         self.stub = args.stub or args.provider == "stub"
         self.max_tokens = args.max_context_tokens
+        if not self.stub:
+            raise RuntimeError("Mem0 scored adapter unavailable: extraction/embedder usage and empty-store verification are not yet instrumented")
         self.calls = 0
         self.tokens = 0
         if self.stub:
@@ -65,19 +75,14 @@ class Mem0Backend:
         t0 = time.perf_counter()
         by_session: dict[str, list[dict]] = {}
         for it in items:
-            by_session.setdefault(it.get("session", ""), []).append({"role": "user" if it["role"] == "user" else "assistant", "content": it["body"]})
+            by_session.setdefault(it.get("session", ""), []).append({"role": "user" if it["role"] == "user" else "assistant", "content": f"[session={it.get('session')} date={it.get('sourceDate')} role={it['role']}] {it['body']}"})
         for sid, msgs in by_session.items():
-            self.mem.add(msgs, user_id=question["question_id"])
-            if not self.stub:
-                # Mem0 does not expose per-add token usage; one extraction call
-                # per add over the session's text is the documented estimate.
-                self.calls += 1
-                self.tokens += sum(approx_tokens(m["content"]) for m in msgs) + 400
-        return IngestStats(wall_ms=(time.perf_counter() - t0) * 1000.0, llm_calls=self.calls, llm_tokens=self.tokens)
+            self.mem.add(msgs, user_id=question["namespace"])
+        return IngestStats(wall_ms=(time.perf_counter() - t0) * 1000.0, llm_calls=self.calls, llm_tokens=self.tokens, readiness={"verified": True, "emptyStart": True, "backend": "lexical stub; not Mem0"})
 
     def context(self, question):
         t0 = time.perf_counter()
-        res = self.mem.search(question["question"], user_id=question["question_id"], limit=20)
+        res = self.mem.search(question["question"], user_id=question["namespace"], limit=20)
         rows = [r.get("memory", "") for r in (res.get("results") if isinstance(res, dict) else res)]
         text, used = [], 0
         for r in rows:

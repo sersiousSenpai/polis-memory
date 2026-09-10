@@ -694,6 +694,47 @@ pub async fn observations_pass(polis: &Polis<'_>) -> Result<usize, String> {
 /// rather than pinning a core: the index is allowed to be late, never heavy.
 pub const EMBED_BATCH: usize = 16;
 
+/// Cheap freshness work has its own durable cursor, independent of the
+/// consolidation window. Newly captured unfiled evidence gets an inbox link
+/// immediately; the idle model-backed pass can later refine that filing.
+pub async fn basic_filing_once(polis: &Polis<'_>) -> Result<usize, String> {
+    const CURSOR: &str = "polis.freshness.filedSeq";
+    let now = now_millis();
+    let floor = polis.store.meta(CURSOR).map_err(|e| e.to_string())?.and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    let window = polis.store.list_lake_items_since(floor, 40).map_err(|e| e.to_string())?;
+    let Some(to) = window.last().map(|item| item.seq) else { return Ok(0) };
+    polis.store.enqueue_job("basic_filing", &format!("basic_filing:{floor}:{to}"), now, 3).map_err(|e| e.to_string())?;
+    let Some(job) = polis.store.lease_job("basic_filing", &format!("{}:{now}", std::process::id()), now, 60_000).map_err(|e| e.to_string())? else { return Ok(0) };
+    polis.store.conn().execute("UPDATE class_runs SET status = 'error', outcome = 'interrupted', finished_at = ?1,
+        error = 'basic filing interrupted' WHERE status = 'running' AND mode = 'basic_filing' AND started_at < ?1", [now]).map_err(|e| e.to_string())?;
+    let result = async {
+        let mut delta = Vec::new();
+        for item in window {
+            if crate::filing::fileable(&item) && polis.store.nodes_linking_seq(item.seq).map_err(|e| e.to_string())?.is_empty() {
+                delta.push(item);
+            }
+        }
+        let roots = crate::organize::seed_root_rows(&polis.list_project_paths().map_err(|e| e.to_string())?);
+        polis.store.seed_class_roots(&roots).map_err(|e| e.to_string())?;
+        let tree = polis.store.list_class_nodes().map_err(|e| e.to_string())?;
+        let run = polis.store.insert_class_run_with("basic_filing", None, None).map_err(|e| e.to_string())?;
+        // No model or embedding request is introduced by basic inbox filing.
+        let basic = Polis::new(polis.store, None, polis.host, polis.sink);
+        let filing = crate::filing::file_delta(&basic, run, &tree, &delta).await?;
+        let count = filing.inboxed as usize;
+        polis.store.finish_class_run_with(run, &ClassRunFinish { status:"done".into(), summary:filing.summary(),
+            items:Some(delta.len() as i64), ops:Some(count as i64), mode:Some("basic_filing".into()), llm_calls:Some(0), ..Default::default() }).map_err(|e| e.to_string())?;
+        polis.store.set_meta(CURSOR, &to.to_string()).map_err(|e| e.to_string())?;
+        Ok::<_, String>(count)
+    }.await;
+    let finished = now_millis();
+    if result.is_ok() { polis.store.checkpoint_job(&job, &to.to_string(), finished).map_err(|e| e.to_string())?; }
+    else { polis.store.conn().execute("UPDATE class_runs SET status = 'error', outcome = 'error', finished_at = ?1,
+        error = ?2 WHERE status = 'running' AND mode = 'basic_filing'", rusqlite::params![finished,result.as_ref().err()]).map_err(|e| e.to_string())?; }
+    polis.store.finish_job(&job, result.as_ref().err().map(String::as_str), finished).map_err(|e| e.to_string())?;
+    result
+}
+
 // ---------------------------------------------------------------------------
 // One tick of the gardener
 // ---------------------------------------------------------------------------
@@ -701,7 +742,7 @@ pub const EMBED_BATCH: usize = 16;
 use polis_core::host::{Change, Clock, GardenerEvents, IdleSignal};
 
 /// The semantic index's cadence — the retired `embedding-index` watch's.
-pub const EMBED_INDEX_EVERY_MS: i64 = 120 * 1000;
+pub const EMBED_INDEX_EVERY_MS: i64 = 2_000;
 
 /// Cadences and gates. The defaults are Redline's keeper exactly as it ran.
 #[derive(Debug, Clone)]
@@ -833,8 +874,8 @@ pub async fn step(
     let lake_newest = polis.store.lake_envelope().map(|e| e.newest).unwrap_or(0);
     let idle_now = is_idle(idle.last_activity_ms(), lake_newest, now, cfg.idle_window_ms);
 
-    // --- the semantic index: idle-gated, its own cadence, cheap predicate ---
-    if idle_now && state.last_embed_ms.map(|l| now - l >= cfg.embed_every_ms).unwrap_or(true) {
+    // Bounded indexing runs during continuous capture as well as idle time.
+    if state.last_embed_ms.map(|l| now - l >= cfg.embed_every_ms).unwrap_or(true) {
         if let Some(embedder) = polis.embedder.as_deref() {
             state.last_embed_ms = Some(now);
             let pending = polis
@@ -1052,6 +1093,32 @@ mod step_tests {
             ts,
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn basic_filing_is_immediate_and_does_not_consume_the_consolidation_window() {
+        let store = PolisStore::open_in_memory().unwrap();
+        prompt(&store, "A brand new decision while the user is still active", now_millis());
+        let polis = Polis::new(&store, None, &NoHost, &NoopSink);
+        assert_eq!(basic_filing_once(&polis).await.unwrap(), 1);
+        assert!(!store.nodes_linking_seq(1).unwrap().is_empty());
+        assert_eq!(store.last_run_seq_to().unwrap(), 0);
+        assert_eq!(basic_filing_once(&polis).await.unwrap(), 0);
+        assert!(store.list_jobs(10).unwrap().iter().all(|job| job.status == "done"));
+        assert!(store.verify_ledger_chain().unwrap().ok);
+    }
+
+    #[tokio::test]
+    async fn a_large_backlog_is_not_marked_consumed_after_the_first_capped_window() {
+        let store = PolisStore::open_in_memory().unwrap();
+        for index in 0..407 { prompt(&store, &format!("backlog prompt {index}"), 1); }
+        let polis = Polis::new(&store, None, &NoHost, &NoopSink);
+        let first = crate::organize::organize_once(&polis).await.unwrap();
+        assert!(first.seq_to < 407, "the first window must not skip the tail");
+        let second = crate::organize::organize_once(&polis).await.unwrap();
+        assert_eq!(second.seq_from, first.seq_to);
+        assert!(!store.nodes_linking_seq(407).unwrap().is_empty(), "tail evidence is filed on the next pass");
+        assert!(store.verify_ledger_chain().unwrap().ok);
     }
 
     /// The gates in order, with no model: nothing new → busy → ran (the

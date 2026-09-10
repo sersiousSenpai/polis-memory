@@ -26,6 +26,7 @@
 pub mod hook;
 pub mod ingest;
 pub mod routes;
+mod quality;
 pub mod sync;
 #[cfg(feature = "standalone")]
 pub mod standalone;
@@ -122,6 +123,13 @@ use scopes::*;
 
 /// The surface, in router registration order.
 pub const ROUTES: &[RouteSpec] = &[
+    RouteSpec { method: "POST", path: "/v1/memory/decisions", class: RouteClass::Write("memory.write"), purpose: "Record cited decision evidence", request: "DecisionRequest", response: "WriteReceipt" },
+    RouteSpec { method: "GET", path: "/v1/memory/evidence/:seq", class: RouteClass::Open, purpose: "Exact cited evidence", request: "seq, chain_id, scope", response: "EvidenceRecord" },
+    RouteSpec { method: "GET", path: "/v1/memory/traces", class: RouteClass::Open, purpose: "Bounded local retrieval diagnostics", request: "id, limit, scope", response: "traces" },
+    RouteSpec { method: "GET", path: "/v1/memory/schema", class: RouteClass::Open, purpose: "Machine-readable API schemas", request: "none", response: "JSON schemas" },
+    RouteSpec { method: "GET", path: "/v1/memory/claims", class: RouteClass::Open, purpose: "Temporal cited claims", request: "ClaimQuery", response: "claims" },
+    RouteSpec { method: "POST", path: "/v1/memory/claims", class: RouteClass::Write("memory.write"), purpose: "Record a cited claim", request: "ClaimWrite", response: "Claim" },
+
     RouteSpec {
         method: "POST",
         path: "/v1/prompts/ingest",
@@ -222,7 +230,7 @@ pub const ROUTES: &[RouteSpec] = &[
         method: "POST",
         path: "/v1/memory/remember",
         class: RouteClass::Write(MEMORY_WRITE),
-        purpose: "Keep one memory: the user's own words (asUser) as a prompt row, or a standalone note",
+        purpose: "Keep one cited source: the user's own words with asUser, otherwise assistant evidence",
         request: "JSON {text, asUser?, project?}",
         response: "JSON {seq, id}",
     },
@@ -246,7 +254,7 @@ pub const ROUTES: &[RouteSpec] = &[
         method: "POST",
         path: "/v1/memory/events",
         class: RouteClass::Write(MEMORY_WRITE),
-        purpose: "Batch import of episodes/messages with their own clock; idempotent on (body hash, run)",
+        purpose: "Batch import of episodes/messages with their own clock; idempotent within body, run, role and namespace",
         request: "JSON {items:[{body, ts?, role?, session?, run?, project?}]}",
         response: "JSON {recorded:[seq, …], skipped}",
     },
@@ -428,6 +436,11 @@ where
     PolisState: axum::extract::FromRef<S>,
 {
     Router::new()
+        .route("/v1/memory/decisions", post(quality::handle_decide))
+        .route("/v1/memory/evidence/:seq", get(routes::handle_memory_evidence))
+        .route("/v1/memory/traces", get(routes::handle_memory_traces))
+        .route("/v1/memory/schema", get(quality::handle_schema))
+        .route("/v1/memory/claims", get(quality::handle_claims).post(quality::handle_write_claim))
         // Polis prompt store: the global UserPromptSubmit capture hook POSTs
         // its stdin payload here. Fail-open by design — never 500s the hook.
         .route("/v1/prompts/ingest", post(ingest::handle_prompts_ingest))
@@ -569,6 +582,27 @@ mod tests {
     use tower::ServiceExt;
 
     const LIB_SRC: &str = include_str!("lib.rs");
+
+    #[tokio::test]
+    async fn http_search_matches_the_facade_under_all_scope_and_evidence_axes() {
+        use polis_core::api::{EvidenceFilter, IngestItem, IngestRequest, Scope, SearchRequest};
+        let state=testing::state();
+        let scope=Scope {principal:Some("human".into()),agent:Some("agent".into()),run:Some("run".into()),org:Some("org".into()),project:Some("/safe".into()),include_shared:false};
+        let selected=state.api.ingest(&IngestRequest {scope:scope.clone(),items:vec![IngestItem {body:"quartz eligible source".into(),role:Some("assistant".into()),ts:Some(9),..Default::default()}]}).unwrap().recorded[0];
+        for wrong in [Scope {principal:Some("other".into()),..scope.clone()},Scope {agent:Some("other".into()),..scope.clone()},Scope {run:Some("other".into()),..scope.clone()},Scope {org:Some("other".into()),..scope.clone()},Scope {project:Some("/other".into()),..scope.clone()}] {
+            state.api.ingest(&IngestRequest {scope:wrong,items:vec![IngestItem {body:"quartz quartz hidden source".into(),role:Some("assistant".into()),ts:Some(9),..Default::default()}]}).unwrap();
+        }
+        state.api.ingest(&IngestRequest {scope:scope.clone(),items:vec![IngestItem {body:"quartz user source".into(),role:Some("user".into()),ts:Some(9),..Default::default()},IngestItem {body:"quartz too late".into(),role:Some("assistant".into()),ts:Some(10),..Default::default()}]}).unwrap();
+        let direct=state.api.search(&SearchRequest {q:Some("quartz".into()),limit:Some(1),scope,filter:EvidenceFilter {roles:vec!["assistant".into()],after:Some(9),before:Some(10),..Default::default()},..Default::default()}).unwrap();
+        let request=Request::builder().uri("/v1/memory/answer-pack?q=quartz&limit=1&principal=human&agent=agent&run=run&org=org&project=%2Fsafe&roles=assistant&after=9&before=10").body(Body::empty()).unwrap();
+        let response=testing::app_with(state).oneshot(request).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+        let bytes=response.into_body().collect().await.unwrap().to_bytes();
+        let transported:polis_core::pack::AnswerPack=serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(direct.prompt_hits.iter().map(|h|h.item.seq).collect::<Vec<_>>(),vec![selected]);
+        assert_eq!(transported.prompt_hits.iter().map(|h|h.item.seq).collect::<Vec<_>>(),vec![selected]);
+        assert_eq!(transported.prompt_hits[0].item.role.as_deref(),Some("assistant"));
+    }
 
     /// Every string literal that immediately follows a `.route(` in this file
     /// — deliberately dumb, the same scrape Redline's own drift test uses.

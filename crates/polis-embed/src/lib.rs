@@ -497,11 +497,12 @@ mod apple {
 // Hot vector cache
 // ---------------------------------------------------------------------------
 
-/// Every stored vector, kept resident and keyed on the index's high-water mark.
-/// Mirrors `context::build_stats_cached`: cheap to rebuild, invalidated by a
-/// single monotonic number rather than by anyone remembering to clear it.
+/// Every stored vector, keyed on its database snapshot's mutation revision.
 pub struct VectorCache {
+    pub store_id: usize,
+    pub ledger_head: i64,
     pub head_id: i64,
+    pub revision: i64,
     /// The model whose rows these are (C2): a switch of provider is a
     /// different cache, never a stale one served under a new name.
     pub model: String,
@@ -537,37 +538,55 @@ pub fn semantic_search(
     query: &str,
     limit: usize,
 ) -> Option<Vec<SemanticHit>> {
+    semantic_search_scoped(store, embedder, query, limit, &Default::default())
+}
+
+pub fn semantic_search_scoped(store: &PolisStore, embedder: &dyn Embedder, query: &str, limit: usize, scope: &polis_store::principals::ScopeFilter) -> Option<Vec<SemanticHit>> {
+    semantic_search_scoped_checked(store, embedder, query, limit, scope).ok().flatten()
+}
+
+pub fn semantic_search_scoped_checked(store: &PolisStore, embedder: &dyn Embedder, query: &str, limit: usize, scope: &polis_store::principals::ScopeFilter) -> Result<Option<Vec<SemanticHit>>, String> {
+    let mut scope = scope.clone();
+    if scope.roles.is_empty() { scope.roles = vec!["user".into(), "assistant".into()]; }
+    let store_id = store.cache_identity();
+    let ledger_head = store.max_ledger_seq().map_err(|e| e.to_string())?;
     let provider = embedder;
     let model = provider.model_id();
-    let qvec = provider.embed(&[query.to_string()]).ok()?.into_iter().next()?;
+    let qvec = provider.embed(&[query.to_string()]).map_err(|e| e.to_string())?.into_iter().next().ok_or_else(|| "embedding provider returned no query vector".to_string())?;
     let q = quantize(&qvec);
 
-    let head = store.max_embedding_id().unwrap_or(0);
+    let head = store.max_embedding_id().map_err(|e| e.to_string())?;
+    let revision = store.embedding_revision().map_err(|e| e.to_string())?;
     if head == 0 {
         // The index exists but is empty — still "absent", not "no matches".
-        return None;
+        return Ok(None);
     }
-    // Hot cache keyed on the index head, mirroring `build_stats_cached`.
+    // The database revision also covers same-head updates and deletions.
     let cached = {
-        let guard = cache().read().ok()?;
-        guard.as_ref().filter(|c| c.head_id == head && c.model == model).cloned()
+        let guard = cache().read().map_err(|_| "semantic cache lock poisoned".to_string())?;
+        guard.as_ref().filter(|c| c.revision == revision && c.head_id == head && c.model == model && c.store_id == store_id && c.ledger_head == ledger_head).cloned()
     };
     let vectors = match cached {
         Some(c) => c,
         None => {
-            let rows = store.all_embeddings(&model).ok()?;
+            let rows = store.all_embeddings(&model).map_err(|e| e.to_string())?;
             if rows.is_empty() {
                 // The index has rows, none under THIS model: absent for this
                 // provider until a reindex (the pack says which).
-                return None;
+                return Ok(None);
             }
-            let fresh = Arc::new(VectorCache { head_id: head, model: model.clone(), rows });
+            let fresh = Arc::new(VectorCache { store_id, ledger_head, head_id: head, revision, model: model.clone(), rows });
             if let Ok(mut guard) = cache().write() {
                 *guard = Some(fresh.clone());
             }
             fresh
         }
     };
+
+    // Resolve eligibility for every read: scope stamps and catalog bindings can
+    // change without an embedding or ledger append. The vector cache contains
+    // no permitted-scope result and cannot serve stale namespace membership.
+    let eligible = store.eligible_embedding_targets(&scope).map_err(|e| e.to_string())?;
 
     // The crossover, checked rather than assumed. Brute force is correct here
     // and stops being correct at a specific size; saying so once, when it
@@ -587,6 +606,7 @@ pub fn semantic_search(
     let mut kinds: Vec<&str> = Vec::with_capacity(4);
     let mut best: std::collections::HashMap<(u8, i64), f32> = std::collections::HashMap::with_capacity(vectors.rows.len());
     for (_, kind, id, v) in &vectors.rows {
+        if !eligible.contains(&(kind.clone(), *id)) { continue; }
         let s = cosine(&q, v);
         let k = match kinds.iter().position(|k| k == kind) {
             Some(i) => i as u8,
@@ -613,7 +633,7 @@ pub fn semantic_search(
             .then_with(|| a.target_id.cmp(&b.target_id))
     });
     hits.truncate(limit);
-    Some(hits)
+    Ok(Some(hits))
 }
 
 /// Embed one tick's worth of backlog. Best-effort and bounded: a retrieval

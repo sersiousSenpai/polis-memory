@@ -1,0 +1,126 @@
+{
+  "schema": "polis.build-verification/1",
+  "date": "2026-09-10T05:45:42.101619+00:00",
+  "baselineCommit": "911d24e4348e9906b4fe6cc7a57d44e1dceceede",
+  "revision": "uncommitted working tree",
+  "hardware": {
+    "platform": "macOS-14.3-arm64-arm-64bit-Mach-O",
+    "cpu": "Apple M3 Max",
+    "memoryGiB": 48
+  },
+  "checks": [
+    {
+      "command": "cargo test --workspace --features polis-memory/cli,polis-memory/eval --locked --offline",
+      "status": "passed",
+      "notes": "Complete integrated suite, including actual local TCP MCP authentication, both temporal axes, gardener claims/canary rollback, scope, sharing, restore and retrieval regressions. Includes citation/source-row distinction, copied-proposal expiry, and page forgetting across corrupt-live-file restore.",
+      "tests": 297,
+      "ignored": 15
+    },
+    {
+      "command": "cargo clippy --workspace --features polis-memory/cli,polis-memory/eval --all-targets --locked --offline -- -D warnings",
+      "status": "passed"
+    },
+    {
+      "command": "cargo +1.88.0 check --workspace --all-features --locked --offline",
+      "status": "passed",
+      "notes": "All features compile on MSRV; bundled model assets are deliberately absent in this compile check, not a model runtime test."
+    },
+    {
+      "command": "python3 sdk/schema/generate.py --check",
+      "status": "passed"
+    },
+    {
+      "command": "python3 sdk/schema/types.py --check",
+      "status": "passed"
+    },
+    {
+      "command": "python3 -m unittest discover -s bench/tests -v",
+      "status": "passed",
+      "tests": 10
+    },
+    {
+      "command": "python3 -m unittest discover -s sdk/python/tests -v",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "command": "node --test sdk/typescript/test/client.test.mjs",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    },
+    {
+      "command": "POLIS_MODELS_DIR=<verified temporary assets>/models cargo test -p polis-embed --features model2vec --test model2vec_golden --locked --offline -- --nocapture",
+      "status": "passed",
+      "tests": 2,
+      "notes": "Actual pinned potion-base-8M assets, exact golden token/vector fixtures; isolated model2vec feature build."
+    },
+    {
+      "command": "cargo build -p polis-memory --features cli --locked --offline",
+      "status": "passed"
+    },
+    {
+      "command": "cargo build -p polis-memory --release --features cli --locked --offline",
+      "status": "passed"
+    },
+    {
+      "command": "python3 bench/realistic/run.py --polis target/debug/polis --split all --out /private/tmp/polis-final-realistic.json",
+      "status": "passed",
+      "tasks": 8
+    },
+    {
+      "command": "python3 bench/baselines/local_model_readiness.py --polis target/release/polis --assets <verified local models> --binary-profile 'release; features cli; schema 9' --output bench/results/2026-09-10-local-model-readiness-final.json",
+      "status": "passed",
+      "semanticOnlyQueries": 5,
+      "daemonCaptures": 50
+    },
+    {
+      "command": "python3 bench/baselines/local_filing.py --polis target/release/polis --binary-profile 'release; features cli; schema 9' --output bench/results/2026-09-10-local-filing-400.json",
+      "status": "passed",
+      "samples": 10,
+      "sourcesPerSample": 400
+    }
+  ],
+  "manualChecks": [
+    {
+      "name": "fresh isolated offline CLI init, capture, search, JSON/HTML export and verify",
+      "status": "passed",
+      "notes": "Fresh schema 9 home at /private/tmp/polis-final-smoke-00vs2zr7/home. Captured evidence resolves, retrieval trace exported, ledger verifies. Embeddings and network disabled."
+    },
+    {
+      "name": "Python wheel built, installed offline in fresh venv and imported",
+      "status": "passed",
+      "notes": "Built final wheel using the installed setuptools backend, then installed without index/dependencies in /private/tmp/polis-sdk-final-install and imported Client/AsyncClient/ForgetRequest/ForgetReceipt."
+    },
+    {
+      "name": "npm pack dry run",
+      "status": "passed",
+      "notes": "Final npm pack dry run passed with temporary cache /private/tmp/polis-sdk-npm-cache."
+    },
+    {
+      "name": "Inspector JavaScript syntax",
+      "status": "passed"
+    },
+    {
+      "name": "Inspector browser visual QA",
+      "status": "blocked",
+      "reason": "Computer-use service unavailable; browser discovery returned no available browser and native service failed to start."
+    }
+  ],
+  "paidModelCalls": 0,
+  "publishingPerformed": false,
+  "platformLimits": "Local checks ran on macOS only. Existing CI targets Linux/Windows, but no remote CI run or clean OS install matrix was executed.",
+  "schemaVersion": 9,
+  "measurements": [
+    "2026-09-09-dense-reachability.json",
+    "2026-09-09-realistic-evidence.json",
+    "2026-09-10-acceptance-10k.json",
+    "2026-09-10-local-model-readiness.json",
+    "2026-09-10-local-model-readiness-final.json",
+    "2026-09-10-local-filing-400.json"
+  ],
+  "measurementLimits": "Separate artifacts identify binary/configuration and limitations. The final readiness and 400-item filing runs used schema 9; the earlier schema 8 readiness run is retained for comparison. These are local workload measurements, not scored answer-quality evaluations."
+}

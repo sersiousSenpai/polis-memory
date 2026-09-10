@@ -73,7 +73,28 @@ pub fn record_prompt(store: &PolisStore, input: PromptInput) -> Result<Option<i6
 /// `record_prompt` with the caller's clock — an import carries the moment a
 /// prompt happened, not the moment it was ingested.
 pub fn record_prompt_at(store: &PolisStore, input: PromptInput, ts: i64) -> Result<Option<i64>, String> {
+    record_prompt_at_scoped(store, input, ts, &Default::default())
+}
+
+pub fn record_prompt_at_scoped(store: &PolisStore, input: PromptInput, ts: i64, scope: &crate::principals::ScopeFilter) -> Result<Option<i64>, String> {
+    let mut conn = store.conn();
+    let author = input.author.as_deref().unwrap_or_else(|| store.author()).to_string();
+    if conn.is_autocommit() {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
+        let seq = record_prompt_locked(&tx, &input, ts, &author, scope).map_err(|e|e.to_string())?;
+        tx.commit().map_err(|e|e.to_string())?;
+        Ok(seq)
+    } else {
+        let savepoint = conn.savepoint().map_err(|e|e.to_string())?;
+        let seq = record_prompt_locked(&savepoint, &input, ts, &author, scope).map_err(|e|e.to_string())?;
+        savepoint.commit().map_err(|e|e.to_string())?;
+        Ok(seq)
+    }
+}
+
+fn record_prompt_locked(conn: &rusqlite::Connection, input: &PromptInput, ts: i64, author: &str, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Option<i64>> {
     let bh = body_hash(&input.body);
+    let ids = PolisStore::scope_ids_for_author_locked(conn, author)?;
     let row = PromptRow {
         ts,
         source: input.source.as_str(),
@@ -82,7 +103,7 @@ pub fn record_prompt_at(store: &PolisStore, input: PromptInput, ts: i64) -> Resu
         role: input.role.as_str(),
         user_text: input.user_text.as_deref(),
         session_id: input.session_id.as_deref(),
-        claude_session_id: input.claude_session_id.as_deref(),
+        claude_session_id: input.claude_session_id.as_deref().or(scope.run.as_deref()),
         mission_id: input.mission_id.as_deref(),
         project_path: input.project_path.as_deref(),
         body: &input.body,
@@ -96,14 +117,13 @@ pub fn record_prompt_at(store: &PolisStore, input: PromptInput, ts: i64) -> Resu
         model: input.model.as_deref(),
         model_source: input.model_source.as_deref(),
     };
-    let prompt_id = match store.insert_prompt(&row).map_err(|e| e.to_string())? {
+    let prompt_id = match PolisStore::insert_prompt_scoped_locked(conn, &row, &ids, scope)? {
         Some(id) => id,
         None => return Ok(None), // dedup: identical (body, claude session) already stored
     };
-    let author = input.author.unwrap_or_else(|| store.author().to_string());
     let append = LedgerAppend {
         kind: EventKind::Prompt.as_str(),
-        author: &author,
+        author,
         ts,
         prompt_id: Some(prompt_id),
         session_id: input.session_id.as_deref(),
@@ -112,7 +132,7 @@ pub fn record_prompt_at(store: &PolisStore, input: PromptInput, ts: i64) -> Resu
         ref_id: None,
         payload_hash: &bh,
     };
-    let ev = store.append_ledger_event(&append).map_err(|e| e.to_string())?;
+    let ev = crate::ledger::append_event(conn, &append)?;
     Ok(Some(ev.seq))
 }
 

@@ -52,6 +52,9 @@ pub struct Doctor {
     pub peers: Vec<(String, String, i64, bool)>,
     /// E3: redactions we emitted that a peer has not reported importing.
     pub unacked_redactions: Vec<crate::sharing::UnackedRedaction>,
+    /// Local purges whose durable sharing redaction still needs emission.
+    pub pending_redactions: usize,
+    pub background_jobs: Vec<polis_store::jobs::BackgroundJob>,
     /// E4: this home is an org node (config `org`); per subscriber chain,
     /// its label and the relayed redactions it has not moved past.
     pub org: Option<String>,
@@ -120,6 +123,15 @@ pub fn run(home: &Home) -> Doctor {
             }
             d.trusted_keys = store.trust_list().map(|t| t.len()).unwrap_or(0);
             d.unacked_redactions = crate::sharing::unacknowledged_redactions(&store).unwrap_or_default();
+            match store.conn().query_row("SELECT (SELECT COUNT(*) FROM redaction_outbox WHERE delivered_at IS NULL)
+                + (SELECT COUNT(*) FROM capture_redaction_outbox WHERE delivered_at IS NULL)", [], |r| r.get(0)) {
+                Ok(count) => d.pending_redactions = count,
+                Err(error) => d.problems.push(format!("read pending redactions: {error}")),
+            }
+            match store.list_jobs(50) {
+                Ok(jobs) => d.background_jobs = jobs,
+                Err(error) => d.problems.push(format!("read durable jobs: {error}")),
+            }
             // E4: an org node reports, per subscriber, what it has not yet
             // acknowledged — the relay's view of the cooperative limit.
             if let (Some(org), Some(id)) = (home.config_get("org"), identity.as_ref()) {
@@ -290,6 +302,13 @@ pub fn render(d: &Doctor) -> String {
         for (chain, label, pending) in &d.org_pending {
             out.push_str(&format!("  subscriber {} ({label}) · {}\n", polis_core::identity::fingerprint(chain), if *pending == 0 { "up to date on redactions".to_string() } else { format!("{pending} redaction(s) not yet acknowledged") }));
         }
+    }
+    if d.pending_redactions > 0 {
+        out.push_str(&format!("redactions  {} local purge(s) awaiting durable sharing emission\n", d.pending_redactions));
+    }
+    for job in d.background_jobs.iter().filter(|job| job.status != "done") {
+        out.push_str(&format!("job #{}  {} · {} · attempt {}/{}{}\n", job.id, job.kind, job.status, job.attempts, job.max_attempts,
+            job.error.as_deref().map(|error| format!(" · {error}")).unwrap_or_default()));
     }
     if !d.unacked_redactions.is_empty() {
         out.push_str(&format!("redactions  {} not yet acknowledged by a peer:\n", d.unacked_redactions.len()));

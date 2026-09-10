@@ -351,6 +351,7 @@ pub fn decisions(store: &PolisStore, opts: &BuildOptions) -> Result<Vec<Decision
 /// Build and sign an envelope for this device's chain from `from_seq` to
 /// the head.
 pub fn build(store: &PolisStore, identity: &Identity, login: &str, opts: &BuildOptions) -> Result<Envelope, String> {
+    crate::sharing::flush_redactions(store, &identity.device_id(), login)?;
     let from_seq = opts.from_seq.unwrap_or(1).max(1);
     let events = segment_events(store, from_seq)?;
     let first = events.first().expect("non-empty");
@@ -393,11 +394,19 @@ pub fn build(store: &PolisStore, identity: &Identity, login: &str, opts: &BuildO
     let acks: Vec<(String, i64)> = store.list_foreign_chains().map_err(|e| e.to_string())?.into_iter().map(|c| (c.chain_id, c.head_seq)).collect();
 
     let seqs: std::collections::HashSet<i64> = events.iter().map(|e| e.seq).collect();
+    let forgotten_notes: std::collections::HashSet<i64> = {
+        let conn = store.conn();
+        let mut stmt = conn.prepare("SELECT target_id FROM forgotten_captures WHERE target_kind='user_note'").map_err(|e|e.to_string())?;
+        let rows = stmt.query_map([], |r|r.get(0)).map_err(|e|e.to_string())?
+            .collect::<rusqlite::Result<_>>().map_err(|e|e.to_string())?;
+        rows
+    };
     let notes: Vec<BundleNote> = if opts.policy.roles.iter().any(|r| r == "user") {
         let mut v: Vec<BundleNote> = store
             .list_user_notes(false, i64::MAX)
             .map_err(|e| e.to_string())?
             .into_iter()
+            .filter(|n| !forgotten_notes.contains(&n.id))
             .filter(|n| n.seq.map(|s| seqs.contains(&s)).unwrap_or(false))
             .map(|n| BundleNote { id: n.id, seq: n.seq, target_kind: n.target_kind, target_id: n.target_id, text: n.text, starred: n.starred, created_at: n.created_at, updated_at: n.updated_at })
             .collect();

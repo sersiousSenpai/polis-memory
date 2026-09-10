@@ -31,17 +31,22 @@ ROLES = {"polis-default": {"user"}, "polis-full": {"user", "assistant"}}
 
 
 class PolisBackend:
-    def __init__(self, polis_bin: str, max_tokens: int):
-        self.client = PolisMcp(polis_bin)
-        self.max_tokens = max_tokens
+    def __init__(self, polis_bin: str, args):
+        self.client = PolisMcp(polis_bin, timeout=args.timeout, assets=args.embedding_assets)
+        self.max_tokens = args.max_context_tokens
+        self.processing_profile = args.processing_profile
+        self.roles = ["user", "assistant"] if args.capture_profile == "all-roles" else ["user"]
 
     def ingest(self, question, items) -> IngestStats:
         t0 = time.perf_counter()
-        self.client.ingest(items)
-        return IngestStats(wall_ms=(time.perf_counter() - t0) * 1000.0, llm_calls=0, llm_tokens=0)
+        recorded = self.client.ingest(items)
+        capture_ms = (time.perf_counter() - t0) * 1000.0
+        readiness = self.client.process(self.processing_profile)
+        readiness["recorded"] = recorded
+        return IngestStats(wall_ms=capture_ms, llm_calls=0, llm_tokens=0, readiness=readiness)
 
     def context(self, question):
-        return self.client.context(question["question"], self.max_tokens)
+        return self.client.context(question["question"], self.max_tokens, self.roles)
 
     def close(self) -> None:
         self.client.close()
@@ -51,12 +56,13 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", default="polis-default", choices=sorted(ROLES))
     p.add_argument("--polis", help="path to the polis binary (else $POLIS_BIN, PATH, target/)")
+    p.add_argument("--embedding-assets", help="pre-downloaded models directory; pinned hashes checked before offline initialization")
     common_args(p, "polis-default")
     args = p.parse_args()
     args.system = args.config
     polis_bin = find_polis(args.polis)
     roles = ROLES[args.config]
-    run(args, lambda a: PolisBackend(polis_bin, a.max_context_tokens), roles)
+    run(args, lambda a: PolisBackend(polis_bin, a), roles)
 
 
 if __name__ == "__main__":

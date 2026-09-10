@@ -224,6 +224,7 @@ impl PolisStore {
                AND target_id IN (SELECT id FROM foreign_prompts WHERE chain_id = ?1)",
             params![chain_id],
         )?;
+        tx.execute("DELETE FROM embeddings WHERE target_kind = 'foreign_note' AND target_id IN (SELECT rowid FROM foreign_notes WHERE chain_id = ?1)", [chain_id])?;
         let mut n = 0;
         for table in ["foreign_prompts", "foreign_notes", "foreign_events", "foreign_principals", "foreign_redactions", "foreign_acks"] {
             n += tx.execute(&format!("DELETE FROM {table} WHERE chain_id = ?1"), params![chain_id])?;
@@ -306,14 +307,24 @@ impl PolisStore {
                 params![chain.chain_id, p.seq, p.prompt_id, p.role, p.body_hash, p.redaction, p.text, p.project, now],
             )?;
             out.prompts += n;
+            if Self::foreign_capture_tombstoned_locked(&tx, chain.chain_id.as_str(), p.seq)? {
+                out.tombstoned += Self::tombstone_locked(&tx, &chain.chain_id, p.seq)?;
+            }
         }
         for n in notes {
+            let seq = n.seq.ok_or_else(|| rusqlite::Error::InvalidParameterName("foreign notes require a source ledger sequence".into()))?;
+            let old_seq: Option<i64> = tx.query_row("SELECT seq FROM foreign_notes WHERE chain_id=?1 AND note_id=?2",params![chain.chain_id,n.note_id],|r|r.get(0)).optional()?.flatten();
+            let blocked = Self::foreign_note_tombstoned_locked(&tx,&chain.chain_id,n.note_id,seq)?
+                || old_seq.map(|old|Self::foreign_capture_tombstoned_locked(&tx,&chain.chain_id,old)).transpose()?.unwrap_or(false);
             let k = tx.execute(
-                "INSERT OR IGNORE INTO foreign_notes (chain_id, note_id, seq, target_kind, target_id, text, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![chain.chain_id, n.note_id, n.seq, n.target_kind, n.target_id, n.text, n.created_at],
+                "INSERT INTO foreign_notes (chain_id, note_id, seq, target_kind, target_id, text, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(chain_id,note_id) DO UPDATE SET seq=excluded.seq,target_kind=excluded.target_kind,target_id=excluded.target_id,text=excluded.text,created_at=excluded.created_at
+                 WHERE excluded.seq>COALESCE(foreign_notes.seq,0)",
+                params![chain.chain_id, n.note_id, seq, n.target_kind, n.target_id, if blocked {""}else{n.text}, n.created_at],
             )?;
             out.notes += k;
+            if blocked {out.tombstoned += Self::tombstone_locked(&tx,&chain.chain_id,seq)?;}
         }
         for p in principals {
             let k = tx.execute(
@@ -324,6 +335,9 @@ impl PolisStore {
             out.principals += k;
         }
         for r in redactions {
+            if r.target_chain != chain.chain_id {
+                return Err(rusqlite::Error::InvalidParameterName("a foreign chain may redact only its own captures".into()));
+            }
             let k = tx.execute(
                 "INSERT OR IGNORE INTO foreign_redactions (chain_id, event_seq, target_chain, target_seq, imported_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -352,28 +366,55 @@ impl PolisStore {
     }
 
     fn tombstone_locked(conn: &Connection, chain_id: &str, seq: i64) -> rusqlite::Result<usize> {
+        if chain_id.len()!=64 || !chain_id.bytes().all(|b|b.is_ascii_hexdigit()) || seq<=0 {
+            return Err(rusqlite::Error::InvalidParameterName("invalid foreign capture identity".into()));
+        }
+        let marker_key=format!("polis.foreignForgotten.{chain_id}.{seq}");
+        if crate::meta::get(conn,&marker_key)?.is_none() {
+            Self::persist_forget_marker_locked(conn,&format!("foreign_capture:{chain_id}:{seq}"))?;
+        }
+        // This is local suppression state, never a fabricated signed event.
+        crate::meta::set(conn,&marker_key,"1")?;
         let n = conn.execute(
             "UPDATE foreign_prompts SET text = ?3, redaction = 'stub', tombstoned = 1
              WHERE chain_id = ?1 AND seq = ?2 AND tombstoned = 0",
             params![chain_id, seq, TOMBSTONE],
         )?;
-        if n > 0 {
-            conn.execute(
+        conn.execute(
                 "DELETE FROM embeddings WHERE target_kind = 'foreign_prompt'
                    AND target_id IN (SELECT id FROM foreign_prompts WHERE chain_id = ?1 AND seq = ?2)",
                 params![chain_id, seq],
             )?;
-        }
-        Ok(n)
+        // A standalone note keeps its id through text edits. The immutable
+        // source event can identify that row even if this peer holds a newer
+        // note version than the redaction target.
+        let selector="chain_id=?1 AND (seq=?2 OR note_id IN (SELECT CAST(ref_id AS INTEGER) FROM foreign_events WHERE chain_id=?1 AND seq=?2 AND kind='note' AND ref_kind='none'))";
+        conn.execute(&format!("DELETE FROM embeddings WHERE target_kind='foreign_note' AND target_id IN (SELECT rowid FROM foreign_notes WHERE {selector})"),params![chain_id,seq])?;
+        let notes=conn.execute(&format!("UPDATE foreign_notes SET text='' WHERE {selector} AND text<>''"),params![chain_id,seq])?;
+        Ok(n+notes)
+    }
+
+    fn foreign_capture_tombstoned_locked(conn:&Connection,chain_id:&str,seq:i64)->rusqlite::Result<bool> {
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM foreign_redactions WHERE chain_id=target_chain AND target_chain=?1 AND target_seq=?2) OR EXISTS(SELECT 1 FROM polis_meta WHERE key=?3)",params![chain_id,seq,format!("polis.foreignForgotten.{chain_id}.{seq}")],|r|r.get(0))
+    }
+
+    fn foreign_note_tombstoned_locked(conn:&Connection,chain_id:&str,note_id:i64,seq:i64)->rusqlite::Result<bool> {
+        if Self::foreign_capture_tombstoned_locked(conn,chain_id,seq)? {return Ok(true);}
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM foreign_events e WHERE e.chain_id=?1 AND e.kind='note' AND e.ref_kind='none' AND e.ref_id=?2 AND (
+            EXISTS(SELECT 1 FROM foreign_redactions r WHERE r.chain_id=r.target_chain AND r.target_chain=e.chain_id AND r.target_seq=e.seq)
+            OR EXISTS(SELECT 1 FROM polis_meta m WHERE m.key='polis.foreignForgotten.' || e.chain_id || '.' || e.seq)))",params![chain_id,note_id.to_string()],|r|r.get(0))
+    }
+
+    /// Local suppression replayed during managed restore. This never invents
+    /// a peer-signed redaction event or changes the foreign chain's head.
+    pub fn tombstone_foreign_capture(&self, chain_id:&str, seq:i64)->rusqlite::Result<bool> {
+        let mut conn=self.conn();let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let count=Self::tombstone_locked(&tx,chain_id,seq)?;tx.commit()?;Ok(count>0)
     }
 
     /// Tombstone one foreign body now (a redaction that arrived on its own).
     pub fn tombstone_foreign_prompt(&self, chain_id: &str, seq: i64) -> rusqlite::Result<bool> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        let n = Self::tombstone_locked(&tx, chain_id, seq)?;
-        tx.commit()?;
-        Ok(n > 0)
+        self.tombstone_foreign_capture(chain_id,seq)
     }
 
     // ---- reads -------------------------------------------------------------
@@ -403,8 +444,36 @@ impl PolisStore {
     /// lake, so the same plan works. Chains marked forked still answer — the
     /// rows verified when they arrived; the fork is a fact about what came
     /// AFTER them.
+    pub fn foreign_scope_clause_locked(conn: &Connection, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<crate::principals::ScopeSql> {
+        let mut sql = String::new();
+        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if !scope.include_shared || scope.org.is_some() { sql.push_str(" AND 0"); }
+        if let Some(principal) = &scope.principal {
+            let id = Self::resolve_author_locked(conn, principal)?.unwrap_or_else(|| principal.clone());
+            sql.push_str(" AND EXISTS (SELECT 1 FROM foreign_chains fc WHERE fc.chain_id = p.chain_id AND (fc.human_id = ? OR fc.chain_id = ?))");
+            binds.push(Box::new(id.clone())); binds.push(Box::new(id));
+        }
+        if let Some(project) = &scope.project { sql.push_str(" AND p.project = ?"); binds.push(Box::new(project.clone())); }
+        if !scope.roles.is_empty() {
+            sql.push_str(&format!(" AND p.role IN ({})", vec!["?"; scope.roles.len()].join(",")));
+            binds.extend(scope.roles.iter().map(|r| Box::new(r.clone()) as Box<dyn rusqlite::ToSql>));
+        }
+        for (column, value) in [("author", &scope.agent), ("session_id", &scope.run)] {
+            if let Some(value) = value { sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM foreign_events fe WHERE fe.chain_id = p.chain_id AND fe.seq = p.seq AND fe.{column} = ?)")); binds.push(Box::new(value.clone())); }
+        }
+        for (op, value) in [(">=", scope.after), ("<", scope.before)] {
+            if let Some(value) = value { sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM foreign_events fe WHERE fe.chain_id = p.chain_id AND fe.seq = p.seq AND fe.ts {op} ?)")); binds.push(Box::new(value)); }
+        }
+        Ok(crate::principals::ScopeSql { sql, binds })
+    }
+
     pub fn search_foreign_prompts(&self, fts_match: &str, limit: i64) -> rusqlite::Result<Vec<(ForeignPromptRow, f64)>> {
+        self.search_foreign_prompts_scoped(fts_match, limit, &crate::principals::ScopeFilter { include_shared: true, ..Default::default() })
+    }
+
+    pub fn search_foreign_prompts_scoped(&self, fts_match: &str, limit: i64, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Vec<(ForeignPromptRow, f64)>> {
         let conn = self.conn();
+        let scoped = Self::foreign_scope_clause_locked(&conn, scope)?.numbered(3);
         // Every column qualified: the FTS table exposes `text` too, and an
         // ambiguous name is an error the arm would otherwise swallow as
         // "no hits".
@@ -413,10 +482,12 @@ impl PolisStore {
             "SELECT {cols}, bm25(foreign_prompts_fts)
              FROM foreign_prompts_fts
              JOIN foreign_prompts p ON p.id = foreign_prompts_fts.rowid
-             WHERE foreign_prompts_fts MATCH ?1 AND p.tombstoned = 0
-             ORDER BY bm25(foreign_prompts_fts) LIMIT ?2"
+             WHERE foreign_prompts_fts MATCH ?1 AND p.tombstoned = 0{}
+             ORDER BY bm25(foreign_prompts_fts) LIMIT ?2", scoped.sql
         ))?;
-        let rows = stmt.query_map(params![fts_match, limit], |r| Ok((row_to_prompt(r)?, r.get::<_, f64>(10)?)))?;
+        let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&fts_match, &limit];
+        binds.extend(scoped.binds.iter().map(|v| v.as_ref()));
+        let rows = stmt.query_map(binds.as_slice(), |r| Ok((row_to_prompt(r)?, r.get::<_, f64>(10)?)))?;
         rows.collect()
     }
 
@@ -698,4 +769,3 @@ impl PolisStore {
         rows.collect()
     }
 }
-

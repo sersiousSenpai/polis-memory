@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polis-memory"
+version = "0.1.0"
+description = "Typed, dependency-free HTTP client for a local Polis memory daemon"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+
+[tool.setuptools.package-data]
+polis_memory = ["py.typed"]

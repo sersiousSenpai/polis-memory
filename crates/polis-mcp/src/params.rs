@@ -3,8 +3,8 @@
 //! Tool parameters — the JSON shapes a client sends. Snake_case keys, every
 //! field optional unless the tool cannot run without it, and one `scope`
 //! object on every read (§4.4): `{principal, org, agent, run, project,
-//! include_shared}`, empty today (identity lands in E2) but fixed now so no
-//! client changes shape then.
+//! include_shared}`. Explicit scope fields narrow eligible evidence before
+//! retrieval limits.
 
 use polis_core::api::Scope;
 use polis_core::types::{GrepScope, LedgerFilters, PromptFilters};
@@ -46,9 +46,25 @@ pub fn scope(v: Option<ScopeArg>) -> Scope {
     ScopeWrap::from(v).0
 }
 
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct FilterArg {
+    #[serde(default)] pub roles: Vec<String>,
+    pub after: Option<i64>, pub before: Option<i64>, pub valid_at: Option<i64>, pub known_at: Option<i64>,
+}
+impl From<FilterArg> for polis_core::api::EvidenceFilter {
+    fn from(f: FilterArg) -> Self { Self { roles: f.roles, after: f.after, before: f.before, valid_at: f.valid_at, known_at: f.known_at } }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct EvidenceParams { pub seq: i64, pub chain_id: Option<String>, pub scope: Option<ScopeArg> }
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct TraceParams { pub id: Option<String>, pub limit: Option<usize>, pub scope: Option<ScopeArg> }
+
 /// `memory_search` — START HERE.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct SearchParams {
+    pub filter: Option<FilterArg>,
+    pub candidate_limit: Option<usize>, pub max_tokens: Option<usize>, pub cursor: Option<String>, pub trace_id: Option<String>,
     /// The question, in natural language. Stopwords are dropped and terms
     /// are stemmed; quoted "phrases" are matched adjacently.
     pub q: Option<String>,
@@ -62,6 +78,8 @@ pub struct SearchParams {
 /// `memory_context` — the pack rendered as one grounding block.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct ContextParams {
+    pub filter: Option<FilterArg>,
+    pub max_bytes: Option<usize>, pub trace_id: Option<String>,
     /// The question the block should ground.
     pub q: String,
     /// A class node id to open directly.
@@ -270,8 +288,7 @@ pub fn grep_scope(s: Option<&str>) -> GrepScope {
 pub struct RememberParams {
     /// The memory to keep.
     pub text: String,
-    /// Record as the user's own words (a prompt row). Default `false`: a
-    /// standalone note, filed as agent text.
+    /// Record as the user's own words. Default `false`: assistant evidence.
     pub as_user: Option<bool>,
     /// The project it belongs to (a path or a name).
     pub project: Option<String>,
@@ -284,10 +301,10 @@ pub struct IngestItemArg {
     pub body: String,
     /// Unix milliseconds when it happened (default: now).
     pub ts: Option<i64>,
-    /// `user` | `agent` | `system` (default `user`).
+    /// `user` | `assistant` | `agent` | `system` (default `user`).
     pub role: Option<String>,
     pub session: Option<String>,
-    /// The run/thread id; dedup is on (body hash, run).
+    /// The run/thread id; retries deduplicate within the complete source namespace.
     pub run: Option<String>,
     pub project: Option<String>,
 }
@@ -313,7 +330,7 @@ pub struct AnnotateParams {
 /// `memory_forget`.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct ForgetParams {
-    /// `prompt` (today); `browse_event` | `note` | `claim` land with sharing.
+    /// `ledger_event` for a citation sequence; `prompt`, `browse_event`, `note` or `user_note` for a source row ID.
     pub target_kind: String,
     pub target_id: String,
     /// Must be the literal `forget`.
@@ -328,4 +345,14 @@ pub struct SupersedeParams {
     pub new_seq: i64,
     pub rationale: Option<String>,
     pub scope: Option<ScopeArg>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct DecisionParams { pub source_seq: i64, pub kind: Option<String>, pub scope: Option<ScopeArg> }
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct ClaimsParams { pub filter: Option<FilterArg>, pub q: Option<String>, pub subject: Option<String>, pub predicate: Option<String>, pub valid_at: Option<i64>, pub known_at: Option<i64>, pub limit: Option<usize>, pub scope: Option<ScopeArg> }
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ClaimWriteParams {
+    /// A ClaimWrite object matching /v1/memory/schema, with sources and exact supporting quotations.
+    pub claim: serde_json::Value,
 }

@@ -50,6 +50,7 @@ pub const MEMORY_TABLES: &[&str] = &[
     "session_tree",
     "prompt_archive",
     "embeddings",
+    "embedding_index_state",
     // B2: the per-op journal (docs/ledger.md "Reversibility")
     "class_run_ops",
     // C1: the filing cache (docs/filing.md)
@@ -71,6 +72,16 @@ pub const MEMORY_TABLES: &[&str] = &[
     "foreign_class_nodes",
     "foreign_class_links",
     "org_acks",
+    "claim_records",
+    "claims",
+    "claim_sources",
+    "background_jobs",
+    "forgotten_sources",
+    "forgotten_captures",
+    "redaction_outbox",
+    "note_events",
+    "capture_redaction_outbox",
+    "model_usage",
 ];
 
 /// The FTS5 tables of the lexical layer (`lexical.rs`), for the schema dump.
@@ -894,6 +905,77 @@ impl Migration {
             );",
         );
         // ---- end E4 ------------------------------------------------------------
+        for table in ["browse_events", "user_notes", "class_observations"] {
+            let _ = conn.execute(&format!("ALTER TABLE {table} ADD COLUMN project_path TEXT"), []);
+        }
+        conn.execute_batch("DROP INDEX IF EXISTS idx_prompts_dedup;
+            CREATE INDEX idx_prompts_dedup ON prompts(body_hash, claude_session_id, COALESCE(role,'user'), COALESCE(project_path,''), COALESCE(principal_id,''), COALESCE(device_id,''), COALESCE(agent_id,''), COALESCE(run_id,''), COALESCE(org_id,'')); ")?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS claim_records (
+                id TEXT PRIMARY KEY, event_seq INTEGER NOT NULL, recorded_at INTEGER NOT NULL,
+                assertion_json TEXT, retired_at INTEGER, invalidated INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS claims (
+                id TEXT PRIMARY KEY, subject TEXT NOT NULL, predicate TEXT NOT NULL,
+                assertion_json TEXT NOT NULL, recorded_at INTEGER NOT NULL, event_seq INTEGER NOT NULL,
+                valid_from INTEGER NOT NULL, valid_until INTEGER, retired_at INTEGER,
+                principal_id TEXT, device_id TEXT, agent_id TEXT, run_id TEXT, org_id TEXT, project_path TEXT
+             );
+             CREATE INDEX IF NOT EXISTS idx_claims_subject_time ON claims(subject, predicate, valid_from, recorded_at);
+             CREATE INDEX IF NOT EXISTS idx_claims_scope ON claims(principal_id, project_path, agent_id, run_id);
+             CREATE TABLE IF NOT EXISTS claim_sources (
+                claim_id TEXT NOT NULL, chain_id TEXT NOT NULL, seq INTEGER NOT NULL,
+                PRIMARY KEY(claim_id, chain_id, seq)
+             );
+             CREATE INDEX IF NOT EXISTS idx_claim_source ON claim_sources(seq, chain_id);
+             CREATE TABLE IF NOT EXISTS background_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, job_key TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 3, available_at INTEGER NOT NULL,
+                lease_owner TEXT, lease_until INTEGER, checkpoint TEXT, error TEXT,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_background_jobs_due ON background_jobs(status, available_at, lease_until);
+             CREATE TABLE IF NOT EXISTS forgotten_captures (
+                target_kind TEXT NOT NULL, target_id INTEGER NOT NULL, source_hash TEXT NOT NULL, forgotten_at INTEGER NOT NULL,
+                PRIMARY KEY(target_kind,target_id)
+             );
+             CREATE TABLE IF NOT EXISTS forgotten_sources (
+                prompt_id INTEGER PRIMARY KEY, body_hash TEXT NOT NULL, forgotten_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS redaction_outbox (
+                prompt_id INTEGER PRIMARY KEY, created_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0, delivered_at INTEGER, error TEXT
+             );
+             CREATE TABLE IF NOT EXISTS note_events (
+                seq INTEGER PRIMARY KEY, note_id INTEGER NOT NULL, payload_hash TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_note_events_note ON note_events(note_id,seq);
+             CREATE TABLE IF NOT EXISTS capture_redaction_outbox (
+                target_seq INTEGER PRIMARY KEY, created_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0, delivered_at INTEGER, error TEXT
+             );
+             CREATE TABLE IF NOT EXISTS model_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, recorded_at INTEGER NOT NULL,
+                seat TEXT NOT NULL, model TEXT, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+                cache_read_tokens INTEGER NOT NULL, cache_creation_tokens INTEGER NOT NULL,
+                usage_reported INTEGER NOT NULL
+             );",
+        )?;
+        conn.execute_batch("INSERT OR IGNORE INTO forgotten_sources(prompt_id, body_hash, forgotten_at)
+            SELECT id, body_hash, COALESCE(compacted_at, ts) FROM prompts WHERE gist = '[forgotten]';
+            INSERT OR IGNORE INTO redaction_outbox(prompt_id, created_at)
+            SELECT prompt_id, forgotten_at FROM forgotten_sources;")?;
+        // Existing note events commit to each act, while the note row carries
+        // current text. Recover stable row/history identity without rewriting
+        // any historical event or pretending its old text is still available.
+        conn.execute_batch("INSERT OR IGNORE INTO note_events(seq,note_id,payload_hash)
+            SELECT e.seq,n.id,e.payload_hash FROM user_notes n JOIN ledger_events e
+            ON e.kind IN ('note','user_note') AND (
+                e.seq=n.seq OR
+                (n.target_kind='none' AND e.ref_kind='none' AND e.ref_id=CAST(n.id AS TEXT)) OR
+                (n.target_kind<>'none' AND e.ref_kind=n.target_kind AND e.ref_id=n.target_id));")?;
+        let _ = conn.execute("ALTER TABLE class_runs ADD COLUMN source_forgotten_at INTEGER", []);
         Ok(())
     }
 
@@ -929,6 +1011,24 @@ impl Migration {
             CREATE INDEX IF NOT EXISTS idx_embeddings_target
                 ON embeddings (target_kind, target_id);",
         );
+        // A monotonic revision belongs to the database snapshot, so cached
+        // vectors cannot survive a same-head update, delete or another writer.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS embedding_index_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                revision INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO embedding_index_state(singleton, revision) VALUES(1, 0);
+            CREATE TRIGGER IF NOT EXISTS embeddings_revision_insert AFTER INSERT ON embeddings BEGIN
+                UPDATE embedding_index_state SET revision = revision + 1 WHERE singleton = 1;
+            END;
+            CREATE TRIGGER IF NOT EXISTS embeddings_revision_update AFTER UPDATE ON embeddings BEGIN
+                UPDATE embedding_index_state SET revision = revision + 1 WHERE singleton = 1;
+            END;
+            CREATE TRIGGER IF NOT EXISTS embeddings_revision_delete AFTER DELETE ON embeddings BEGIN
+                UPDATE embedding_index_state SET revision = revision + 1 WHERE singleton = 1;
+            END;"
+        )?;
         Ok(())
     }
 

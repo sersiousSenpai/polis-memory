@@ -91,23 +91,36 @@ impl PolisStore {
 
     /// Every class node (proposed + accepted), for tree building in Rust.
     pub fn list_class_nodes(&self) -> rusqlite::Result<Vec<polis_core::types::ClassNode>> {
+        self.list_class_nodes_scoped(&Default::default())
+    }
+
+    pub fn list_class_nodes_scoped(&self, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Vec<polis_core::types::ClassNode>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare(
+        let scoped = Self::scope_clause_locked(&conn, "n", scope)?;
+        let mut stmt = conn.prepare(&format!(
             "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
                     status, pinned, curated_by, created_at, updated_at
-             FROM class_nodes WHERE retired_by_run IS NULL ORDER BY title ASC",
-        )?;
-        let rows = stmt.query_map([], PolisStore::row_to_class_node)?;
+             FROM class_nodes n WHERE retired_by_run IS NULL{} ORDER BY title ASC", scoped.sql
+        ))?;
+        let binds: Vec<&dyn rusqlite::ToSql> = scoped.binds.iter().map(|v| v.as_ref()).collect();
+        let rows = stmt.query_map(binds.as_slice(), PolisStore::row_to_class_node)?;
         rows.collect()
     }
 
     pub fn get_class_node(&self, id: &str) -> rusqlite::Result<Option<polis_core::types::ClassNode>> {
+        self.get_class_node_scoped(id, &Default::default())
+    }
+
+    pub fn get_class_node_scoped(&self, id: &str, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Option<polis_core::types::ClassNode>> {
         let conn = self.conn();
+        let scoped = Self::scope_clause_locked(&conn, "n", scope)?;
+        let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&id];
+        binds.extend(scoped.binds.iter().map(|v| v.as_ref()));
         conn.query_row(
-            "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
+            &format!("SELECT id, parent_id, kind, title, summary, project_path, ip_name,
                     status, pinned, curated_by, created_at, updated_at
-             FROM class_nodes WHERE id = ?1 AND retired_by_run IS NULL",
-            params![id],
+             FROM class_nodes n WHERE id = ?1 AND retired_by_run IS NULL{}", scoped.sql),
+            binds.as_slice(),
             PolisStore::row_to_class_node,
         )
         .optional()
@@ -190,6 +203,28 @@ impl PolisStore {
         Ok(out)
     }
 
+    pub fn list_class_children_scoped(&self, parent_id: &str, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Vec<polis_core::types::ClassNode>> {
+        Ok(self.list_class_nodes_scoped(scope)?.into_iter().filter(|n| n.parent_id.as_deref() == Some(parent_id)).collect())
+    }
+
+    pub fn list_class_children_for_parents_scoped(&self, parents: &[String], scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Vec<polis_core::types::ClassNode>> {
+        Ok(self.list_class_nodes_scoped(scope)?.into_iter().filter(|n| n.parent_id.as_ref().is_some_and(|id| parents.contains(id))).collect())
+    }
+
+    pub fn list_class_links_for_node_scoped(&self, node_id: &str, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Vec<polis_core::types::ClassLink>> {
+        if self.get_class_node_scoped(node_id, scope)?.is_none() { return Ok(Vec::new()); }
+        let links = self.list_class_links_for_node(node_id)?;
+        if scope.is_empty() { return Ok(links); }
+        let seqs: Vec<i64> = links.iter().filter(|l| matches!(l.target_kind.as_str(), "prompt" | "decision" | "ledger" | "resolution" | "approval" | "review_verdict")).filter_map(|l| l.target_id.parse().ok()).collect();
+        let eligible = self.eligible_seqs(&seqs, scope)?;
+        let targets = self.eligible_embedding_targets(scope)?;
+        Ok(links.into_iter().filter(|l| match l.target_kind.as_str() {
+            "prompt" | "decision" | "ledger" | "resolution" | "approval" | "review_verdict" => l.target_id.parse::<i64>().ok().is_some_and(|id| eligible.contains(&id)),
+            "browse_event" => l.target_id.parse::<i64>().ok().is_some_and(|id| targets.contains(&("browse_event".into(), id))),
+            _ => false,
+        }).collect())
+    }
+
     /// Stage one parsed proposal. Additive proposals (`file` / `create`)
     /// become LIVE nodes / links at once (B3: the adjudication that admits
     /// them runs before this call — `polis_memory::adjudicate`); structural
@@ -201,78 +236,129 @@ impl PolisStore {
         p: &polis_core::proposal::Proposal,
     ) -> rusqlite::Result<polis_core::types::StagedOutcome> {
         use polis_core::{proposal::Proposal, types::StagedOutcome};
-        let conn = self.conn();
-        let now = polis_core::ledger::now_millis();
-        let exists = |id: &str| -> rusqlite::Result<bool> {
-            let n: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM class_nodes WHERE id = ?1 AND retired_by_run IS NULL",
-                params![id],
-                |r| r.get(0),
-            )?;
-            Ok(n > 0)
-        };
-        // B2: every row this proposal creates is journaled under the run, so
-        // `revert_run` can undo it (a `create` retires the node, a `file`
-        // deletes — or re-retires — the link).
-        let journal = |op: &str, subjects: Vec<String>, pre: serde_json::Value| -> rusqlite::Result<()> {
+        let mut connection = self.conn();
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let conn = &tx;
+        let outcome = (|| -> rusqlite::Result<polis_core::types::StagedOutcome> {
             if let Some(run) = run_id {
-                Self::journal_op_locked(&conn, run, &crate::runs::OpRecord::applied(op, subjects, pre))?;
-            }
-            Ok(())
-        };
-        match p {
-            Proposal::Create { parent_id, title, .. } => {
-                if !exists(parent_id)? {
+                if Self::run_source_forgotten_locked(conn, run)? {
                     return Ok(StagedOutcome::Skipped);
                 }
-                // Don't re-propose an identical child.
-                let dup: i64 = conn.query_row(
+            }
+            match p {
+                Proposal::File {
+                    target_kind,
+                    target_id,
+                    ..
+                } => {
+                    if let Ok(seq) = target_id.parse::<i64>() {
+                        let forgotten = if target_kind == "browse_event" {
+                            conn.query_row("SELECT EXISTS(SELECT 1 FROM forgotten_captures WHERE target_kind='browse_event' AND target_id=?1)", [seq], |r|r.get::<_,bool>(0))?
+                        } else {
+                            Self::source_forgotten_locked(conn, seq)?
+                        };
+                        if forgotten {
+                            return Ok(StagedOutcome::Skipped);
+                        }
+                    }
+                }
+                Proposal::Supersede {
+                    old_seq, new_seq, ..
+                } if Self::source_forgotten_locked(conn, *old_seq)?
+                    || Self::source_forgotten_locked(conn, *new_seq)? => {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                Proposal::Collapse { cite_seqs, .. } => {
+                    for seq in cite_seqs {
+                        if Self::source_forgotten_locked(conn, *seq)? {
+                            return Ok(StagedOutcome::Skipped);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            let now = polis_core::ledger::now_millis();
+            let exists = |id: &str| -> rusqlite::Result<bool> {
+                let n: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM class_nodes WHERE id = ?1 AND retired_by_run IS NULL",
+                    params![id],
+                    |r| r.get(0),
+                )?;
+                Ok(n > 0)
+            };
+            // B2: every row this proposal creates is journaled under the run, so
+            // `revert_run` can undo it (a `create` retires the node, a `file`
+            // deletes — or re-retires — the link).
+            let journal =
+                |op: &str, subjects: Vec<String>, pre: serde_json::Value| -> rusqlite::Result<()> {
+                    if let Some(run) = run_id {
+                        Self::journal_op_locked(
+                            conn,
+                            run,
+                            &crate::runs::OpRecord::applied(op, subjects, pre),
+                        )?;
+                    }
+                    Ok(())
+                };
+            match p {
+                Proposal::Create {
+                    parent_id, title, ..
+                } => {
+                    if !exists(parent_id)? {
+                        return Ok(StagedOutcome::Skipped);
+                    }
+                    // Don't re-propose an identical child.
+                    let dup: i64 = conn.query_row(
                     "SELECT COUNT(*) FROM class_nodes WHERE parent_id = ?1 AND title = ?2 AND retired_by_run IS NULL",
                     params![parent_id, title],
                     |r| r.get(0),
                 )?;
-                if dup > 0 {
-                    return Ok(StagedOutcome::Skipped);
-                }
-                let id = crate::catalog::new_node_id();
-                conn.execute(
-                    "INSERT INTO class_nodes
+                    if dup > 0 {
+                        return Ok(StagedOutcome::Skipped);
+                    }
+                    let id = crate::catalog::new_node_id();
+                    conn.execute(
+                        "INSERT INTO class_nodes
                         (id, parent_id, kind, title, summary, project_path, ip_name,
                          status, pinned, curated_by, created_at, updated_at)
                      VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'accepted', 0,
                              'classifier', ?4, ?4)",
-                    params![id, parent_id, title, now],
-                )?;
-                journal("create", vec![crate::runs::subject::node(&id)], crate::runs::image::create(&id, Some(parent_id), title))?;
-                Ok(StagedOutcome::Node)
-            }
-            Proposal::File {
-                parent_id,
-                sub_class,
-                target_kind,
-                target_id,
-                note,
-                ..
-            } => {
-                if !exists(parent_id)? {
-                    return Ok(StagedOutcome::Skipped);
+                        params![id, parent_id, title, now],
+                    )?;
+                    journal(
+                        "create",
+                        vec![crate::runs::subject::node(&id)],
+                        crate::runs::image::create(&id, Some(parent_id), title),
+                    )?;
+                    Ok(StagedOutcome::Node)
                 }
-                let mut created_node = false;
-                // Resolve (or stage) the node the link attaches to.
-                let target_node = match sub_class {
-                    Some(sc) if !sc.trim().is_empty() => {
-                        let existing: Option<String> = conn
+                Proposal::File {
+                    parent_id,
+                    sub_class,
+                    target_kind,
+                    target_id,
+                    note,
+                    ..
+                } => {
+                    if !exists(parent_id)? {
+                        return Ok(StagedOutcome::Skipped);
+                    }
+                    let mut created_node = false;
+                    // Resolve (or stage) the node the link attaches to.
+                    let target_node = match sub_class {
+                        Some(sc) if !sc.trim().is_empty() => {
+                            let existing: Option<String> = conn
                             .query_row(
                                 "SELECT id FROM class_nodes WHERE parent_id = ?1 AND title = ?2 AND retired_by_run IS NULL LIMIT 1",
                                 params![parent_id, sc.trim()],
                                 |r| r.get(0),
                             )
                             .optional()?;
-                        match existing {
-                            Some(id) => id,
-                            None => {
-                                let id = crate::catalog::new_node_id();
-                                conn.execute(
+                            match existing {
+                                Some(id) => id,
+                                None => {
+                                    let id = crate::catalog::new_node_id();
+                                    conn.execute(
                                     "INSERT INTO class_nodes
                                         (id, parent_id, kind, title, summary, project_path,
                                          ip_name, status, pinned, curated_by, created_at, updated_at)
@@ -280,145 +366,234 @@ impl PolisStore {
                                              'classifier', ?4, ?4)",
                                     params![id, parent_id, sc.trim(), now],
                                 )?;
-                                created_node = true;
-                                journal("create", vec![crate::runs::subject::node(&id)], crate::runs::image::create(&id, Some(parent_id), sc.trim()))?;
-                                id
+                                    created_node = true;
+                                    journal(
+                                        "create",
+                                        vec![crate::runs::subject::node(&id)],
+                                        crate::runs::image::create(&id, Some(parent_id), sc.trim()),
+                                    )?;
+                                    id
+                                }
                             }
                         }
-                    }
-                    _ => parent_id.clone(),
-                };
-                // The dedup index sees retired links too: an identical link a
-                // revert (or a collapse) retired is REVIVED rather than
-                // duplicated, and the journal remembers which run had
-                // retired it so a revert of this filing re-retires it.
-                let prior: Option<(i64, Option<i64>)> = conn
-                    .query_row(
-                        "SELECT id, retired_by_run FROM class_links
-                         WHERE node_id = ?1 AND target_kind = ?2 AND target_id = ?3",
-                        params![target_node, target_kind, target_id],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .optional()?;
-                let link_id = match prior {
-                    Some((_, None)) => None, // live already: nothing to do
-                    Some((id, Some(retired_by))) => {
-                        conn.execute("UPDATE class_links SET retired_by_run = NULL WHERE id = ?1", params![id])?;
-                        journal(
-                            "file",
-                            vec![crate::runs::subject::node(&target_node), crate::runs::subject::link(id)],
-                            crate::runs::image::file(id, &target_node, target_kind, target_id, Some(retired_by)),
-                        )?;
-                        Some(id)
-                    }
-                    None => {
-                        conn.execute(
-                            "INSERT INTO class_links
-                                (node_id, target_kind, target_id, note, status, created_at)
-                             VALUES (?1, ?2, ?3, ?4, 'accepted', ?5)",
-                            params![target_node, target_kind, target_id, note, now],
-                        )?;
-                        let id = conn.last_insert_rowid();
-                        journal(
-                            "file",
-                            vec![crate::runs::subject::node(&target_node), crate::runs::subject::link(id)],
-                            crate::runs::image::file(id, &target_node, target_kind, target_id, None),
-                        )?;
-                        Some(id)
-                    }
-                };
-                if link_id.is_none() && !created_node {
-                    return Ok(StagedOutcome::Skipped);
-                }
-                Ok(StagedOutcome::Link { created_node })
-            }
-            Proposal::Promote { node_id, new_parent_id, rationale } => {
-                if !exists(node_id)? {
-                    return Ok(StagedOutcome::Skipped);
-                }
-                self.insert_structural_locked(
-                    &conn, run_id, "promote", Some(node_id), new_parent_id.as_deref(),
-                    None, None, None, rationale.as_deref(), now,
-                )?;
-                Ok(StagedOutcome::Structural)
-            }
-            Proposal::Split { node_id, into, rationale } => {
-                if !exists(node_id)? {
-                    return Ok(StagedOutcome::Skipped);
-                }
-                let extra = serde_json::to_string(into).unwrap_or_else(|_| "[]".into());
-                self.insert_structural_locked(
-                    &conn, run_id, "split", Some(node_id), None, None, None,
-                    Some(&extra), rationale.as_deref(), now,
-                )?;
-                Ok(StagedOutcome::Structural)
-            }
-            Proposal::Merge { node_ids, title, parent_id, rationale } => {
-                // Every referenced node must exist.
-                for id in node_ids {
-                    if !exists(id)? {
-                        return Ok(StagedOutcome::Skipped);
-                    }
-                }
-                let extra = serde_json::to_string(node_ids).unwrap_or_else(|_| "[]".into());
-                self.insert_structural_locked(
-                    &conn, run_id, "merge", node_ids.first().map(String::as_str),
-                    parent_id.as_deref(), title.as_deref(), None,
-                    Some(&extra), rationale.as_deref(), now,
-                )?;
-                Ok(StagedOutcome::Structural)
-            }
-            Proposal::Collapse { node_id, summary, cite_seqs, rationale } => {
-                if !exists(node_id)? {
-                    return Ok(StagedOutcome::Skipped);
-                }
-                let extra = serde_json::to_string(cite_seqs).unwrap_or_else(|_| "[]".into());
-                self.insert_structural_locked(
-                    &conn, run_id, "collapse", Some(node_id), None, None,
-                    Some(summary), Some(&extra), rationale.as_deref(), now,
-                )?;
-                Ok(StagedOutcome::Structural)
-            }
-            Proposal::Supersede { old_seq, new_seq, rationale } => {
-                // Light stage-time screen so garbage never reaches the review
-                // strip: both seqs must exist and be decision events, old
-                // before new. The full guardrails (head-of-chain redirect,
-                // at-most-once) run at apply.
-                if old_seq >= new_seq {
-                    return Ok(StagedOutcome::Skipped);
-                }
-                for seq in [old_seq, new_seq] {
-                    let kind: Option<String> = conn
+                        _ => parent_id.clone(),
+                    };
+                    // The dedup index sees retired links too: an identical link a
+                    // revert (or a collapse) retired is REVIVED rather than
+                    // duplicated, and the journal remembers which run had
+                    // retired it so a revert of this filing re-retires it.
+                    let prior: Option<(i64, Option<i64>)> = conn
                         .query_row(
-                            "SELECT kind FROM ledger_events WHERE seq = ?1",
-                            params![seq],
-                            |r| r.get(0),
+                            "SELECT id, retired_by_run FROM class_links
+                         WHERE node_id = ?1 AND target_kind = ?2 AND target_id = ?3",
+                            params![target_node, target_kind, target_id],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
                         )
                         .optional()?;
-                    match kind {
-                        Some(k) if polis_core::types::DECISION_KINDS.contains(&k.as_str()) => {}
-                        _ => return Ok(StagedOutcome::Skipped),
+                    let link_id = match prior {
+                        Some((_, None)) => None, // live already: nothing to do
+                        Some((id, Some(retired_by))) => {
+                            conn.execute(
+                                "UPDATE class_links SET retired_by_run = NULL WHERE id = ?1",
+                                params![id],
+                            )?;
+                            journal(
+                                "file",
+                                vec![
+                                    crate::runs::subject::node(&target_node),
+                                    crate::runs::subject::link(id),
+                                ],
+                                crate::runs::image::file(
+                                    id,
+                                    &target_node,
+                                    target_kind,
+                                    target_id,
+                                    Some(retired_by),
+                                ),
+                            )?;
+                            Some(id)
+                        }
+                        None => {
+                            conn.execute(
+                                "INSERT INTO class_links
+                                (node_id, target_kind, target_id, note, status, created_at)
+                             VALUES (?1, ?2, ?3, ?4, 'accepted', ?5)",
+                                params![target_node, target_kind, target_id, note, now],
+                            )?;
+                            let id = conn.last_insert_rowid();
+                            journal(
+                                "file",
+                                vec![
+                                    crate::runs::subject::node(&target_node),
+                                    crate::runs::subject::link(id),
+                                ],
+                                crate::runs::image::file(
+                                    id,
+                                    &target_node,
+                                    target_kind,
+                                    target_id,
+                                    None,
+                                ),
+                            )?;
+                            Some(id)
+                        }
+                    };
+                    if link_id.is_none() && !created_node {
+                        return Ok(StagedOutcome::Skipped);
                     }
+                    Ok(StagedOutcome::Link { created_node })
                 }
-                // Don't re-stage an identical pending supersession.
-                let extra = serde_json::json!({ "old_seq": old_seq, "new_seq": new_seq })
-                    .to_string();
-                let dup: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM class_proposals
+                Proposal::Promote {
+                    node_id,
+                    new_parent_id,
+                    rationale,
+                } => {
+                    if !exists(node_id)? {
+                        return Ok(StagedOutcome::Skipped);
+                    }
+                    self.insert_structural_locked(
+                        conn,
+                        run_id,
+                        "promote",
+                        Some(node_id),
+                        new_parent_id.as_deref(),
+                        None,
+                        None,
+                        None,
+                        rationale.as_deref(),
+                        now,
+                    )?;
+                    Ok(StagedOutcome::Structural)
+                }
+                Proposal::Split {
+                    node_id,
+                    into,
+                    rationale,
+                } => {
+                    if !exists(node_id)? {
+                        return Ok(StagedOutcome::Skipped);
+                    }
+                    let extra = serde_json::to_string(into).unwrap_or_else(|_| "[]".into());
+                    self.insert_structural_locked(
+                        conn,
+                        run_id,
+                        "split",
+                        Some(node_id),
+                        None,
+                        None,
+                        None,
+                        Some(&extra),
+                        rationale.as_deref(),
+                        now,
+                    )?;
+                    Ok(StagedOutcome::Structural)
+                }
+                Proposal::Merge {
+                    node_ids,
+                    title,
+                    parent_id,
+                    rationale,
+                } => {
+                    // Every referenced node must exist.
+                    for id in node_ids {
+                        if !exists(id)? {
+                            return Ok(StagedOutcome::Skipped);
+                        }
+                    }
+                    let extra = serde_json::to_string(node_ids).unwrap_or_else(|_| "[]".into());
+                    self.insert_structural_locked(
+                        conn,
+                        run_id,
+                        "merge",
+                        node_ids.first().map(String::as_str),
+                        parent_id.as_deref(),
+                        title.as_deref(),
+                        None,
+                        Some(&extra),
+                        rationale.as_deref(),
+                        now,
+                    )?;
+                    Ok(StagedOutcome::Structural)
+                }
+                Proposal::Collapse {
+                    node_id,
+                    summary,
+                    cite_seqs,
+                    rationale,
+                } => {
+                    if !exists(node_id)? {
+                        return Ok(StagedOutcome::Skipped);
+                    }
+                    let extra = serde_json::to_string(cite_seqs).unwrap_or_else(|_| "[]".into());
+                    self.insert_structural_locked(
+                        conn,
+                        run_id,
+                        "collapse",
+                        Some(node_id),
+                        None,
+                        None,
+                        Some(summary),
+                        Some(&extra),
+                        rationale.as_deref(),
+                        now,
+                    )?;
+                    Ok(StagedOutcome::Structural)
+                }
+                Proposal::Supersede {
+                    old_seq,
+                    new_seq,
+                    rationale,
+                } => {
+                    // Light stage-time screen so garbage never reaches the review
+                    // strip: both seqs must exist and be decision events, old
+                    // before new. The full guardrails (head-of-chain redirect,
+                    // at-most-once) run at apply.
+                    if old_seq >= new_seq {
+                        return Ok(StagedOutcome::Skipped);
+                    }
+                    for seq in [old_seq, new_seq] {
+                        let kind: Option<String> = conn
+                            .query_row(
+                                "SELECT kind FROM ledger_events WHERE seq = ?1",
+                                params![seq],
+                                |r| r.get(0),
+                            )
+                            .optional()?;
+                        match kind {
+                            Some(k) if polis_core::types::DECISION_KINDS.contains(&k.as_str()) => {}
+                            _ => return Ok(StagedOutcome::Skipped),
+                        }
+                    }
+                    // Don't re-stage an identical pending supersession.
+                    let extra =
+                        serde_json::json!({ "old_seq": old_seq, "new_seq": new_seq }).to_string();
+                    let dup: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM class_proposals
                      WHERE op = 'supersede' AND status = 'proposed' AND extra_json = ?1",
-                    params![extra],
-                    |r| r.get(0),
-                )?;
-                if dup > 0 {
-                    return Ok(StagedOutcome::Skipped);
+                        params![extra],
+                        |r| r.get(0),
+                    )?;
+                    if dup > 0 {
+                        return Ok(StagedOutcome::Skipped);
+                    }
+                    self.insert_structural_locked(
+                        conn,
+                        run_id,
+                        "supersede",
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(&extra),
+                        rationale.as_deref(),
+                        now,
+                    )?;
+                    Ok(StagedOutcome::Structural)
                 }
-                self.insert_structural_locked(
-                    &conn, run_id, "supersede", None, None, None, None,
-                    Some(&extra), rationale.as_deref(), now,
-                )?;
-                Ok(StagedOutcome::Structural)
             }
-        }
+        })()?;
+        tx.commit()?;
+        Ok(outcome)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -542,7 +717,7 @@ impl PolisStore {
     pub fn defer_proposal(&self, id: i64, attempts: i64, next_after_run: i64, reason: &str) -> rusqlite::Result<()> {
         let conn = self.conn();
         conn.execute(
-            "UPDATE class_proposals SET attempts = ?2, next_after_run = ?3, last_reason = ?4 WHERE id = ?1",
+            "UPDATE class_proposals SET attempts = ?2, next_after_run = ?3, last_reason = ?4 WHERE id = ?1 AND status='proposed'",
             params![id, attempts, next_after_run, reason],
         )?;
         Ok(())
@@ -635,317 +810,365 @@ impl PolisStore {
             Some(r) => (r, false),
             None => (self.insert_class_run_with(MODE_CURATION, None, None)?, true),
         };
-        let conn = self.conn();
-        let now = polis_core::ledger::now_millis();
-        let finish_curation = |conn: &rusqlite::Connection, ops: i64| -> rusqlite::Result<()> {
-            if made_run {
-                conn.execute(
+        let mut connection = self.conn();
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let conn = &tx;
+        let outcome = (|| -> rusqlite::Result<Option<polis_core::types::AppliedReorg>> {
+            let live: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM class_proposals WHERE id=?1 AND status='proposed')",
+                [id],
+                |r| r.get(0),
+            )?;
+            if !live || Self::run_source_forgotten_locked(conn, run)? {
+                return Ok(None);
+            }
+            if let Some(source_run) = p.run_id {
+                if Self::run_source_forgotten_locked(conn, source_run)? {
+                    return Ok(None);
+                }
+            }
+            let now = polis_core::ledger::now_millis();
+            let finish_curation = |conn: &rusqlite::Connection, ops: i64| -> rusqlite::Result<()> {
+                if made_run {
+                    conn.execute(
                     "UPDATE class_runs SET status = 'done', finished_at = ?2, outcome = 'done', ops = ?3,
                             summary = ?4 WHERE id = ?1",
                     params![run, polis_core::ledger::now_millis(), ops, format!("applied proposal #{id}")],
                 )?;
-            }
-            Ok(())
-        };
-        let detail: String = match p.op.as_str() {
-            "promote" => {
-                let node = p.node_id.clone().unwrap_or_default();
-                let old_parent: Option<String> = conn
-                    .query_row("SELECT parent_id FROM class_nodes WHERE id = ?1", params![node], |r| r.get(0))
-                    .optional()?
-                    .flatten();
-                // new_parent may be NULL → promote to a root.
-                conn.execute(
-                    "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![node, p.parent_id, now],
-                )?;
-                Self::journal_op_locked(
-                    &conn,
-                    run,
-                    &OpRecord::applied(
-                        "promote",
-                        vec![subject::node(&node)],
-                        image::promote(&node, old_parent.as_deref(), p.parent_id.as_deref()),
-                    ),
-                )?;
-                format!("→ parent {}", p.parent_id.as_deref().unwrap_or("(root)"))
-            }
-            "collapse" => {
-                let node = p.node_id.clone().unwrap_or_default();
-                // Whether the branch may collapse is the adjudicator's call
-                // (B3: `auto_collapse_safe` ∧ items ≥ 5 ∧ cold ∧ no note —
-                // warmth, never a pin); by the time a collapse reaches this
-                // apply it has been admitted.
-                // Parent + title of the cold branch, for the digest placement.
-                let (parent, title): (Option<String>, String) = conn.query_row(
-                    "SELECT parent_id, title FROM class_nodes WHERE id = ?1",
-                    params![node],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
-                let digest_id = crate::catalog::new_node_id();
-                let digest_title = p.title.clone().unwrap_or_else(|| format!("{title} (digest)"));
-                conn.execute(
-                    "INSERT INTO class_nodes
+                }
+                Ok(())
+            };
+            let detail: String = match p.op.as_str() {
+                "promote" => {
+                    let node = p.node_id.clone().unwrap_or_default();
+                    let old_parent: Option<String> = conn
+                        .query_row(
+                            "SELECT parent_id FROM class_nodes WHERE id = ?1",
+                            params![node],
+                            |r| r.get(0),
+                        )
+                        .optional()?
+                        .flatten();
+                    // new_parent may be NULL → promote to a root.
+                    conn.execute(
+                        "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![node, p.parent_id, now],
+                    )?;
+                    Self::journal_op_locked(
+                        conn,
+                        run,
+                        &OpRecord::applied(
+                            "promote",
+                            vec![subject::node(&node)],
+                            image::promote(&node, old_parent.as_deref(), p.parent_id.as_deref()),
+                        ),
+                    )?;
+                    format!("→ parent {}", p.parent_id.as_deref().unwrap_or("(root)"))
+                }
+                "collapse" => {
+                    let node = p.node_id.clone().unwrap_or_default();
+                    // Whether the branch may collapse is the adjudicator's call
+                    // (B3: `auto_collapse_safe` ∧ items ≥ 5 ∧ cold ∧ no note —
+                    // warmth, never a pin); by the time a collapse reaches this
+                    // apply it has been admitted.
+                    // Parent + title of the cold branch, for the digest placement.
+                    let (parent, title): (Option<String>, String) = conn.query_row(
+                        "SELECT parent_id, title FROM class_nodes WHERE id = ?1",
+                        params![node],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    let digest_id = crate::catalog::new_node_id();
+                    let digest_title = p
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| format!("{title} (digest)"));
+                    conn.execute(
+                        "INSERT INTO class_nodes
                         (id, parent_id, kind, title, summary, project_path, ip_name,
                          status, pinned, curated_by, created_at, updated_at)
                      VALUES (?1, ?2, 'digest', ?3, ?4, NULL, NULL, 'accepted', 0,
                              ?5, ?6, ?6)",
-                    params![digest_id, parent, digest_title, p.summary, actor, now],
-                )?;
-                // Citation links to the exact ledger seqs.
-                let mut citations: Vec<i64> = Vec::new();
-                if let Some(extra) = &p.extra_json {
-                    if let Ok(seqs) = serde_json::from_str::<Vec<i64>>(extra) {
-                        for seq in &seqs {
-                            let changed = conn.execute(
-                                "INSERT INTO class_links
+                        params![digest_id, parent, digest_title, p.summary, actor, now],
+                    )?;
+                    // Citation links to the exact ledger seqs.
+                    let mut citations: Vec<i64> = Vec::new();
+                    if let Some(extra) = &p.extra_json {
+                        if let Ok(seqs) = serde_json::from_str::<Vec<i64>>(extra) {
+                            for seq in &seqs {
+                                let changed = conn.execute(
+                                    "INSERT INTO class_links
                                     (node_id, target_kind, target_id, note, status, created_at)
                                  VALUES (?1, 'ledger', ?2, NULL, 'accepted', ?3)
                                  ON CONFLICT(node_id, target_kind, target_id) DO NOTHING",
-                                params![digest_id, seq.to_string(), now],
-                            )?;
-                            if changed == 1 {
-                                citations.push(conn.last_insert_rowid());
+                                    params![digest_id, seq.to_string(), now],
+                                )?;
+                                if changed == 1 {
+                                    citations.push(conn.last_insert_rowid());
+                                }
                             }
                         }
                     }
-                }
-                // Retire the cold subtree (its sourcing now lives in the
-                // digest's citations, one hop away). Marks, not deletes: the
-                // revert clears them.
-                let set = Self::retire_node_subtree(&conn, &node, run, Some(&digest_id))?;
-                let mut subjects: Vec<String> = vec![subject::node(&node), subject::node(&digest_id)];
-                subjects.extend(set.nodes.iter().filter(|n| *n != &node).map(|n| subject::node(n)));
-                Self::journal_op_locked(
-                    &conn,
-                    run,
-                    &OpRecord::applied(
-                        "collapse",
-                        subjects,
-                        serde_json::json!({
-                            "nodeId": node, "digestId": digest_id,
-                            "retiredNodes": set.nodes, "retiredLinks": set.links,
-                            "retiredObservations": set.observations, "citationLinks": citations,
-                        }),
-                    ),
-                )?;
-                format!("digest {digest_id}")
-            }
-            "merge" => {
-                let ids: Vec<String> = p
-                    .extra_json
-                    .as_deref()
-                    .and_then(|e| serde_json::from_str(e).ok())
-                    .unwrap_or_default();
-                if ids.is_empty() {
-                    self.drop_proposal_locked(&conn, id)?;
-                    finish_curation(&conn, 0)?;
-                    return Ok(None);
-                }
-                let target = ids[0].clone();
-                let (old_title, old_parent): (String, Option<String>) = conn.query_row(
-                    "SELECT title, parent_id FROM class_nodes WHERE id = ?1",
-                    params![target],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
-                if let Some(t) = &p.title {
-                    conn.execute(
-                        "UPDATE class_nodes SET title = ?2, updated_at = ?3 WHERE id = ?1",
-                        params![target, t, now],
+                    // Retire the cold subtree (its sourcing now lives in the
+                    // digest's citations, one hop away). Marks, not deletes: the
+                    // revert clears them.
+                    let set = Self::retire_node_subtree(conn, &node, run, Some(&digest_id))?;
+                    let mut subjects: Vec<String> =
+                        vec![subject::node(&node), subject::node(&digest_id)];
+                    subjects.extend(
+                        set.nodes
+                            .iter()
+                            .filter(|n| *n != &node)
+                            .map(|n| subject::node(n)),
+                    );
+                    Self::journal_op_locked(
+                        conn,
+                        run,
+                        &OpRecord::applied(
+                            "collapse",
+                            subjects,
+                            serde_json::json!({
+                                "nodeId": node, "digestId": digest_id,
+                                "retiredNodes": set.nodes, "retiredLinks": set.links,
+                                "retiredObservations": set.observations, "citationLinks": citations,
+                            }),
+                        ),
                     )?;
+                    format!("digest {digest_id}")
                 }
-                if let Some(parent) = &p.parent_id {
-                    conn.execute(
-                        "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE id = ?1",
-                        params![target, parent, now],
+                "merge" => {
+                    let ids: Vec<String> = p
+                        .extra_json
+                        .as_deref()
+                        .and_then(|e| serde_json::from_str(e).ok())
+                        .unwrap_or_default();
+                    if ids.is_empty() {
+                        self.drop_proposal_locked(conn, id)?;
+                        finish_curation(conn, 0)?;
+                        return Ok(None);
+                    }
+                    let target = ids[0].clone();
+                    let (old_title, old_parent): (String, Option<String>) = conn.query_row(
+                        "SELECT title, parent_id FROM class_nodes WHERE id = ?1",
+                        params![target],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
                     )?;
-                }
-                let mut absorbed: Vec<serde_json::Value> = Vec::new();
-                let mut moved: Vec<serde_json::Value> = Vec::new();
-                let mut leftover: Vec<i64> = Vec::new();
-                let mut children: Vec<serde_json::Value> = Vec::new();
-                let mut observations: Vec<i64> = Vec::new();
-                let mut subjects: Vec<String> = vec![subject::node(&target)];
-                for other in ids.iter().skip(1) {
-                    let row: Option<(Option<String>, String)> = conn
+                    if let Some(t) = &p.title {
+                        conn.execute(
+                            "UPDATE class_nodes SET title = ?2, updated_at = ?3 WHERE id = ?1",
+                            params![target, t, now],
+                        )?;
+                    }
+                    if let Some(parent) = &p.parent_id {
+                        conn.execute(
+                            "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE id = ?1",
+                            params![target, parent, now],
+                        )?;
+                    }
+                    let mut absorbed: Vec<serde_json::Value> = Vec::new();
+                    let mut moved: Vec<serde_json::Value> = Vec::new();
+                    let mut leftover: Vec<i64> = Vec::new();
+                    let mut children: Vec<serde_json::Value> = Vec::new();
+                    let mut observations: Vec<i64> = Vec::new();
+                    let mut subjects: Vec<String> = vec![subject::node(&target)];
+                    for other in ids.iter().skip(1) {
+                        let row: Option<(Option<String>, String)> = conn
                         .query_row(
                             "SELECT parent_id, title FROM class_nodes WHERE id = ?1 AND retired_by_run IS NULL",
                             params![other],
                             |r| Ok((r.get(0)?, r.get(1)?)),
                         )
                         .optional()?;
-                    let Some((oparent, otitle)) = row else { continue };
-                    subjects.push(subject::node(other));
-                    // Move links onto the target; a duplicate the target
-                    // already holds stays behind as a MARKED row (it used to
-                    // be silently deleted), so the revert can bring it back.
-                    let mut stmt = conn.prepare("SELECT id FROM class_links WHERE node_id = ?1 AND retired_by_run IS NULL")?;
-                    let links: Vec<i64> = stmt.query_map(params![other], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-                    drop(stmt);
-                    for l in links {
-                        let changed = conn.execute(
-                            "UPDATE OR IGNORE class_links SET node_id = ?2 WHERE id = ?1",
-                            params![l, target],
-                        )?;
-                        if changed == 1 {
-                            moved.push(serde_json::json!({ "linkId": l, "from": other }));
-                        } else {
-                            conn.execute("UPDATE class_links SET retired_by_run = ?2 WHERE id = ?1", params![l, run])?;
-                            leftover.push(l);
+                        let Some((oparent, otitle)) = row else {
+                            continue;
+                        };
+                        subjects.push(subject::node(other));
+                        // Move links onto the target; a duplicate the target
+                        // already holds stays behind as a MARKED row (it used to
+                        // be silently deleted), so the revert can bring it back.
+                        let mut stmt = conn.prepare("SELECT id FROM class_links WHERE node_id = ?1 AND retired_by_run IS NULL")?;
+                        let links: Vec<i64> = stmt
+                            .query_map(params![other], |r| r.get(0))?
+                            .collect::<rusqlite::Result<_>>()?;
+                        drop(stmt);
+                        for l in links {
+                            let changed = conn.execute(
+                                "UPDATE OR IGNORE class_links SET node_id = ?2 WHERE id = ?1",
+                                params![l, target],
+                            )?;
+                            if changed == 1 {
+                                moved.push(serde_json::json!({ "linkId": l, "from": other }));
+                            } else {
+                                conn.execute(
+                                    "UPDATE class_links SET retired_by_run = ?2 WHERE id = ?1",
+                                    params![l, run],
+                                )?;
+                                leftover.push(l);
+                            }
+                            subjects.push(subject::link(l));
                         }
-                        subjects.push(subject::link(l));
-                    }
-                    // Merged-away nodes retire their observations (re-derived;
-                    // ledger `observation` events remain as history).
-                    let mut stmt = conn.prepare("SELECT id FROM class_observations WHERE node_id = ?1 AND retired_by_run IS NULL")?;
-                    let obs: Vec<i64> = stmt.query_map(params![other], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-                    drop(stmt);
-                    for o in &obs {
-                        conn.execute("UPDATE class_observations SET retired_by_run = ?2 WHERE id = ?1", params![o, run])?;
-                    }
-                    observations.extend(obs);
-                    let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE parent_id = ?1 AND retired_by_run IS NULL")?;
-                    let kids: Vec<String> = stmt.query_map(params![other], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-                    drop(stmt);
-                    for k in &kids {
-                        conn.execute(
+                        // Merged-away nodes retire their observations (re-derived;
+                        // ledger `observation` events remain as history).
+                        let mut stmt = conn.prepare("SELECT id FROM class_observations WHERE node_id = ?1 AND retired_by_run IS NULL")?;
+                        let obs: Vec<i64> = stmt
+                            .query_map(params![other], |r| r.get(0))?
+                            .collect::<rusqlite::Result<_>>()?;
+                        drop(stmt);
+                        for o in &obs {
+                            conn.execute(
+                                "UPDATE class_observations SET retired_by_run = ?2 WHERE id = ?1",
+                                params![o, run],
+                            )?;
+                        }
+                        observations.extend(obs);
+                        let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE parent_id = ?1 AND retired_by_run IS NULL")?;
+                        let kids: Vec<String> = stmt
+                            .query_map(params![other], |r| r.get(0))?
+                            .collect::<rusqlite::Result<_>>()?;
+                        drop(stmt);
+                        for k in &kids {
+                            conn.execute(
                             "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE id = ?1",
                             params![k, target, now],
                         )?;
-                        children.push(serde_json::json!({ "id": k, "oldParent": other }));
-                    }
-                    conn.execute(
+                            children.push(serde_json::json!({ "id": k, "oldParent": other }));
+                        }
+                        conn.execute(
                         "UPDATE class_nodes SET retired_by_run = ?2, retired_into = ?3 WHERE id = ?1",
                         params![other, run, target],
                     )?;
-                    absorbed.push(serde_json::json!({ "id": other, "parentId": oparent, "title": otitle }));
+                        absorbed.push(serde_json::json!({ "id": other, "parentId": oparent, "title": otitle }));
+                    }
+                    Self::journal_op_locked(
+                        conn,
+                        run,
+                        &OpRecord::applied(
+                            "merge",
+                            subjects,
+                            serde_json::json!({
+                                "target": target, "oldTitle": old_title, "oldParent": old_parent,
+                                "absorbed": absorbed, "movedLinks": moved, "leftoverLinks": leftover,
+                                "children": children, "observations": observations,
+                            }),
+                        ),
+                    )?;
+                    format!("merged {} into {target}", ids.len())
                 }
-                Self::journal_op_locked(
-                    &conn,
-                    run,
-                    &OpRecord::applied(
-                        "merge",
-                        subjects,
-                        serde_json::json!({
-                            "target": target, "oldTitle": old_title, "oldParent": old_parent,
-                            "absorbed": absorbed, "movedLinks": moved, "leftoverLinks": leftover,
-                            "children": children, "observations": observations,
-                        }),
-                    ),
-                )?;
-                format!("merged {} into {target}", ids.len())
-            }
-            "split" => {
-                let node = p.node_id.clone().unwrap_or_default();
-                let parent: Option<String> = conn.query_row(
-                    "SELECT parent_id FROM class_nodes WHERE id = ?1",
-                    params![node],
-                    |r| r.get(0),
-                )?;
-                let parts: Vec<polis_core::proposal::SplitPart> = p
-                    .extra_json
-                    .as_deref()
-                    .and_then(|e| serde_json::from_str(e).ok())
-                    .unwrap_or_default();
-                let mut made = 0;
-                let mut created: Vec<serde_json::Value> = Vec::new();
-                let mut subjects: Vec<String> = vec![subject::node(&node)];
-                for part in &parts {
-                    let nid = crate::catalog::new_node_id();
-                    conn.execute(
-                        "INSERT INTO class_nodes
+                "split" => {
+                    let node = p.node_id.clone().unwrap_or_default();
+                    let parent: Option<String> = conn.query_row(
+                        "SELECT parent_id FROM class_nodes WHERE id = ?1",
+                        params![node],
+                        |r| r.get(0),
+                    )?;
+                    let parts: Vec<polis_core::proposal::SplitPart> = p
+                        .extra_json
+                        .as_deref()
+                        .and_then(|e| serde_json::from_str(e).ok())
+                        .unwrap_or_default();
+                    let mut made = 0;
+                    let mut created: Vec<serde_json::Value> = Vec::new();
+                    let mut subjects: Vec<String> = vec![subject::node(&node)];
+                    for part in &parts {
+                        let nid = crate::catalog::new_node_id();
+                        conn.execute(
+                            "INSERT INTO class_nodes
                             (id, parent_id, kind, title, summary, project_path, ip_name,
                              status, pinned, curated_by, created_at, updated_at)
                          VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'accepted', 0,
                                  ?4, ?5, ?5)",
-                        params![nid, parent, part.title, actor, now],
-                    )?;
-                    let mut moved_ids: Vec<i64> = Vec::new();
-                    for lid in &part.link_ids {
-                        let changed = conn.execute(
-                            "UPDATE OR IGNORE class_links SET node_id = ?2
-                             WHERE id = ?1 AND node_id = ?3 AND retired_by_run IS NULL",
-                            params![lid, nid, node],
+                            params![nid, parent, part.title, actor, now],
                         )?;
-                        if changed == 1 {
-                            moved_ids.push(*lid);
+                        let mut moved_ids: Vec<i64> = Vec::new();
+                        for lid in &part.link_ids {
+                            let changed = conn.execute(
+                                "UPDATE OR IGNORE class_links SET node_id = ?2
+                             WHERE id = ?1 AND node_id = ?3 AND retired_by_run IS NULL",
+                                params![lid, nid, node],
+                            )?;
+                            if changed == 1 {
+                                moved_ids.push(*lid);
+                            }
+                        }
+                        subjects.push(subject::node(&nid));
+                        created.push(serde_json::json!({ "id": nid, "title": part.title, "linkIds": moved_ids }));
+                        made += 1;
+                    }
+                    Self::journal_op_locked(
+                        conn,
+                        run,
+                        &OpRecord::applied(
+                            "split",
+                            subjects,
+                            serde_json::json!({ "nodeId": node, "parentId": parent, "created": created }),
+                        ),
+                    )?;
+                    format!("split into {made}")
+                }
+                "supersede" => {
+                    let (old_seq, new_seq) = match p
+                        .extra_json
+                        .as_deref()
+                        .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
+                        .and_then(|v| {
+                            Some((v.get("old_seq")?.as_i64()?, v.get("new_seq")?.as_i64()?))
+                        }) {
+                        Some(pair) => pair,
+                        None => {
+                            // Malformed payload — drop, never retry forever.
+                            self.drop_proposal_locked(conn, id)?;
+                            finish_curation(conn, 0)?;
+                            return Ok(None);
+                        }
+                    };
+                    let rationale = p.rationale.clone().unwrap_or_default();
+                    match Self::apply_supersession_locked(
+                        conn, old_seq, new_seq, &rationale, actor,
+                    )? {
+                        polis_core::types::SupersessionOutcome::Applied {
+                            effective_old,
+                            new_seq,
+                            event_seq,
+                        } => {
+                            // The supersede ledger event was appended inside
+                            // apply_supersession_locked — callers must NOT also
+                            // record a taxonomy_reorg for this op.
+                            Self::journal_op_locked(
+                                conn,
+                                run,
+                                &OpRecord::applied(
+                                    "supersede",
+                                    vec![subject::seq(effective_old), subject::seq(new_seq)],
+                                    image::supersede(effective_old, new_seq, event_seq),
+                                )
+                                .with_ledger_seq(Some(event_seq)),
+                            )?;
+                            format!("#{effective_old} → #{new_seq}")
+                        }
+                        polis_core::types::SupersessionOutcome::Rejected(msg) => {
+                            tracing::info!(target: "redline::classmem", old_seq, new_seq, %msg,
+                            "supersede proposal rejected at apply");
+                            self.drop_proposal_locked(conn, id)?;
+                            finish_curation(conn, 0)?;
+                            return Ok(None);
                         }
                     }
-                    subjects.push(subject::node(&nid));
-                    created.push(serde_json::json!({ "id": nid, "title": part.title, "linkIds": moved_ids }));
-                    made += 1;
                 }
-                Self::journal_op_locked(
-                    &conn,
-                    run,
-                    &OpRecord::applied(
-                        "split",
-                        subjects,
-                        serde_json::json!({ "nodeId": node, "parentId": parent, "created": created }),
-                    ),
-                )?;
-                format!("split into {made}")
-            }
-            "supersede" => {
-                let (old_seq, new_seq) = match p
-                    .extra_json
-                    .as_deref()
-                    .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
-                    .and_then(|v| {
-                        Some((v.get("old_seq")?.as_i64()?, v.get("new_seq")?.as_i64()?))
-                    }) {
-                    Some(pair) => pair,
-                    None => {
-                        // Malformed payload — drop, never retry forever.
-                        self.drop_proposal_locked(&conn, id)?;
-                        finish_curation(&conn, 0)?;
-                        return Ok(None);
-                    }
-                };
-                let rationale = p.rationale.clone().unwrap_or_default();
-                match Self::apply_supersession_locked(&conn, old_seq, new_seq, &rationale, actor)? {
-                    polis_core::types::SupersessionOutcome::Applied {
-                        effective_old,
-                        new_seq,
-                        event_seq,
-                    } => {
-                        // The supersede ledger event was appended inside
-                        // apply_supersession_locked — callers must NOT also
-                        // record a taxonomy_reorg for this op.
-                        Self::journal_op_locked(
-                            &conn,
-                            run,
-                            &OpRecord::applied(
-                                "supersede",
-                                vec![subject::seq(effective_old), subject::seq(new_seq)],
-                                image::supersede(effective_old, new_seq, event_seq),
-                            )
-                            .with_ledger_seq(Some(event_seq)),
-                        )?;
-                        format!("#{effective_old} → #{new_seq}")
-                    }
-                    polis_core::types::SupersessionOutcome::Rejected(msg) => {
-                        tracing::info!(target: "redline::classmem", old_seq, new_seq, %msg,
-                            "supersede proposal rejected at apply");
-                        self.drop_proposal_locked(&conn, id)?;
-                        finish_curation(&conn, 0)?;
-                        return Ok(None);
-                    }
+                _ => {
+                    self.drop_proposal_locked(conn, id)?;
+                    finish_curation(conn, 0)?;
+                    return Ok(None);
                 }
-            }
-            _ => {
-                self.drop_proposal_locked(&conn, id)?;
-                finish_curation(&conn, 0)?;
-                return Ok(None);
-            }
-        };
-        self.drop_proposal_locked(&conn, id)?;
-        finish_curation(&conn, 1)?;
-        Ok(Some(polis_core::types::AppliedReorg {
-            op: p.op,
-            node_id: p.node_id.unwrap_or_default(),
-            detail,
-        }))
+            };
+            self.drop_proposal_locked(conn, id)?;
+            finish_curation(conn, 1)?;
+            Ok(Some(polis_core::types::AppliedReorg {
+                op: p.op,
+                node_id: p.node_id.unwrap_or_default(),
+                detail,
+            }))
+        })()?;
+        tx.commit()?;
+        Ok(outcome)
     }
 
     pub fn drop_proposal_locked(&self, conn: &rusqlite::Connection, id: i64) -> rusqlite::Result<()> {
@@ -1153,8 +1376,10 @@ impl PolisStore {
     pub fn finish_class_run_with(&self, id: i64, f: &polis_core::types::ClassRunFinish) -> rusqlite::Result<()> {
         let conn = self.conn();
         conn.execute(
-            "UPDATE class_runs SET status = ?2, finished_at = ?3, claude_session_id = ?4, summary = ?5,
-                    duration_ms = ?6, items = ?7, ops = ?8, model = ?9, outcome = ?10, error = ?11,
+            "UPDATE class_runs SET status = ?2, finished_at = ?3, claude_session_id = ?4,
+                    summary = CASE WHEN source_forgotten_at IS NULL THEN ?5 ELSE '[forgotten source]' END,
+                    duration_ms = ?6, items = ?7, ops = ?8, model = ?9, outcome = ?10,
+                    error = CASE WHEN source_forgotten_at IS NULL THEN ?11 ELSE NULL END,
                     mode = COALESCE(?12, mode), llm_calls = ?13, prompt_bytes = ?14,
                     tokens_in = ?15, tokens_out = ?16, wall_ms = COALESCE(?17, ?6),
                     canary_json = COALESCE(?18, canary_json)
@@ -1256,7 +1481,13 @@ impl PolisStore {
         since_seq: i64,
         limit: i64,
     ) -> rusqlite::Result<Vec<polis_core::types::LakeItem>> {
+        self.list_lake_items_since_scoped(since_seq, limit, &Default::default())
+    }
+
+    pub fn list_lake_items_since_scoped(&self, since_seq: i64, limit: i64, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Vec<polis_core::types::LakeItem>> {
         let conn = self.conn();
+        let scoped = Self::ledger_scope_clause_locked(&conn, "le", scope)?.numbered(3);
+        let role_guard = if scope.roles.iter().any(|r| r == "agent") { "" } else { " AND COALESCE(p.role, 'user') <> 'agent'" };
         // Surface browse-event content too (they carry no prompt row): a
         // `browse_event` ledger row joins `browse_events` by ref_id, so the
         // classifier sees the page text (as `body`) under a synthetic
@@ -1287,7 +1518,7 @@ impl PolisStore {
         // EMPTY body — 224 rows that read as content-free rather than as
         // summarized. `NULLIF(p.body, '')` is the fix, and the same expression
         // is `PROMPT_TEXT` everywhere else it's needed.
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
                     COALESCE(p.surface, CASE WHEN le.ref_kind = 'browse_event'
                                              THEN 'browse_event' END,
@@ -1307,11 +1538,13 @@ impl PolisStore {
              WHERE le.seq > ?1
                AND le.kind NOT IN ('router_verdict', 'moot_turn',
                                    'work_file', 'work_claim', 'work_close')
-               AND COALESCE(p.role, 'user') <> 'agent'
+               {}{}
              ORDER BY le.seq ASC
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![since_seq, limit], |r| {
+             LIMIT ?2", role_guard, scoped.sql
+        ))?;
+        let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&since_seq, &limit];
+        binds.extend(scoped.binds.iter().map(|v| v.as_ref()));
+        let rows = stmt.query_map(binds.as_slice(), |r| {
             let body: Option<String> = r.get(11)?;
             Ok(polis_core::types::LakeItem {
                 seq: r.get(0)?,

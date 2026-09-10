@@ -1,0 +1,241 @@
+{
+  "schema": "polis.local-filing/1",
+  "measuredAt": "2026-09-10T05:44:35Z",
+  "binarySha256": "d057661a27e385c02170fde64716f47595ebf4918ac0a1b99d04e71ed2d7e3a6",
+  "binaryProfile": "release; features cli; schema 9",
+  "platform": "macOS-14.3-arm64-arm-64bit-Mach-O",
+  "sourcesPerSample": 400,
+  "latency": {
+    "n": 10,
+    "p50Ms": 41.65475000627339,
+    "p95Ms": 46.23058391734958,
+    "maxMs": 46.23058391734958,
+    "samplesMs": [
+      42.09095798432827,
+      41.22154111973941,
+      46.23058391734958,
+      42.63037513010204,
+      40.82162515260279,
+      40.38629215210676,
+      38.61145908012986,
+      42.37874993123114,
+      42.83466702327132,
+      41.65475000627339
+    ]
+  },
+  "p50BelowOneSecond": true,
+  "samples": [
+    {
+      "wallMs": 42.09095798432827,
+      "linkedSources": 400,
+      "outcome": {
+        "ran": true,
+        "autoApplied": true,
+        "summary": "400 item(s), 400 to ~inbox, 400 without a vector",
+        "seqFrom": 1,
+        "seqTo": 401,
+        "staged": {
+          "createdNodes": 0,
+          "stagedLinks": 400,
+          "structural": 0,
+          "skipped": 0
+        }
+      },
+      "llmUsageRows": 0,
+      "llmCalls": 0,
+      "embeddingRows": 0,
+      "schemaVersion": "9"
+    },
+    {
+      "wallMs": 41.22154111973941,
+      "linkedSources": 400,
+      "outcome": {
+        "ran": true,
+        "autoApplied": true,
+        "summary": "400 item(s), 400 to ~inbox, 400 without a vector",
+        "seqFrom": 1,
+        "seqTo": 401,
+        "staged": {
+          "createdNodes": 0,
+          "stagedLinks": 400,
+          "structural": 0,
+          "skipped": 0
+        }
+      },
+      "llmUsageRows": 0,
+      "llmCalls": 0,
+      "embeddingRows": 0,
+      "schemaVersion": "9"
+    },
+    {
+      "wallMs": 46.23058391734958,
+      "linkedSources": 400,
+      "outcome": {
+        "ran": true,
+        "autoApplied": true,
+        "summary": "400 item(s), 400 to ~inbox, 400 without a vector",
+        "seqFrom": 1,
+        "seqTo": 401,
+        "staged": {
+          "createdNodes": 0,
+          "stagedLinks": 400,
+          "structural": 0,
+          "skipped": 0
+        }
+      },
+      "llmUsageRows": 0,
+      "llmCalls": 0,
+      "embeddingRows": 0,
+      "schemaVersion": "9"
+    },
+    {
+      "wallMs": 42.63037513010204,
+      "linkedSources": 400,
+      "outcome": {
+        "ran": true,
+        "autoApplied": true,
+        "summary": "400 item(s), 400 to ~inbox, 400 without a vector",
+        "seqFrom": 1,
+        "seqTo": 401,
+        "staged": {
+          "createdNodes": 0,
+          "stagedLinks": 400,
+          "structural": 0,
+          "skipped": 0
+        }
+      },
+      "llmUsageRows": 0,
+      "llmCalls": 0,
+      "embeddingRows": 0,
+      "schemaVersion": "9"
+    },
+    {
+      "wallMs": 40.82162515260279,
+      "linkedSources": 400,
+      "outcome": {
+        "ran": true,
+        "autoApplied": true,
+        "summary": "400 item(s), 400 to ~inbox, 400 without a vector",
+        "seqFrom": 1,
+        "seqTo": 401,
+        "staged": {
+          "createdNodes": 0,
+          "stagedLinks": 400,
+          "structural": 0,
+          "skipped": 0
+        }
+      },
+      "llmUsageRows": 0,
+      "llmCalls": 0,
+      "embeddingRows": 0,
+      "schemaVersion": "9"
+    },
+    {
+      "wallMs": 40.38629215210676,
+      "linkedSources": 400,
+      "outcome": {
+        "ran": true,
+        "autoApplied": true,
+        "summary": "400 item(s), 400 to ~inbox, 400 without a vector",
+        "seqFrom": 1,
+        "seqTo": 401,
+        "staged": {
+          "createdNodes": 0,
+          "stagedLinks": 400,
+          "structural": 0,
+          "skipped": 0
+        }
+      },
+      "llmUsageRows": 0,
+      "llmCalls": 0,
+      "embeddingRows": 0,
+      "schemaVersion": "9"
+    },
+    {
+      "wallMs": 38.61145908012986,
+      "linkedSources": 400,
+      "outcome": {
+        "ran": true,
+        "autoApplied": true,
+        "summary": "400 item(s), 400 to ~inbox, 400 without a vector",
+        "seqFrom": 1,
+        "seqTo": 401,
+        "staged": {
+          "createdNodes": 0,
+          "stagedLinks": 400,
+          "structural": 0,
+          "skipped": 0
+        }
+      },
+      "llmUsageRows": 0,
+      "llmCalls": 0,
+      "embeddingRows": 0,
+      "schemaVersion": "9"
+    },
+    {
+      "wallMs": 42.37874993123114,
+      "linkedSources": 400,
+      "outcome": {
+        "ran": true,
+        "autoApplied": true,
+        "summary": "400 item(s), 400 to ~inbox, 400 without a vector",
+        "seqFrom": 1,
+        "seqTo": 401,
+        "staged": {
+          "createdNodes": 0,
+          "stagedLinks": 400,
+          "structural": 0,
+          "skipped": 0
+        }
+      },
+      "llmUsageRows": 0,
+      "llmCalls": 0,
+      "embeddingRows": 0,
+      "schemaVersion": "9"
+    },
+    {
+      "wallMs": 42.83466702327132,
+      "linkedSources": 400,
+      "outcome": {
+        "ran": true,
+        "autoApplied": true,
+        "summary": "400 item(s), 400 to ~inbox, 400 without a vector",
+        "seqFrom": 1,
+        "seqTo": 401,
+        "staged": {
+          "createdNodes": 0,
+          "stagedLinks": 400,
+          "structural": 0,
+          "skipped": 0
+        }
+      },
+      "llmUsageRows": 0,
+      "llmCalls": 0,
+      "embeddingRows": 0,
+      "schemaVersion": "9"
+    },
+    {
+      "wallMs": 41.65475000627339,
+      "linkedSources": 400,
+      "outcome": {
+        "ran": true,
+        "autoApplied": true,
+        "summary": "400 item(s), 400 to ~inbox, 400 without a vector",
+        "seqFrom": 1,
+        "seqTo": 401,
+        "staged": {
+          "createdNodes": 0,
+          "stagedLinks": 400,
+          "structural": 0,
+          "skipped": 0
+        }
+      },
+      "llmUsageRows": 0,
+      "llmCalls": 0,
+      "embeddingRows": 0,
+      "schemaVersion": "9"
+    }
+  ],
+  "method": "Each sample initializes a fresh home and processes its identity-only bookkeeping event, captures 200 user and 200 assistant sources through MCP, then times one CLI organize call including process startup/store open and verifies all source links. Capture/setup and the identity-only pass are excluded.",
+  "limits": "No model or embeddings; measures deterministic inbox filing, not semantic classification precision or model-backed filing. Single machine; filesystem cache is not evicted."
+}

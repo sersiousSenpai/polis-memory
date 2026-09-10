@@ -29,8 +29,12 @@ from bench.mem0.run import StubMemory  # noqa: E402
 
 class GraphitiBackend:
     def __init__(self, args):
+        if args.processing_profile != "immediate":
+            raise ValueError("this backend supports the immediate processing profile only")
         self.stub = args.stub or args.provider == "stub"
         self.max_tokens = args.max_context_tokens
+        if not self.stub:
+            raise RuntimeError("Graphiti scored adapter unavailable: extraction/embedder usage and empty-group verification are not yet instrumented")
         self.calls = 0
         self.tokens = 0
         if self.stub:
@@ -49,7 +53,7 @@ class GraphitiBackend:
     def ingest(self, question, items) -> IngestStats:
         t0 = time.perf_counter()
         if self.stub:
-            self.mem.add([{"role": it["role"], "content": it["body"]} for it in items], user_id=question["question_id"])
+            self.mem.add([{"role": it["role"], "content": f"[session={it.get('session')} date={it.get('sourceDate')} role={it['role']}] {it['body']}"} for it in items], user_id=question["namespace"])
         else:
             from graphiti_core.nodes import EpisodeType  # type: ignore
 
@@ -57,19 +61,17 @@ class GraphitiBackend:
                 for i, it in enumerate(items):
                     ts = datetime.fromtimestamp((it.get("ts") or 0) / 1000.0, tz=timezone.utc)
                     await self.g.add_episode(name=f"{it.get('session')}-{i}", episode_body=it["body"], source=EpisodeType.message,
-                                             source_description=it["role"], reference_time=ts, group_id=question["question_id"])
-                    self.calls += 2  # extraction + dedup passes per episode (documented estimate)
-                    self.tokens += approx_tokens(it["body"]) * 2 + 800
+                                             source_description=it["role"], reference_time=ts, group_id=question["namespace"])
             asyncio.run(go())
-        return IngestStats(wall_ms=(time.perf_counter() - t0) * 1000.0, llm_calls=self.calls, llm_tokens=self.tokens)
+        return IngestStats(wall_ms=(time.perf_counter() - t0) * 1000.0, llm_calls=self.calls, llm_tokens=self.tokens, readiness={"verified": True, "emptyStart": True, "backend": "lexical stub; not Graphiti"})
 
     def context(self, question):
         t0 = time.perf_counter()
         if self.stub:
-            res = self.mem.search(question["question"], user_id=question["question_id"], limit=20)
+            res = self.mem.search(question["question"], user_id=question["namespace"], limit=20)
             rows = [r["memory"] for r in res["results"]]
         else:
-            edges = asyncio.run(self.g.search(question["question"], group_ids=[question["question_id"]]))
+            edges = asyncio.run(self.g.search(question["question"], group_ids=[question["namespace"]]))
             rows = [getattr(e, "fact", str(e)) for e in edges]
         text, used = [], 0
         for r in rows:

@@ -1,20 +1,22 @@
 # Polis Memory
 
-A local-first memory for coding agents: a **hash-chained lake** of every prompt
-and decision, an **agent-organized class catalog** over it, and **batched
-retrieval** (the answer pack) across both — as a set of Rust crates a host
-embeds, and, ahead, as a `polis` daemon any harness reaches over HTTP and MCP.
+A local memory system for coding agents: captured evidence in a hash-chained
+SQLite ledger, an autonomous class catalog, and bounded retrieval with citations.
+Use the Rust crates in a host, or run the `polis` daemon over HTTP and MCP.
+Capture makes **zero LLM calls**. Optional background model work is accounted for
+separately.
 
-Polis Memory grew inside [Redline](https://github.com/sersiousSenpai/redline)
-and was extracted into this repository on 2026-09-07 with its history. Redline
-now links these crates like any other consumer; nothing here depends on
-Redline.
+Polis grew inside [Redline](https://github.com/sersiousSenpai/redline) and was
+extracted on 2026-09-07. Nothing here depends on Redline or a Docker service.
 
-**Status: pre-release (0.1.0, unpublished).** Program A (the extraction) is
-complete. Ahead: autonomy (the gardener adjudicates every op itself, with
-`revert_run` and a canary), speed, MCP + identity + sharing, benchmarks,
-distribution (a `polis` binary via cargo-dist, `cargo install`, thin Python
-and TypeScript clients).
+**Status:** GitHub v0.1.0 binaries are released. This checkout adds scope and
+provenance fixes, temporal claims, recoverable jobs, persistent retrieval traces,
+and source Python/TypeScript clients; these changes are not yet released.
+External scored benchmarks remain on hold. Local regression results establish
+specific correctness improvements, not best-in-class answer quality.
+See the [build report](docs/memory-quality-build.md),
+[measurement configuration](docs/bench.md), and
+[verified distribution status](docs/distribution.md).
 
 ## Crates
 
@@ -28,7 +30,7 @@ core → store → embed → llm → server → mcp → memory.
 | [`polis-embed`](crates/polis-embed) | The `Embedder` trait, the on-device Apple backends (feature `apple`, macOS only), the vector cache, brute-force cosine search over the store's int8 index, and the bounded index tick — all taking an explicit embedder (provider SELECTION stays with the host). Portable backends (`model2vec`, `fastembed`, `openai`) come with Program C | `polis-core`, `polis-store`, `tracing`; `apple` → the objc2 family |
 | [`polis-llm`](crates/polis-llm) | The `Agent` trait the gardener speaks, with `Usage` / `UsageSink`; backends `ClaudeCli` (stream-json) and `CodexCli` (`exec --json`) by default, `AnthropicApi` and `OpenAiCompat` behind features; the `StreamLine` classifier | `polis-core`, `async-trait`, `serde`, `tokio` (process); `anthropic` / `openai-compat` → `reqwest` |
 | [`polis-server`](crates/polis-server) | `router<S>()` over `Arc<dyn MemoryApi>` (handlers take `State<PolisState>`; a host provides `FromRef`), the `ROUTES` table (24 rows, `Open \| HookContract \| Write(scope)` — the source of the API doc and the generated clients), the capture route + `IngestObserver` seams, `CaptureHookSpec` (the hook installer); feature `standalone` = bind + token guard | `polis-core`, `axum` 0.7, `serde`, `tokio` (`rt`); `standalone` → tokio `net` |
-| [`polis-mcp`](crates/polis-mcp) | The read tools over the Model Context Protocol (`memory_search` first), the compat aliases, resources and the grounding prompt; stdio and a streamable-HTTP tower service a host nests at `/mcp`; feature `remote` = `RemoteApi`, the `MemoryApi` as an HTTP client over a running daemon | `polis-core`, `rmcp`, `serde`, `tokio` (`rt`); `remote` → `ureq` (plain HTTP) |
+| [`polis-mcp`](crates/polis-mcp) | Read and write tools over the Model Context Protocol (`memory_search` first), the compat aliases, resources and the grounding prompt; stdio and a streamable-HTTP tower service a host nests at `/mcp`; feature `remote` = `RemoteApi`, the `MemoryApi` as an HTTP client over a running daemon | `polis-core`, `rmcp`, `serde`, `tokio` (`rt`); `remote` → `ureq` (plain HTTP) |
 | [`polis-memory`](crates/polis-memory) | THE crate an integrator adds: `Polis` (a borrowed view) + `PolisHandle` (owned; implements `MemoryApi`), retrieval (the answer pack, timeline, map, tree / node views), the organizer and the gardener's `step` (organize, compaction, observations, the semantic index, the backup cadence), `backup` (snapshots, verify, restore), bundle export, the markdown mirror, the `classmemory` skill text (shipped in the crate; a template by address), and — feature `cli` — the `polis` binary | re-exports the four crates above; `apple` → `polis-embed/apple`; `cli` → clap + polis-server `standalone` + polis-mcp `remote` |
 
 ## Using it from a host
@@ -65,19 +67,17 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sersiousSenpai/polis-me
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/sersiousSenpai/polis-memory/releases/latest/download/polis-memory-installer.ps1 | iex"
 ```
 
-```sh
-brew install sersiousSenpai/tap/polis-memory     # the Homebrew tap
-cargo install polis-memory --features cli        # from crates.io, or:
-cargo binstall polis-memory                      # the prebuilt binary through cargo
-```
-
-Until the first tagged release and the crates.io publish (both are pending
-outward steps — `docs/distribution.md` says which), the source path works
-today:
+The public Homebrew tap and crates.io publication are not established; the
+Python and npm clients are available from source. To build this checkout:
 
 ```sh
-cargo install --git https://github.com/sersiousSenpai/polis-memory polis-memory --features cli
+cargo install --path crates/polis-memory --features cli --locked
+python3 -m pip install ./sdk/python
+npm install ./sdk/typescript
 ```
+
+The GitHub installer installs the published release, which predates the changes
+described in the build report.
 
 Then:
 
@@ -86,13 +86,15 @@ polis init                              # ~/.polis: the store, a private token, 
 polis hook install                      # capture every prompt you submit in Claude Code
 polis mcp install --client claude       # answer questions about them (docs/mcp.md lists every client)
 polis doctor                            # the install, the chain, the backups, the clients
+polis inspect --html inspector.html      # local retrieval traces and background diagnostics
 ```
 
 `polis serve` runs the daemon (HTTP routes, MCP at `/mcp`, the gardener,
 rotating verified backups); without it every command opens the store file
 directly and the capture hook writes locally. `polis restore` swaps in the
 newest verifying snapshot when `doctor` reports the chain red or the file
-unsound. No model, key or network is needed for any of this. The org node
+unsound. Set `POLIS_NO_NETWORK=1` for offline initialization. Capture and lexical retrieval
+need no model or provider key; semantic search needs local embedding assets. The org node
 (`polis serve --org`) ships as a container image for operators only —
 `docs/distribution.md`.
 
@@ -100,7 +102,10 @@ unsound. No model, key or network is needed for any of this. The org node
 
 `claude mcp add polis -- polis mcp` (stdio) or, against a running daemon,
 `claude mcp add --transport http polis http://127.0.0.1:7677/mcp`. Start with
-`memory_search`; every hit carries a `#seq`. The tool table, the compat
+`memory_search`; local evidence uses `#seq`, and shared evidence uses `chain:seq`.
+Search supports scope, speaker roles, source time, claim valid/known time,
+candidate limits, context budgets, exact evidence lookup, and trace correlation.
+Both reads and writes require the daemon bearer token. The tool table, the compat
 aliases, the resources and the grounding prompt are in
 [docs/mcp.md](docs/mcp.md).
 

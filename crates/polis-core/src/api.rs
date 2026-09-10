@@ -14,10 +14,8 @@
 //! `spawn_blocking`; a sync trait keeps the surface object-safe with no
 //! `async_trait` machinery and no runtime dependency in this crate.
 //!
-//! Defined in Session A1; bound by the `Polis` handle in A5 and served in A6
-//! (`docs/polis-extraction.md`). Every read takes a [`Scope`], which is empty
-//! until identity lands (E2) — the shape is fixed now so no transport has to
-//! change its signature then.
+//! Every read takes a [`Scope`]. Identity, project, role and time eligibility
+//! are applied before retrieval limits across the local and remote surfaces.
 
 use serde::{Deserialize, Serialize};
 
@@ -41,8 +39,8 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Who is asking, and over whose memory. Every field is optional: an empty
 /// scope is "this principal, everything local", which is all a solo install
-/// ever has. `include_shared` widens a read to imported foreign chains once
-/// sharing lands (E3); it is never the default.
+/// ever has. `include_shared` widens a read to imported foreign chains;
+/// it is never the default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Scope {
@@ -92,6 +90,29 @@ pub struct SearchRequest {
     pub node: Option<String>,
     pub limit: Option<i64>,
     pub scope: Scope,
+    pub filter: EvidenceFilter,
+    /// Candidate pool per arm, capped at 200 independently of response size.
+    pub candidate_limit: Option<usize>,
+    /// Conservative token ceiling (one UTF-8 byte per token).
+    pub max_tokens: Option<usize>,
+    pub cursor: Option<String>,
+    pub trace_id: Option<String>,
+}
+
+/// Evidence eligibility, applied before candidate ranking. Empty roles include
+/// user and assistant evidence; system/agent prefaces require an explicit role.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EvidenceFilter {
+    pub roles: Vec<String>,
+    /// Inclusive source timestamp in milliseconds.
+    pub after: Option<i64>,
+    /// Exclusive source timestamp in milliseconds.
+    pub before: Option<i64>,
+    /// Claim valid time, independent of source timestamps.
+    pub valid_at: Option<i64>,
+    /// Claim recorded time, independent of valid time.
+    pub known_at: Option<i64>,
 }
 
 /// `memory_grep` / `GET /v1/memory/grep`.
@@ -162,13 +183,13 @@ pub struct PromptsRequest {
 // ---------------------------------------------------------------------------
 
 /// `memory_remember`: one memory the user (or, with `as_user = false`, an
-/// agent on their behalf) wants kept — a standalone note, or a prompt row.
+/// agent on their behalf) wants kept, with user or assistant attribution.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RememberRequest {
     pub text: String,
-    /// Record as the user's own words (`role = user`). `false` files it as
-    /// agent text, which the lexical index and the classifier treat as such.
+    /// Record as the user's own words (`role = user`). `false` records
+    /// assistant evidence with its speaker attribution preserved.
     pub as_user: bool,
     pub project: Option<String>,
     pub scope: Scope,
@@ -181,7 +202,7 @@ pub struct RememberRequest {
 pub struct IngestItem {
     pub body: String,
     pub ts: Option<i64>,
-    /// `user` | `agent` | `system`; defaults to `user`.
+    /// `user` | `assistant` | `agent` | `system`; defaults to `user`.
     pub role: Option<String>,
     pub session: Option<String>,
     pub run: Option<String>,
@@ -189,7 +210,7 @@ pub struct IngestItem {
 }
 
 /// `memory_ingest` / `POST /v1/memory/events`: idempotent on
-/// `(body_hash, run)` — replaying a batch records nothing twice.
+/// body hash within the same run, role, project, principal, device, agent and organization.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct IngestRequest {
@@ -223,7 +244,8 @@ pub struct AnnotateRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ForgetRequest {
-    /// `prompt | browse_event | note | claim`.
+    /// `ledger_event` resolves a citation to its captured source. `prompt` and
+    /// `browse_event`, `note` and `user_note` accept source row IDs.
     pub target_kind: String,
     pub target_id: String,
     pub confirm: String,
@@ -281,6 +303,9 @@ pub struct ContextRequest {
     pub node: Option<String>,
     pub max_tokens: Option<usize>,
     pub scope: Scope,
+    pub filter: EvidenceFilter,
+    pub max_bytes: Option<usize>,
+    pub trace_id: Option<String>,
 }
 
 /// The rendered block, or `None` when the record has nothing on the question
@@ -292,6 +317,12 @@ pub struct ContextBlock {
     pub text: Option<String>,
     /// The terms the plan actually searched for — what the block is about.
     pub terms: Vec<String>,
+    #[serde(default)]
+    pub coverage: Vec<crate::pack::ArmCoverage>,
+    #[serde(default)]
+    pub truncated: Vec<String>,
+    #[serde(default)]
+    pub retrieval: crate::pack::RetrievalReport,
 }
 
 /// One turn of a host-side conversation thread (`/v1/memory/threads` today,
@@ -403,6 +434,21 @@ pub struct HealthReport {
 /// the chain. Object-safe (`Arc<dyn MemoryApi>` is how the server and the MCP
 /// server hold it).
 pub trait MemoryApi: Send + Sync {
+    fn decide(&self, _req: &crate::diagnostics::DecisionRequest) -> Result<WriteReceipt, MemoryError> {
+        Err(MemoryError::Unavailable("cited decisions are not implemented by this host".into()))
+    }
+    fn write_claim(&self, _req: &crate::claims::ClaimWrite) -> Result<crate::claims::Claim, MemoryError> {
+        Err(MemoryError::Unavailable("temporal claims are not implemented by this host".into()))
+    }
+    fn claims(&self, _req: &crate::claims::ClaimQuery) -> Result<Vec<crate::claims::Claim>, MemoryError> {
+        Err(MemoryError::Unavailable("temporal claims are not implemented by this host".into()))
+    }
+    fn evidence(&self, _req: &crate::diagnostics::EvidenceRequest) -> Result<crate::diagnostics::EvidenceRecord, MemoryError> {
+        Err(MemoryError::Unavailable("exact evidence lookup is not implemented by this host".into()))
+    }
+    fn traces(&self, _req: &crate::diagnostics::TraceRequest) -> Result<Vec<crate::diagnostics::RetrievalTrace>, MemoryError> {
+        Err(MemoryError::Unavailable("local traces are not implemented by this host".into()))
+    }
     // --- reads ------------------------------------------------------------
 
     /// The answer pack: one batched read (node + links + notes + lexical +

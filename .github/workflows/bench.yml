@@ -1,100 +1,34 @@
-# bench — the nightly LongMemEval-100 job (plan §6.2). Runs ONLY when the
-# repository carries a model key (`LONGMEMEVAL_API_KEY`; an Anthropic key by
-# default, `LONGMEMEVAL_PROVIDER=openai` for an OpenAI-compatible one); with
-# no key the job records a skip and exits green. The runner enforces the
-# spend cap itself (`--budget-tokens`): past it the table is written PARTIAL
-# and marked so. Results are uploaded as an artifact and never committed by
-# the job — a number enters docs/bench.md by a human, beside the kill
-# criterion it is scored against. The full 500 is a manual dispatch input.
+# Paid external comparisons are on HOLD (bench/hold.json). Keys never activate a run.
 name: bench
-
 on:
-  schedule:
-    - cron: "17 3 * * *"   # nightly, 03:17 UTC
+  pull_request:
+    paths: ['bench/**', 'sdk/**', 'crates/polis-core/src/**', 'crates/polis-server/src/api-v1.schema.json', '.github/workflows/bench.yml']
   workflow_dispatch:
-    inputs:
-      subset:
-        description: "questions (100 nightly, 500 per release)"
-        default: "100"
-      configs:
-        description: "space-separated: polis-default polis-full mem0 graphiti"
-        default: "polis-default polis-full"
-      budget_tokens:
-        description: "spend cap in tokens for the whole run"
-        default: "6000000"
-
 permissions:
   contents: read
-
-env:
-  LONGMEMEVAL_API_KEY: ${{ secrets.LONGMEMEVAL_API_KEY }}
-  LONGMEMEVAL_PROVIDER: ${{ vars.LONGMEMEVAL_PROVIDER || 'anthropic' }}
-  LONGMEMEVAL_ANSWER_MODEL: ${{ vars.LONGMEMEVAL_ANSWER_MODEL || 'claude-sonnet-5' }}
-  LONGMEMEVAL_JUDGE_MODEL: ${{ vars.LONGMEMEVAL_JUDGE_MODEL || 'claude-sonnet-5' }}
-
 jobs:
-  longmemeval:
-    name: LongMemEval (${{ github.event.inputs.subset || '100' }})
+  keyless:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 10
     steps:
-      - name: skip without a key
-        if: env.LONGMEMEVAL_API_KEY == ''
-        run: echo "LONGMEMEVAL_API_KEY is not set — nothing to spend, nothing to score; skipping." && echo "skipped=1" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
-        if: env.skipped != '1'
-      - uses: dtolnay/rust-toolchain@stable
-        if: env.skipped != '1'
-      - uses: Swatinem/rust-cache@v2
-        if: env.skipped != '1'
       - uses: actions/setup-python@v5
-        if: env.skipped != '1'
         with:
-          python-version: "3.12"
-      - name: build the polis binary
-        if: env.skipped != '1'
-        run: cargo build --release -p polis-memory --features cli --locked
-      - name: fetch LongMemEval-S
-        if: env.skipped != '1'
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python3 sdk/schema/generate.py --check
+      - run: python3 sdk/schema/types.py --check
+      - run: python3 -m unittest discover -s bench/tests -v
+      - run: python3 -m unittest discover -s sdk/python/tests -v
+      - run: node --test sdk/typescript/test/*.test.mjs
+      - name: Keyless pipeline artifacts
         run: |
-          pip install "huggingface_hub==0.36.0"
-          python3 bench/longmemeval/fetch.py --out "$RUNNER_TEMP/longmemeval_s.json"
-      - name: run the configured systems under one spend cap
-        if: env.skipped != '1'
-        env:
-          POLIS_BIN: target/release/polis
-          ANTHROPIC_API_KEY: ${{ env.LONGMEMEVAL_PROVIDER == 'anthropic' && env.LONGMEMEVAL_API_KEY || '' }}
-          OPENAI_API_KEY: ${{ env.LONGMEMEVAL_PROVIDER == 'openai' && env.LONGMEMEVAL_API_KEY || '' }}
-        run: |
-          set -euo pipefail
-          SUBSET="${{ github.event.inputs.subset || '100' }}"
-          BUDGET="${{ github.event.inputs.budget_tokens || '6000000' }}"
-          CONFIGS="${{ github.event.inputs.configs || 'polis-default polis-full' }}"
-          mkdir -p out
-          for c in $CONFIGS; do
-            case "$c" in
-              polis-default|polis-full)
-                python3 bench/longmemeval/run.py --config "$c" --data "$RUNNER_TEMP/longmemeval_s.json" \
-                  --subset "$SUBSET" --provider "$LONGMEMEVAL_PROVIDER" --answer-model "$LONGMEMEVAL_ANSWER_MODEL" \
-                  --judge-model "$LONGMEMEVAL_JUDGE_MODEL" --budget-tokens "$BUDGET" --out out ;;
-              mem0)
-                pip install "mem0ai==1.0.5"
-                python3 bench/mem0/run.py --data "$RUNNER_TEMP/longmemeval_s.json" --subset "$SUBSET" \
-                  --provider "$LONGMEMEVAL_PROVIDER" --answer-model "$LONGMEMEVAL_ANSWER_MODEL" \
-                  --judge-model "$LONGMEMEVAL_JUDGE_MODEL" --budget-tokens "$BUDGET" --out out ;;
-              graphiti)
-                pip install "graphiti-core[falkordb]==0.24.3"
-                docker compose -f bench/graphiti/docker-compose.yml up -d
-                python3 bench/graphiti/run.py --data "$RUNNER_TEMP/longmemeval_s.json" --subset "$SUBSET" \
-                  --provider "$LONGMEMEVAL_PROVIDER" --answer-model "$LONGMEMEVAL_ANSWER_MODEL" \
-                  --judge-model "$LONGMEMEVAL_JUDGE_MODEL" --budget-tokens "$BUDGET" --out out
-                docker compose -f bench/graphiti/docker-compose.yml down -v ;;
-              *) echo "unknown config $c" && exit 1 ;;
-            esac
-          done
-          python3 -m bench.common.report out | tee out/table.md
+          python3 bench/baselines/run.py --baseline lexical --stub --split full --out out
+          python3 bench/baselines/run.py --baseline raw-history --stub --split full --out out
+          python3 -m bench.common.report out > out/table.md
       - uses: actions/upload-artifact@v4
-        if: env.skipped != '1'
         with:
-          name: longmemeval-${{ github.run_id }}
+          name: keyless-evaluation-${{ github.run_id }}
           path: out/

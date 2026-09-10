@@ -128,7 +128,7 @@ fn tokenize(raw: &str) -> Vec<String> {
     let all: Vec<String> = raw
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric() && !TOKEN_CHARS.contains(&c))
-        .map(|t| t.trim_matches(|c: char| TOKEN_CHARS.contains(&c)))
+        .map(|t| if t.starts_with("--") && t.chars().any(char::is_alphanumeric) {t.trim_end_matches(|c:char| TOKEN_CHARS.contains(&c))} else {t.trim_matches(|c: char| TOKEN_CHARS.contains(&c))})
         .filter(|t| t.chars().any(char::is_alphanumeric))
         .map(str::to_string)
         .collect();
@@ -268,7 +268,7 @@ pub fn looks_literal(plan: &FtsPlan, raw: &str) -> bool {
         return true;
     }
     let trimmed = raw.trim();
-    if trimmed.starts_with("--") || trimmed.contains("::") {
+    if trimmed.split_whitespace().any(|t|t.trim_start_matches(['`','\'','(']).starts_with("--")) || trimmed.contains("::") {
         return true;
     }
     // An interior punctuation mark inside a token — `db.rs`, `src/db`,
@@ -336,7 +336,7 @@ mod tests {
     fn tokenchars_keep_identifiers_whole() {
         let p = plan_fts_query("why does src-tauri/src/db.rs use --allowedTools").unwrap();
         assert!(p.terms.contains(&"src-tauri/src/db.rs".to_string()), "{:?}", p.terms);
-        assert!(p.terms.contains(&"allowedtools".to_string()), "{:?}", p.terms);
+        assert!(p.terms.contains(&"--allowedtools".to_string()), "{:?}", p.terms);
     }
 
     #[test]
@@ -396,6 +396,7 @@ mod tests {
     fn looks_literal_table() {
         let cases: &[(&str, bool)] = &[
             ("--allowedTools", true),
+            ("What did we decide about --frozen?", true),
             ("src-tauri/src/db.rs", true),
             ("ledger::body_hash", true),
             ("\"exact phrase here\"", true),

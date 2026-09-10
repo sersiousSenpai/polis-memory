@@ -74,6 +74,8 @@ impl PromptSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CorpusRole {
     User,
+    /// A model reply, distinct from internal instruction prefaces.
+    Assistant,
     Agent,
     System,
 }
@@ -82,8 +84,20 @@ impl CorpusRole {
     pub fn as_str(self) -> &'static str {
         match self {
             CorpusRole::User => "user",
+            CorpusRole::Assistant => "assistant",
             CorpusRole::Agent => "agent",
             CorpusRole::System => "system",
+        }
+    }
+
+    /// Accepted public aliases. Unknown values are rejected before capture.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "user" | "human" => Some(Self::User),
+            "assistant" | "ai" => Some(Self::Assistant),
+            "agent" => Some(Self::Agent),
+            "system" => Some(Self::System),
+            _ => None,
         }
     }
 
@@ -152,6 +166,8 @@ pub enum EventKind {
     /// was there, so the chain and every bundle stay verifiable even though the
     /// stored body is gone. References the prompt by `(ref_kind="prompt", ref_id)`.
     Compaction,
+    /// A local captured page was irreversibly redacted, retaining its hash.
+    CaptureForgotten,
     /// Dojo P2 ("Browsing Behavior"): a page the user landed on. The normalized
     /// on-screen content lives in the ledger-owned `browse_events` table; this
     /// event references it by `(ref_kind="browse_event", ref_id)` and carries the
@@ -260,6 +276,7 @@ impl EventKind {
         EventKind::TaxonomyReorg,
         EventKind::ClassCurate,
         EventKind::Compaction,
+        EventKind::CaptureForgotten,
         EventKind::BrowseEvent,
         EventKind::SessionLink,
         EventKind::Supersede,
@@ -287,6 +304,7 @@ impl EventKind {
             EventKind::TaxonomyReorg => "taxonomy_reorg",
             EventKind::ClassCurate => "class_curate",
             EventKind::Compaction => "compaction",
+            EventKind::CaptureForgotten => "capture_forgotten",
             EventKind::BrowseEvent => "browse_event",
             EventKind::SessionLink => "session_link",
             EventKind::Supersede => "supersede",

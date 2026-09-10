@@ -35,8 +35,11 @@ impl PolisStore {
         cite_seqs: &[i64],
         actor: &str,
     ) -> rusqlite::Result<Option<i64>> {
-        let conn = self.conn();
-        Self::insert_class_observation_locked(&conn, node_id, summary, cite_seqs, actor)
+        let mut connection = self.conn();
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let result = Self::insert_class_observation_locked(&tx, node_id, summary, cite_seqs, actor)?;
+        tx.commit()?;
+        Ok(result)
     }
 
     /// `insert_class_observation` journaled under a gardener run (B2): the
@@ -49,7 +52,9 @@ impl PolisStore {
         cite_seqs: &[i64],
         actor: &str,
     ) -> rusqlite::Result<Option<i64>> {
-        let conn = self.conn();
+        let mut connection = self.conn();
+        let conn = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if Self::run_source_forgotten_locked(&conn, run_id)? { return Ok(None); }
         let row = Self::insert_class_observation_locked(&conn, node_id, summary, cite_seqs, actor)?;
         if let Some(id) = row {
             let seq: Option<i64> = conn
@@ -67,6 +72,7 @@ impl PolisStore {
                 .with_ledger_seq(seq),
             )?;
         }
+        conn.commit()?;
         Ok(row)
     }
 
@@ -80,6 +86,9 @@ impl PolisStore {
     ) -> rusqlite::Result<Option<i64>> {
         if cite_seqs.is_empty() || summary.trim().is_empty() {
             return Ok(None);
+        }
+        for seq in cite_seqs {
+            if Self::source_forgotten_locked(conn, *seq)? { return Ok(None); }
         }
         let node_exists: i64 = conn.query_row(
             "SELECT COUNT(*) FROM class_nodes WHERE id = ?1 AND retired_by_run IS NULL",
@@ -161,15 +170,27 @@ impl PolisStore {
         node_id: &str,
         _include_dismissed: bool,
     ) -> rusqlite::Result<Vec<polis_core::types::ClassObservation>> {
+        self.list_class_observations_scoped(node_id, _include_dismissed, &Default::default())
+    }
+
+    pub fn list_class_observations_scoped(&self, node_id: &str, _include_dismissed: bool, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Vec<polis_core::types::ClassObservation>> {
         let conn = self.conn();
+        let scoped = Self::scope_clause_locked(&conn, "o", scope)?;
         let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM class_observations
-             WHERE node_id = ?1 AND retired_by_run IS NULL AND retired_at IS NULL
+            "SELECT {} FROM class_observations o
+             WHERE node_id = ?1 AND retired_by_run IS NULL AND retired_at IS NULL{}
              ORDER BY created_at DESC, id DESC",
-            Self::OBSERVATION_COLS
+            Self::OBSERVATION_COLS, scoped.sql
         ))?;
-        let rows = stmt.query_map(params![node_id], Self::row_to_observation)?;
-        rows.collect()
+        let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&node_id];
+        binds.extend(scoped.binds.iter().map(|v| v.as_ref()));
+        let rows = stmt.query_map(binds.as_slice(), Self::row_to_observation)?;
+        let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt); drop(conn);
+        if scope.is_empty() { return Ok(rows); }
+        let seqs = rows.iter().flat_map(|row| row.cite_seqs.iter().copied()).collect::<Vec<_>>();
+        let eligible = self.eligible_seqs(&seqs, scope)?;
+        Ok(rows.into_iter().filter(|row| !row.cite_seqs.is_empty() && row.cite_seqs.iter().all(|seq| eligible.contains(seq))).collect())
     }
 
     /// Every live observation, oldest first — the re-validation pass's input

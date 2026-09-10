@@ -56,6 +56,7 @@ impl OrgNode {
     /// when the head moved past what the folder holds. Cheap when nothing
     /// changed: one meta read.
     pub fn publish_own(&self) -> Result<Option<SegmentRef>, String> {
+        crate::sharing::flush_redactions(&self.store, &self.identity.device_id(), &self.display_name)?;
         let (head, _) = self.store.chain_head().map_err(|e| e.to_string())?;
         let key = format!("polis.sync.published.{OWN_KEY}");
         let done: i64 = self.store.meta(&key).ok().flatten().and_then(|v| v.parse().ok()).unwrap_or(0);

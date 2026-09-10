@@ -23,8 +23,8 @@ pub const RECALL_LOG_MAX: usize = 4096;
 
 #[derive(Default)]
 struct RecallLog {
-    nodes: HashMap<String, i64>,
-    links: HashMap<i64, i64>,
+    nodes: HashMap<(usize, String), i64>,
+    links: HashMap<(usize, i64), i64>,
 }
 
 fn log() -> &'static Mutex<RecallLog> {
@@ -38,16 +38,17 @@ fn lock() -> std::sync::MutexGuard<'static, RecallLog> {
 
 /// What an answer pack served, at `now_ms`: the resolved node, its links,
 /// and the matched runners-up. One call at the end of the pack builder.
-pub fn record_pack(pack: &AnswerPack, now_ms: i64) {
+pub fn record_pack(store: &PolisStore, pack: &AnswerPack, now_ms: i64) {
+    let store_id=store.cache_identity();
     let mut l = lock();
     if let Some(n) = &pack.node {
-        l.nodes.insert(n.node.id.clone(), now_ms);
+        l.nodes.insert((store_id,n.node.id.clone()), now_ms);
         for link in &n.links {
-            l.links.insert(link.link.id, now_ms);
+            l.links.insert((store_id,link.link.id), now_ms);
         }
     }
     for n in &pack.matched_nodes {
-        l.nodes.insert(n.id.clone(), now_ms);
+        l.nodes.insert((store_id,n.id.clone()), now_ms);
     }
     if l.nodes.len() + l.links.len() > RECALL_LOG_MAX {
         // Drop the oldest half by timestamp.
@@ -70,13 +71,15 @@ pub fn pending() -> usize {
 pub fn flush(store: &PolisStore) -> usize {
     let (nodes, links) = {
         let mut l = lock();
-        (std::mem::take(&mut l.nodes), std::mem::take(&mut l.links))
+        let store_id=store.cache_identity();
+        let nodes=l.nodes.iter().filter(|((id,_),_)|*id==store_id).map(|((_,node),at)|(node.clone(),*at)).collect::<Vec<_>>();
+        let links=l.links.iter().filter(|((id,_),_)|*id==store_id).map(|((_,link),at)|(*link,*at)).collect::<Vec<_>>();
+        l.nodes.retain(|(id,_),_|*id!=store_id);l.links.retain(|(id,_),_|*id!=store_id);
+        (nodes,links)
     };
     if nodes.is_empty() && links.is_empty() {
         return 0;
     }
-    let nodes: Vec<(String, i64)> = nodes.into_iter().collect();
-    let links: Vec<(i64, i64)> = links.into_iter().collect();
     match store.bump_recalled(&nodes, &links) {
         Ok(n) => n,
         Err(e) => {

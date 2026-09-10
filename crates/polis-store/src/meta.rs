@@ -43,7 +43,8 @@ pub const CORPUS_ROLE_VERSION_KEY: &str = "corpus_role_version";
 /// "5" since Session E4 (the org node: a peer's published catalog, the
 /// relayed acks) — C2 lands on the same "5"; every additive block is
 /// idempotent, so the merged block runs once.
-pub const STORE_SCHEMA_VERSION: &str = "5";
+/// 8: a snapshot-local embedding revision invalidates same-head vector edits.
+pub const STORE_SCHEMA_VERSION: &str = "10";
 
 /// The host's legacy `app_settings` keys, read once at adoption.
 pub const LEGACY_LEXICAL_KEY: &str = "redline.memory.lexicalVersion";

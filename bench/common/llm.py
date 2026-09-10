@@ -17,8 +17,7 @@ import urllib.request
 from dataclasses import dataclass, field
 
 
-class BudgetExceeded(RuntimeError):
-    pass
+from .budget import AggregateBudget, BudgetExceeded
 
 
 @dataclass
@@ -28,6 +27,9 @@ class Spend:
     tokens_out: int = 0
     calls: int = 0
     by_role: dict[str, int] = field(default_factory=dict)
+    aggregate: AggregateBudget | None = None
+    simulated_tokens: int = 0
+    failed_attempts: int = 0
 
     @property
     def tokens(self) -> int:
@@ -43,7 +45,8 @@ class Spend:
 
     def as_dict(self) -> dict:
         return {"budgetTokens": self.budget_tokens, "tokensIn": self.tokens_in, "tokensOut": self.tokens_out,
-                "calls": self.calls, "byRole": self.by_role}
+                "calls": self.calls, "byRole": self.by_role, "simulatedTokens": self.simulated_tokens,
+                "failedAttemptsUsageUnknown": self.failed_attempts, "usageBasis": "provider-reported"}
 
 
 def approx_tokens(text: str) -> int:
@@ -54,11 +57,12 @@ def approx_tokens(text: str) -> int:
 class Llm:
     """`provider` ∈ {stub, anthropic, openai}. Keys from the environment only."""
 
-    def __init__(self, provider: str, model: str, spend: Spend, base_url: str | None = None, temperature: float = 0.0):
+    def __init__(self, provider: str, model: str, spend: Spend, base_url: str | None = None, temperature: float = 0.0, timeout: float = 120):
         self.provider = provider
         self.model = model
         self.spend = spend
         self.temperature = temperature
+        self.timeout = timeout
         if provider == "anthropic":
             self.key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("LONGMEMEVAL_API_KEY")
             self.base_url = base_url or "https://api.anthropic.com"
@@ -78,7 +82,17 @@ class Llm:
             return self._stub(role, system, user)
         if os.environ.get("POLIS_NO_NETWORK") == "1":
             raise SystemExit("POLIS_NO_NETWORK=1 forbids a model call; use --stub")
-        text, tin, tout = self._http(system, user, max_tokens)
+        # UTF-8 bytes plus conservative framing bounds input tokens before dispatch.
+        reserve = len((system + user).encode("utf-8")) + 1024 + max_tokens
+        attempt = self.spend.aggregate.reserve(role, reserve) if self.spend.aggregate else None
+        if attempt is None:
+            raise RuntimeError("paid calls require an aggregate budget ledger")
+        try:
+            text, tin, tout = self._http(system, user, max_tokens)
+        except Exception:
+            self.spend.failed_attempts += 1
+            raise  # The aggregate reservation remains charged; no blind retry.
+        self.spend.aggregate.settle(attempt, tin, tout)
         self.spend.charge(role, tin, tout)
         return text
 
@@ -89,7 +103,7 @@ class Llm:
         # they measure retrieval reachability with no model at all, which is
         # exactly what a keyless run can honestly claim.
         tin, tout = approx_tokens(system + user), 16
-        self.spend.charge(role, tin, tout)
+        self.spend.simulated_tokens += tin + tout
         if role == "judge":
             gold = _between(user, "<gold>", "</gold>").lower()
             resp = _between(user, "<response>", "</response>").lower()
@@ -114,24 +128,16 @@ class Llm:
                     "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
             headers = {"authorization": f"Bearer {self.key}", "content-type": "application/json"}
         data = json.dumps(body).encode()
-        for attempt in range(5):
-            try:
-                req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    out = json.loads(resp.read())
-                break
-            except urllib.error.HTTPError as e:
-                if e.code in (429, 500, 502, 503, 529) and attempt < 4:
-                    time.sleep(2 ** attempt)
-                    continue
-                raise
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            out = json.loads(resp.read())
         if self.provider == "anthropic":
             text = "".join(c.get("text", "") for c in out.get("content", []) if c.get("type") == "text")
-            u = out.get("usage", {})
-            return text, int(u.get("input_tokens", 0)), int(u.get("output_tokens", 0))
+            u = out["usage"]
+            return text, int(u["input_tokens"]) + int(u.get("cache_read_input_tokens", 0)) + int(u.get("cache_creation_input_tokens", 0)), int(u["output_tokens"])
         text = out["choices"][0]["message"]["content"] or ""
-        u = out.get("usage", {})
-        return text, int(u.get("prompt_tokens", 0)), int(u.get("completion_tokens", 0))
+        u = out["usage"]
+        return text, int(u["prompt_tokens"]), int(u["completion_tokens"])
 
 
 def _between(s: str, a: str, b: str) -> str:

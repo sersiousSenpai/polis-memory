@@ -344,7 +344,7 @@ fn text(rng: &mut Rng, topic: &Topic, chars: usize) -> String {
 fn role_table(role: CorpusRole) -> &'static [(f64, f64)] {
     match role {
         CorpusRole::User => USER_BODY_CHARS,
-        CorpusRole::Agent => AGENT_BODY_CHARS,
+        CorpusRole::Agent | CorpusRole::Assistant => AGENT_BODY_CHARS,
         CorpusRole::System => SYSTEM_BODY_CHARS,
     }
 }

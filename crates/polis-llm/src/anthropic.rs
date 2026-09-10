@@ -139,15 +139,13 @@ impl Agent for AnthropicApi {
             call = call.header("anthropic-beta", FALLBACK_BETA);
         }
         let resp = call
+            .timeout(std::time::Duration::from_millis(req.timeout_ms.clamp(1, 600_000)))
             .json(&self.body(&req.prompt))
             .send()
             .await
             .map_err(|e| AgentError::transport(format!("anthropic request failed: {e}")))?;
         let status = resp.status();
-        let v: Value = resp
-            .json()
-            .await
-            .map_err(|e| AgentError::transport(format!("anthropic response was not JSON: {e}")))?;
+        let v: Value = crate::bounded_json(resp).await?;
         if !status.is_success() {
             let msg = v.pointer("/error/message").and_then(Value::as_str).unwrap_or("api error");
             return Err(AgentError::turn(format!("anthropic {status}: {msg}"), Usage::default(), None));

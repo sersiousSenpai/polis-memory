@@ -42,7 +42,7 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_millis(800);
 pub fn daemon_alive(home: &Home) -> Option<String> {
     let info = home.read_serve()?;
     let base = info.base_url();
-    RemoteApi::probe(&base, PROBE_TIMEOUT).map(|_| base)
+    RemoteApi::probe_authenticated(&base, home.read_token(), PROBE_TIMEOUT).map(|_| base)
 }
 
 pub fn choose(home: &Home, remote: Option<String>) -> Backend {

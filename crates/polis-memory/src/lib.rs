@@ -27,6 +27,7 @@ pub mod cli;
 pub mod canary;
 pub mod envelope;
 pub mod corpus;
+pub mod diagnostics;
 pub mod eval;
 pub mod filing;
 pub mod fence;
@@ -46,6 +47,7 @@ pub mod sync;
 pub mod transport;
 pub mod union;
 pub mod warmth;
+pub mod usage;
 
 use std::sync::Arc;
 
@@ -62,7 +64,7 @@ use polis_core::api::{
 };
 use polis_core::host::HostResolver;
 use polis_core::ledger::{ChainVerdict, CorpusRole, Origin, PromptSource};
-use polis_core::pack::{clamp_answer_pack_limit, AnswerPack};
+use polis_core::pack::AnswerPack;
 use polis_core::proposal::Proposal;
 use polis_core::types::{
     BrowseHit, ClassRun, ContextStats, GrepHit, LakeItem, LedgerFilters, MemoryMapView,
@@ -73,11 +75,12 @@ use polis_core::{MemoryApi, MemoryError};
 use polis_embed::{Embedder, ProviderKind, SemanticHit};
 use polis_llm::{Agent, UsageSink};
 use polis_store::record::{
-    record_browse_event, record_prompt, record_prompt_at, BrowseAction, BrowseEventInput,
+    record_browse_event, record_prompt, record_prompt_at_scoped, BrowseAction, BrowseEventInput,
     PromptInput,
 };
 use polis_store::search::GrepError;
 use polis_store::{PolisStore, StoreError};
+use rusqlite::OptionalExtension;
 
 /// The borrowed view every memory function takes.
 pub struct Polis<'a> {
@@ -236,8 +239,28 @@ impl PolisHandle {
     }
 
     /// The identity half of a request scope, for the store's clauses.
-    fn filter(scope: &Scope) -> polis_store::principals::ScopeFilter {
-        polis_store::principals::ScopeFilter::from_scope(scope)
+    fn filter(&self, scope: &Scope) -> Result<polis_store::principals::ScopeFilter, MemoryError> {
+        let mut resolved = scope.clone();
+        if let Some(identity) = &self.identity {
+            let owner = identity.principal_id();
+            if let Some(requested) = &scope.principal {
+                let requested = self.store.resolve_author(requested).map_err(store_err)?.unwrap_or_else(|| requested.clone());
+                if !self.store.principal_id_set(&owner).map_err(store_err)?.contains(&requested) {
+                    return Err(MemoryError::Rejected("principal is outside this handle's permitted scope".into()));
+                }
+            } else { resolved.principal = Some(owner); }
+        }
+        Ok(polis_store::principals::ScopeFilter::from_scope(&resolved))
+    }
+
+    fn stamp_scope(&self, seq: Option<i64>, scope: &Scope) -> Result<(), MemoryError> {
+        let Some(seq) = seq else { return Ok(()); };
+        let f = self.filter(scope)?;
+        let conn = self.store.conn();
+        for (table, selector) in [("prompts", "id = (SELECT prompt_id FROM ledger_events WHERE seq = ?1)"), ("browse_events", "id = (SELECT CAST(ref_id AS INTEGER) FROM ledger_events WHERE seq = ?1 AND ref_kind = 'browse_event')"), ("user_notes", "seq = ?1")] {
+            conn.execute(&format!("UPDATE {table} SET principal_id = COALESCE(principal_id, ?2), agent_id = COALESCE(agent_id, ?3), run_id = COALESCE(?4, run_id), org_id = COALESCE(?5, org_id), project_path = COALESCE(?6, project_path) WHERE {selector}"), rusqlite::params![seq, f.principal, f.agent, f.run, f.org, f.project]).map_err(store_err)?;
+        }
+        Ok(())
     }
 
     /// After a write: stamp the new rows' scope columns from their author.
@@ -265,21 +288,48 @@ fn store_err(e: rusqlite::Error) -> MemoryError {
 }
 
 impl MemoryApi for PolisHandle {
+    fn decide(&self, req: &polis_core::diagnostics::DecisionRequest) -> Result<WriteReceipt, MemoryError> {
+        let scope = self.filter(&req.scope)?;
+        self.store.record_cited_decision(req.kind.as_deref().unwrap_or("decision"), req.source_seq, &scope)
+            .map(|seq| WriteReceipt { seq: Some(seq), id: None }).map_err(|e| match e {
+                rusqlite::Error::InvalidParameterName(reason) => MemoryError::Rejected(reason),
+                other => store_err(other),
+            })
+    }
+    fn write_claim(&self, req: &polis_core::claims::ClaimWrite) -> Result<polis_core::claims::Claim, MemoryError> {
+        let filter = self.filter(&req.scope)?;
+        let mut req = req.clone();
+        req.scope.principal = filter.principal;
+        self.store.write_claim(&req, polis_core::ledger::now_millis()).map_err(|e| match e {
+            rusqlite::Error::InvalidParameterName(reason) => MemoryError::Rejected(reason),
+            other => store_err(other),
+        })
+    }
+
+    fn claims(&self, req: &polis_core::claims::ClaimQuery) -> Result<Vec<polis_core::claims::Claim>, MemoryError> {
+        let filter = self.filter(&req.scope)?;
+        let mut req = req.clone();
+        req.scope.principal = filter.principal;
+        self.store.query_claims(&req).map_err(store_err)
+    }
+
+    fn evidence(&self, req: &polis_core::diagnostics::EvidenceRequest) -> Result<polis_core::diagnostics::EvidenceRecord, MemoryError> {
+        diagnostics::evidence(&self.view(), req, &self.filter(&req.scope)?)
+    }
+
+    fn traces(&self, req: &polis_core::diagnostics::TraceRequest) -> Result<Vec<polis_core::diagnostics::RetrievalTrace>, MemoryError> {
+        diagnostics::traces(&self.view(), req, &self.filter(&req.scope)?)
+    }
+
     fn search(&self, req: &SearchRequest) -> Result<AnswerPack, MemoryError> {
-        Ok(retrieval::build_answer_pack_scoped(
-            &self.view(),
-            req.q.as_deref(),
-            req.node.as_deref(),
-            clamp_answer_pack_limit(req.limit),
-            &Self::filter(&req.scope),
-        ))
+        retrieval::search_request(&self.view(), req, &self.filter(&req.scope)?)
     }
 
     fn grep(&self, req: &GrepRequest) -> Result<Vec<GrepHit>, MemoryError> {
         let limit = req.limit.unwrap_or(20).clamp(1, 200);
         latency::timed("grep", || {
             self.store
-                .grep_memory(&req.literal, req.regex.as_deref(), req.case_sensitive, req.kinds, limit)
+                .grep_memory_scoped(&req.literal, req.regex.as_deref(), req.case_sensitive, req.kinds, limit, &self.filter(&req.scope)?)
                 .map_err(|e| match e {
                     GrepError::Db(m) => MemoryError::Store(m),
                     other => MemoryError::Rejected(other.to_string()),
@@ -288,35 +338,41 @@ impl MemoryApi for PolisHandle {
     }
 
     fn tree(&self, req: &TreeRequest) -> Result<Vec<TreeNodeView>, MemoryError> {
-        retrieval::tree_view(&self.view(), req.root.as_deref(), req.project.as_deref()).map_err(store_err)
+        retrieval::tree_view_scoped(&self.view(), req.root.as_deref(), req.project.as_deref(), &self.filter(&req.scope)?).map_err(store_err)
     }
 
-    fn node(&self, id: &str, _scope: &Scope) -> Result<Option<NodeView>, MemoryError> {
-        retrieval::node_view(&self.view(), id).map_err(store_err)
+    fn node(&self, id: &str, scope: &Scope) -> Result<Option<NodeView>, MemoryError> {
+        retrieval::node_view_scoped(&self.view(), id, &self.filter(scope)?).map_err(store_err)
     }
 
     fn prompts(&self, req: &PromptsRequest) -> Result<Vec<LakeItem>, MemoryError> {
         let limit = req.limit.unwrap_or(200).clamp(1, 400);
-        self.store.list_lake_items_since(req.since_seq, limit).map_err(store_err)
+        self.store.list_lake_items_since_scoped(req.since_seq, limit, &self.filter(&req.scope)?).map_err(store_err)
     }
 
     fn timeline(&self, filters: &LedgerFilters, scope: &Scope) -> Result<Vec<TimelineItem>, MemoryError> {
         let mut f = filters.clone();
-        if f.principal.is_none() {
-            f.principal = scope.principal.clone();
+        let mut effective_scope = scope.clone();
+        if let Some(principal) = f.principal.take() {
+            if scope.principal.as_ref().is_some_and(|p| p != &principal) { return Err(MemoryError::Rejected("conflicting principal filters".into())); }
+            effective_scope.principal = Some(principal);
         }
-        retrieval::query_ledger(&self.view(), &f).map_err(MemoryError::Store)
+        f.project = f.project.or_else(|| scope.project.clone());
+        if let Some(role) = f.role.as_mut() { *role = CorpusRole::parse(role).ok_or_else(|| MemoryError::Rejected(format!("unknown role `{role}`")))?.as_str().into(); }
+        self.store.query_ledger_events_scoped(&f, &self.filter(&effective_scope)?).map_err(store_err)
     }
 
-    fn stats(&self, _scope: &Scope) -> Result<ContextStats, MemoryError> {
+    fn stats(&self, scope: &Scope) -> Result<ContextStats, MemoryError> {
+        let filter = self.filter(scope)?;
+        if !filter.is_empty() { let mut stats=self.store.context_stats_scoped(&filter).map_err(store_err)?;stats.latency=latency::report();return Ok(stats); }
         // The counts are cached (head-seq keyed); the latency table is live.
         let mut stats = retrieval::build_stats_cached(&self.view());
         stats.latency = latency::report();
         Ok(stats)
     }
 
-    fn map(&self, _scope: &Scope) -> Result<MemoryMapView, MemoryError> {
-        Ok(retrieval::build_memory_map(&self.view()))
+    fn map(&self, scope: &Scope) -> Result<MemoryMapView, MemoryError> {
+        retrieval::build_memory_map_scoped(&self.view(), &self.filter(scope)?).map_err(store_err)
     }
 
     fn verify(&self) -> Result<ChainVerdict, MemoryError> {
@@ -324,8 +380,14 @@ impl MemoryApi for PolisHandle {
     }
 
     fn list_prompts(&self, filters: &PromptFilters, scope: &Scope) -> Result<Vec<LakeItem>, MemoryError> {
+        let resolved = self.filter(scope)?;
+        for (name, left, right) in [("agent",&filters.agent,&scope.agent),("run",&filters.run,&scope.run),("org",&filters.org,&scope.org),("project",&filters.project,&scope.project)] {
+            if left.as_ref().zip(right.as_ref()).is_some_and(|(a,b)|a!=b) { return Err(MemoryError::Rejected(format!("conflicting {name} filters"))); }
+        }
         let mut f = filters.clone();
-        f.principal = f.principal.or_else(|| scope.principal.clone());
+        if let Some(role) = f.role.as_mut() { *role = CorpusRole::parse(role).ok_or_else(|| MemoryError::Rejected(format!("unknown role `{role}`")))?.as_str().into(); }
+        if f.principal.is_some() && resolved.principal.is_some() && f.principal != resolved.principal { return Err(MemoryError::Rejected("conflicting principal filters".into())); }
+        f.principal = resolved.principal.or(f.principal);
         f.agent = f.agent.or_else(|| scope.agent.clone());
         f.run = f.run.or_else(|| scope.run.clone());
         f.org = f.org.or_else(|| scope.org.clone());
@@ -334,21 +396,20 @@ impl MemoryApi for PolisHandle {
     }
 
     fn browse_search(&self, q: &str, limit: i64, scope: &Scope) -> Result<Vec<BrowseHit>, MemoryError> {
-        self.store.search_browse_events_scoped(q, limit.clamp(1, 100), &Self::filter(scope)).map_err(store_err)
+        self.store.search_browse_events_scoped(q, limit.clamp(1, 100), &self.filter(scope)?).map_err(store_err)
     }
 
-    fn thread_tree(&self, kind: &str, id: &str, _scope: &Scope) -> Result<serde_json::Value, MemoryError> {
-        Ok(retrieval::build_thread_tree(&self.view(), kind, id))
+    fn thread_tree(&self, kind: &str, id: &str, scope: &Scope) -> Result<serde_json::Value, MemoryError> {
+        retrieval::build_thread_tree_scoped(&self.view(), kind, id, &self.filter(scope)?).map_err(store_err)
     }
 
-    fn thread(&self, kind: &str, id: &str, limit: i64, _scope: &Scope) -> Result<Option<serde_json::Value>, MemoryError> {
-        Ok(retrieval::thread_view(&self.view(), kind, id, limit.clamp(1, 200)))
+    fn thread(&self, kind: &str, id: &str, limit: i64, scope: &Scope) -> Result<Option<serde_json::Value>, MemoryError> {
+        retrieval::thread_view_scoped(&self.view(), kind, id, limit.clamp(1, 200), &self.filter(scope)?).map_err(store_err)
     }
 
     fn context(&self, req: &ContextRequest) -> Result<ContextBlock, MemoryError> {
-        // ~4 bytes a token; the prefetch's own ceiling bounds a runaway ask.
-        let max_bytes = req.max_tokens.unwrap_or(2_000).clamp(50, 25_000) * 4;
-        Ok(retrieval::context_block_scoped(&self.view(), &req.q, req.node.as_deref(), max_bytes, &Self::filter(&req.scope)))
+        let _timer = latency::Timer::start("context");
+        retrieval::context_request(&self.view(), req, &self.filter(&req.scope)?)
     }
 
     fn health(&self) -> Result<HealthReport, MemoryError> {
@@ -385,7 +446,7 @@ impl MemoryApi for PolisHandle {
             surface: req.surface.clone(),
             role: CorpusRole::classify_captured(&req.body),
             user_text: None,
-            session_id: None,
+            session_id: req.session.clone(),
             claude_session_id: req.session.clone(),
             mission_id: None,
             project_path: req.project.clone(),
@@ -410,15 +471,17 @@ impl MemoryApi for PolisHandle {
             return Err(MemoryError::Rejected("nothing to remember".into()));
         }
         let _timer = latency::Timer::start("remember");
+        let filter = self.filter(&req.scope)?;
+        if req.project.as_ref().zip(req.scope.project.as_ref()).is_some_and(|(a,b)| a != b) { return Err(MemoryError::Rejected("item project conflicts with request scope".into())); }
         let actor = self.actor(&req.scope);
-        if req.as_user {
-            let seq = record_prompt(
+        {
+            let seq = record_prompt_at_scoped(
                 &self.store,
                 PromptInput {
                     source: PromptSource::Api,
                     origin: Origin::External,
                     surface: "api".to_string(),
-                    role: CorpusRole::User,
+                    role: if req.as_user { CorpusRole::User } else { CorpusRole::Assistant },
                     session_id: None,
                     claude_session_id: req.scope.run.clone(),
                     mission_id: None,
@@ -430,20 +493,21 @@ impl MemoryApi for PolisHandle {
                     model_source: None,
                     user_text: None,
                 },
+                polis_core::ledger::now_millis(), &filter,
             )
             .map_err(MemoryError::Store)?;
-            self.stamp();
-            return Ok(WriteReceipt { seq, id: None });
+            Ok(WriteReceipt { seq, id: None })
         }
-        let write = NoteWrite { target_kind: Some("none".to_string()), text: Some(req.text.clone()), ..Default::default() };
-        let out = note_receipt(self.store.write_user_note(&write, &actor).map_err(store_err)?);
-        self.stamp();
-        out
     }
 
     fn ingest(&self, req: &IngestRequest) -> Result<IngestReceipt, MemoryError> {
         let _timer = latency::Timer::start("ingest");
+        let base_filter = self.filter(&req.scope)?;
         let actor = self.actor(&req.scope);
+        for item in &req.items {
+            if item.project.as_ref().zip(req.scope.project.as_ref()).is_some_and(|(a,b)|a!=b) || item.run.as_ref().zip(req.scope.run.as_ref()).is_some_and(|(a,b)|a!=b) { return Err(MemoryError::Rejected("item project/run conflicts with request scope".into())); }
+            if let Some(role) = &item.role { if CorpusRole::parse(role).is_none() { return Err(MemoryError::Rejected(format!("unknown role `{role}`"))); } }
+        }
         let mut receipt = IngestReceipt::default();
         for item in &req.items {
             let _item_timer = latency::Timer::start("ingest.item");
@@ -451,11 +515,7 @@ impl MemoryApi for PolisHandle {
                 receipt.skipped += 1;
                 continue;
             }
-            let role = match item.role.as_deref() {
-                Some("agent") => CorpusRole::Agent,
-                Some("system") => CorpusRole::System,
-                _ => CorpusRole::User,
-            };
+            let role = item.role.as_deref().and_then(CorpusRole::parse).unwrap_or(CorpusRole::User);
             let input = PromptInput {
                 source: PromptSource::Api,
                 origin: Origin::External,
@@ -473,8 +533,13 @@ impl MemoryApi for PolisHandle {
                 user_text: None,
             };
             let ts = item.ts.unwrap_or_else(polis_core::ledger::now_millis);
-            match record_prompt_at(&self.store, input, ts).map_err(MemoryError::Store)? {
-                Some(seq) => receipt.recorded.push(seq),
+            let mut filter = base_filter.clone();
+            filter.run = item.run.clone().or(filter.run);
+            filter.project = item.project.clone().or(filter.project);
+            match record_prompt_at_scoped(&self.store, input, ts, &filter).map_err(MemoryError::Store)? {
+                Some(seq) => {
+                    receipt.recorded.push(seq);
+                },
                 None => receipt.skipped += 1, // dedup on (body_hash, run)
             }
         }
@@ -485,48 +550,204 @@ impl MemoryApi for PolisHandle {
     }
 
     fn annotate(&self, req: &AnnotateRequest) -> Result<WriteReceipt, MemoryError> {
+        let filter = self.filter(&req.scope)?;
+        match (req.target_kind.as_str(), req.target_id.as_deref()) {
+            ("ledger_event", Some(id)) => { let seq=id.parse::<i64>().map_err(|_|MemoryError::Rejected("target_id must be a ledger sequence".into()))?; if !self.store.eligible_seqs(&[seq],&filter).map_err(store_err)?.contains(&seq) { return Err(MemoryError::NotFound); } }
+            ("class_node", Some(id)) if self.store.get_class_node_scoped(id,&filter).map_err(store_err)?.is_none() => { return Err(MemoryError::NotFound); }
+            _ => {}
+        }
         let write = NoteWrite {
             target_kind: Some(req.target_kind.clone()),
             target_id: req.target_id.clone(),
             text: Some(req.text.clone()),
             ..Default::default()
         };
-        let out = note_receipt(self.store.write_user_note(&write, &self.actor(&req.scope)).map_err(store_err)?);
+        let out = note_receipt(self.store.write_user_note_scoped(&write, &self.actor(&req.scope), &filter).map_err(store_err)?);
         self.stamp();
+        if let Ok(receipt) = &out { self.stamp_scope(receipt.seq, &req.scope)?; }
         out
     }
 
     fn forget(&self, req: &ForgetRequest) -> Result<ForgetReceipt, MemoryError> {
         if req.confirm != "forget" {
-            return Err(MemoryError::Rejected("forget requires confirm: \"forget\"".into()));
+            return Err(MemoryError::Rejected(
+                "forget requires confirm: \"forget\"".into(),
+            ));
+        }
+        if req.target_kind == "ledger_event" {
+            let source = req
+                .target_id
+                .trim_start_matches('#')
+                .parse::<i64>()
+                .map_err(|_| MemoryError::Rejected("target_id must be a ledger sequence".into()))?;
+            let filter = self.filter(&req.scope)?;
+            if !self
+                .store
+                .eligible_seqs(&[source], &filter)
+                .map_err(store_err)?
+                .contains(&source)
+            {
+                return Err(MemoryError::NotFound);
+            }
+            if let Some(note) = self.store.note_for_seq(source).map_err(store_err)? {
+                return self.forget(&ForgetRequest {
+                    target_kind: "user_note".into(),
+                    target_id: note.id.to_string(),
+                    confirm: req.confirm.clone(),
+                    scope: req.scope.clone(),
+                });
+            }
+            let item = self.evidence(&polis_core::diagnostics::EvidenceRequest {
+                seq: source,
+                scope: req.scope.clone(),
+                chain_id: None,
+            })?;
+            if item.status == "redacted" {
+                return Ok(ForgetReceipt {
+                    forgotten: true,
+                    seq: None,
+                });
+            }
+            if item.status != "available" {
+                return Err(MemoryError::NotFound);
+            }
+            let target=self.store.conn().query_row("SELECT COALESCE(le.prompt_id,src.prompt_id),le.ref_kind,le.ref_id FROM ledger_events le LEFT JOIN decision_evidence de ON de.seq=le.seq LEFT JOIN ledger_events src ON src.seq=de.source_seq WHERE le.seq=?1",[source],|r|Ok((r.get::<_,Option<i64>>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?))).map_err(store_err)?;
+            let (kind, id) = if let Some(id) = target.0 {
+                ("prompt", id.to_string())
+            } else if target.1.as_deref() == Some("browse_event") {
+                ("browse_event", target.2.ok_or(MemoryError::NotFound)?)
+            } else {
+                return Err(MemoryError::Unavailable(
+                    "this citation's content type does not support durable forgetting".into(),
+                ));
+            };
+            return self.forget(&ForgetRequest {
+                target_kind: kind.into(),
+                target_id: id,
+                confirm: req.confirm.clone(),
+                scope: req.scope.clone(),
+            });
         }
         match req.target_kind.as_str() {
             "prompt" => {
-                let id: i64 = req
-                    .target_id
-                    .trim()
-                    .parse()
-                    .map_err(|_| MemoryError::Rejected("target_id must be a prompt id".into()))?;
+                let id: i64 =
+                    req.target_id.trim().parse().map_err(|_| {
+                        MemoryError::Rejected("target_id must be a prompt id".into())
+                    })?;
+                let filter = self.filter(&req.scope)?;
+                let source = self
+                    .store
+                    .seqs_for_prompt_ids(&[id])
+                    .map_err(store_err)?
+                    .get(&id)
+                    .copied()
+                    .ok_or(MemoryError::NotFound)?;
+                if !self
+                    .store
+                    .eligible_seqs(&[source], &filter)
+                    .map_err(store_err)?
+                    .contains(&source)
+                {
+                    return Err(MemoryError::NotFound);
+                }
                 let actor = self.actor(&req.scope);
                 let seq = self
                     .store
-                    .compact_prompt_body(id, "[forgotten]", "forget", gardener::GIST_SOURCE_DETERMINISTIC, &actor)
+                    .compact_prompt_body(
+                        id,
+                        "[forgotten]",
+                        "forget",
+                        gardener::GIST_SOURCE_DETERMINISTIC,
+                        &actor,
+                    )
                     .map_err(store_err)?;
                 // --- E3 --- a `redaction` event so peers that hold this body
                 // tombstone it on their next sync (plan §4.6 "Forget
                 // propagates"). Only a device chain can name what it forgot.
                 if let Some(identity) = self.identity.as_ref() {
-                    if let Err(e) = sharing::append_redaction(&self.store, &identity.device_id(), id, &actor) {
+                    if let Err(e) =
+                        sharing::append_redaction(&self.store, &identity.device_id(), id, &actor)
+                    {
                         tracing::warn!(error = %e, prompt = id, "forget: the redaction event was not appended");
                     }
                 }
-                Ok(ForgetReceipt { forgotten: true, seq })
+                Ok(ForgetReceipt {
+                    forgotten: true,
+                    seq,
+                })
             }
-            other => Err(MemoryError::Unavailable(format!("forget for `{other}` lands with the sharing layer (E2)"))),
+            "browse_event" => {
+                let id = req.target_id.parse::<i64>().map_err(|_| {
+                    MemoryError::Rejected("target_id must be a browse event row id".into())
+                })?;
+                let source=self.store.conn().query_row("SELECT seq FROM ledger_events WHERE kind='browse_event' AND ref_kind='browse_event' AND ref_id=?1 ORDER BY seq LIMIT 1",[id.to_string()],|r|r.get::<_,i64>(0)).map_err(store_err)?;
+                let filter = self.filter(&req.scope)?;
+                if !self
+                    .store
+                    .eligible_seqs(&[source], &filter)
+                    .map_err(store_err)?
+                    .contains(&source)
+                {
+                    return Err(MemoryError::NotFound);
+                }
+                let seq = self
+                    .store
+                    .forget_browse_event(id, &self.actor(&req.scope))
+                    .map_err(store_err)?;
+                Ok(ForgetReceipt {
+                    forgotten: true,
+                    seq,
+                })
+            }
+            "user_note" | "note" => {
+                let id = req
+                    .target_id
+                    .parse::<i64>()
+                    .map_err(|_| MemoryError::Rejected("target_id must be a note row id".into()))?;
+                let source = self
+                    .store
+                    .conn()
+                    .query_row("SELECT seq FROM user_notes WHERE id=?1", [id], |r| {
+                        r.get::<_, Option<i64>>(0)
+                    })
+                    .optional()
+                    .map_err(store_err)?
+                    .flatten()
+                    .ok_or(MemoryError::NotFound)?;
+                let filter = self.filter(&req.scope)?;
+                if !self
+                    .store
+                    .eligible_seqs(&[source], &filter)
+                    .map_err(store_err)?
+                    .contains(&source)
+                {
+                    return Err(MemoryError::NotFound);
+                }
+                let actor = self.actor(&req.scope);
+                let seq = self.store.forget_user_note(id, &actor).map_err(store_err)?;
+                if let Some(identity) = &self.identity {
+                    if let Err(error) =
+                        sharing::flush_redactions(&self.store, &identity.device_id(), &actor)
+                    {
+                        tracing::warn!(%error, note=id, "note redaction remains queued for retry");
+                    }
+                }
+                Ok(ForgetReceipt {
+                    forgotten: true,
+                    seq,
+                })
+            }
+            other => Err(MemoryError::Unavailable(format!(
+                "durable forgetting is not supported for `{other}`"
+            ))),
         }
     }
 
     fn supersede(&self, req: &SupersedeRequest) -> Result<SupersedeReceipt, MemoryError> {
+        let filter = self.filter(&req.scope)?;
+        let seqs = [req.old_seq, req.new_seq];
+        let eligible = self.store.eligible_seqs(&seqs, &filter).map_err(store_err)?;
+        if seqs.iter().any(|seq| !eligible.contains(seq)) { return Err(MemoryError::NotFound); }
         match self
             .store
             .apply_supersession(req.old_seq, req.new_seq, req.rationale.as_deref().unwrap_or(""), &self.actor(&req.scope))
@@ -559,6 +780,8 @@ impl MemoryApi for PolisHandle {
     }
 
     fn browse(&self, req: &BrowseRequest) -> Result<WriteReceipt, MemoryError> {
+        self.filter(&req.scope)?;
+        if self.identity.is_some() { if let Some(author)=&req.author { let mut source_scope=req.scope.clone();source_scope.principal=Some(author.clone());self.filter(&source_scope)?; } }
         if req.url.trim().is_empty() {
             return Err(MemoryError::Rejected("a browse event needs a url".into()));
         }
@@ -583,11 +806,14 @@ impl MemoryApi for PolisHandle {
         )
         .map_err(MemoryError::Store)?;
         self.stamp();
+        self.stamp_scope(seq, &req.scope)?;
         Ok(WriteReceipt { seq, id: None })
     }
 
-    fn organize(&self, _scope: &Scope) -> BoxFuture<'_, Result<OrganizeReceipt, MemoryError>> {
+    fn organize(&self, scope: &Scope) -> BoxFuture<'_, Result<OrganizeReceipt, MemoryError>> {
+        let restricted = !polis_store::principals::ScopeFilter::from_scope(scope).is_empty();
         Box::pin(async move {
+            if restricted { return Err(MemoryError::Unavailable("organization is store-wide; scoped organization is not available".into())); }
             let view = self.view();
             match organize::organize_once(&view).await {
                 Ok(o) => {
@@ -607,7 +833,8 @@ impl MemoryApi for PolisHandle {
         })
     }
 
-    fn reindex(&self, _scope: &Scope) -> Result<ReindexReceipt, MemoryError> {
+    fn reindex(&self, scope: &Scope) -> Result<ReindexReceipt, MemoryError> {
+        if !polis_store::principals::ScopeFilter::from_scope(scope).is_empty() { return Err(MemoryError::Unavailable("index maintenance is store-wide; scoped reindex is not available".into())); }
         let view = self.view();
         let provider = view.provider_kind().as_str().to_string();
         let embedded = index_tick(&view, REINDEX_MAX_TARGETS);
@@ -619,8 +846,8 @@ impl MemoryApi for PolisHandle {
 
     // --- B2: the runs, reversible ------------------------------------------
 
-    fn list_runs(&self, limit: i64, _scope: &Scope) -> Result<Vec<ClassRun>, MemoryError> {
-        self.store.list_class_runs(limit.clamp(1, revert::RUNS_PAGE_MAX)).map_err(store_err)
+    fn list_runs(&self, limit: i64, scope: &Scope) -> Result<Vec<ClassRun>, MemoryError> {
+        self.store.list_class_runs_scoped(limit.clamp(1, revert::RUNS_PAGE_MAX), &self.filter(scope)?).map_err(store_err)
     }
 
     fn run(&self, id: i64) -> Result<Option<RunView>, MemoryError> {
@@ -706,7 +933,9 @@ mod tests {
         assert!(api.verify().unwrap().ok);
 
         let note = api.remember(&RememberRequest { text: "a standalone thought".into(), as_user: false, ..Default::default() }).unwrap();
-        assert!(note.id.is_some());
+        assert!(note.seq.is_some());
+        let remembered = h.store.lake_items_for_seqs(&[note.seq.unwrap()]).unwrap();
+        assert_eq!(remembered[0].role.as_deref(), Some("assistant"));
         assert!(api.forget(&ForgetRequest { target_kind: "prompt".into(), target_id: "1".into(), confirm: "nope".into(), ..Default::default() }).is_err());
         let f = api.forget(&ForgetRequest { target_kind: "prompt".into(), target_id: "1".into(), confirm: "forget".into(), ..Default::default() }).unwrap();
         assert!(f.forgotten);

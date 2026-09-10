@@ -89,10 +89,8 @@ pub struct PackPromptHit {
     /// Which stage of the query cascade found this: `and` (every term present)
     /// or `or` (widened) or `like` (substring fallback).
     pub stage: String,
-    /// Every arm that found this hit, with its rank and score there. A hit
-    /// found by two arms is stronger evidence than one found by either alone,
-    /// and a `semantic`-only hit is *associated* rather than asserted — see
-    /// [`Arm`] for the trust ordering.
+    /// Every retrieval arm that found this hit, with its rank and score.
+    /// These signals affect relevance, independently of source authority.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arms: Vec<ArmHit>,
 }
@@ -119,7 +117,7 @@ pub struct AnswerPack {
     pub node: Option<PackNode>,
     /// Runners-up from node resolution, so the agent can redirect in one step.
     pub matched_nodes: Vec<crate::types::ClassNode>,
-    /// The user's own words — FIRST, and the last thing the budget trims.
+    /// Recorded annotations, retained late in the budget pass.
     pub notes: Vec<UserNote>,
     pub prompt_hits: Vec<PackPromptHit>,
     pub browse_hits: Vec<crate::types::BrowseHit>,
@@ -142,6 +140,35 @@ pub struct AnswerPack {
     /// consumer must never present one as the user's own words.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shared_hits: Vec<ForeignHit>,
+    #[serde(default)]
+    pub retrieval: RetrievalReport,
+    #[serde(default)]
+    pub claims: Vec<crate::claims::Claim>,
+}
+
+/// Bounded retrieval diagnostics. Source text remains in cited evidence only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RetrievalReport {
+    pub version: String,
+    pub candidate_limit: usize,
+    pub candidates_considered: usize,
+    pub candidates_returned: usize,
+    pub snapshot_hash: String,
+    pub continuation: Option<String>,
+    pub trace_id: Option<String>,
+    pub errors: Vec<String>,
+    pub timings_us: std::collections::BTreeMap<String, u64>,
+    pub index: IndexReadiness,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct IndexReadiness {
+    pub model: Option<String>,
+    pub eligible_sources: usize,
+    pub indexed_sources: usize,
+    pub pending_sources: usize,
 }
 
 // --- E3 ---
@@ -170,7 +197,7 @@ pub struct ForeignHit {
 impl ForeignHit {
     /// `chain:seq` — the citation form for a foreign row.
     pub fn cite(&self) -> String {
-        format!("{}:{}", crate::identity::fingerprint(&self.chain_id), self.seq)
+        format!("{}:{}", self.chain_id, self.seq)
     }
 }
 
@@ -186,7 +213,7 @@ impl ForeignHit {
 ///
 /// The rule now: **every arm that produced anything keeps at least one hit.**
 /// Above that floor, arms are trimmed in the same priority order (the user's
-/// own notes dead last — they are the one human-authored signal), still in
+/// recorded annotations dead last), still in
 /// proportional chunks, because each `size()` call re-serializes the pack and a
 /// pop-one loop over a long list would be quadratic on exactly the biggest
 /// packs. That chunking reasoning was sound and is kept verbatim.
@@ -194,10 +221,14 @@ impl ForeignHit {
 /// An arm reduced to its floor is still reported in `truncated`: "one of many"
 /// and "one, that's all there was" are different answers.
 pub fn enforce_pack_budget(pack: &mut AnswerPack) {
+    enforce_pack_budget_bytes(pack, MAX_CONTEXT_BYTES);
+}
+
+pub fn enforce_pack_budget_bytes(pack: &mut AnswerPack, max_bytes: usize) {
     fn size(p: &AnswerPack) -> usize {
         serde_json::to_vec(p).map(|v| v.len()).unwrap_or(0)
     }
-    if size(pack) <= MAX_CONTEXT_BYTES {
+    if size(pack) <= max_bytes {
         return;
     }
     type Len = fn(&AnswerPack) -> usize;
@@ -205,7 +236,7 @@ pub fn enforce_pack_budget(pack: &mut AnswerPack) {
     /// Every arm that produced at least one hit keeps at least this many.
     const ARM_FLOOR: usize = 1;
 
-    let steps: [(&str, Len, Drop); 5] = [
+    let steps: [(&str, Len, Drop); 11] = [
         ("browseHits", |p| p.browse_hits.len(), |p, n| {
             let keep = p.browse_hits.len().saturating_sub(n);
             p.browse_hits.truncate(keep);
@@ -224,6 +255,22 @@ pub fn enforce_pack_budget(pack: &mut AnswerPack) {
             let keep = p.grep_hits.len().saturating_sub(n);
             p.grep_hits.truncate(keep);
         }),
+        ("claims", |p| p.claims.len(), |p,n| { p.claims.truncate(p.claims.len().saturating_sub(n)); }),
+        ("sharedHits", |p| p.shared_hits.len(), |p, n| {
+            p.shared_hits.truncate(p.shared_hits.len().saturating_sub(n));
+        }),
+        ("matchedNodes", |p| p.matched_nodes.len(), |p, n| {
+            p.matched_nodes.truncate(p.matched_nodes.len().saturating_sub(n));
+        }),
+        ("observations", |p| p.node.as_ref().map_or(0, |n| n.observations.len()), |p, n| {
+            if let Some(node) = p.node.as_mut() { node.observations.truncate(node.observations.len().saturating_sub(n)); }
+        }),
+        ("grandchildren", |p| p.node.as_ref().map_or(0, |n| n.grandchildren.len()), |p, n| {
+            if let Some(node) = p.node.as_mut() { node.grandchildren.truncate(node.grandchildren.len().saturating_sub(n)); }
+        }),
+        ("children", |p| p.node.as_ref().map_or(0, |n| n.children.len()), |p, n| {
+            if let Some(node) = p.node.as_mut() { node.children.truncate(node.children.len().saturating_sub(n)); }
+        }),
         ("notes", |p| p.notes.len(), |p, n| {
             let keep = p.notes.len().saturating_sub(n);
             p.notes.truncate(keep);
@@ -233,7 +280,7 @@ pub fn enforce_pack_budget(pack: &mut AnswerPack) {
     // Pass one: trim every arm down towards its floor, in priority order.
     for (name, len, drop) in steps {
         let mut cut = false;
-        while size(pack) > MAX_CONTEXT_BYTES && len(pack) > ARM_FLOOR {
+        while size(pack) > max_bytes && len(pack) > ARM_FLOOR {
             let over = len(pack) - ARM_FLOOR;
             drop(pack, (over / 4).max(1).min(over));
             cut = true;
@@ -241,7 +288,7 @@ pub fn enforce_pack_budget(pack: &mut AnswerPack) {
         if cut && !pack.truncated.iter().any(|t| t == name) {
             pack.truncated.push(name.to_string());
         }
-        if size(pack) <= MAX_CONTEXT_BYTES {
+        if size(pack) <= max_bytes {
             return;
         }
     }
@@ -251,33 +298,40 @@ pub fn enforce_pack_budget(pack: &mut AnswerPack) {
     // what is lost is spread across the evidence rather than taken entirely
     // from whichever arm happened to sort first.
     for (name, len, drop) in steps {
-        while size(pack) > MAX_CONTEXT_BYTES && len(pack) > 0 {
+        while size(pack) > max_bytes && len(pack) > 0 {
             drop(pack, 1);
             if !pack.truncated.iter().any(|t| t == name) {
                 pack.truncated.push(name.to_string());
             }
         }
-        if size(pack) <= MAX_CONTEXT_BYTES {
+        if size(pack) <= max_bytes {
             return;
         }
     }
+    // Metadata is part of the response budget too.
+    if size(pack) > max_bytes && pack.node.take().is_some() {
+        pack.truncated.push("node".into());
+    }
+    if size(pack) > max_bytes && pack.query.take().is_some() {
+        pack.truncated.push("query".into());
+    }
+    if size(pack) > max_bytes {
+        for arm in &mut pack.arm_coverage {
+            arm.absent_because = arm.absent_because.as_ref().map(|s| clip_line(s, 120));
+        }
+        pack.retrieval.errors = pack.retrieval.errors.iter().take(8).map(|s| clip_line(s, 120)).collect();
+    }
+
 }
 
 // ---------------------------------------------------------------------------
 // Arms and fusion
 // ---------------------------------------------------------------------------
 
-/// Which retrieval arm produced a hit. This is the auditability half of what
-/// replaced "no embedding model enters the product": a reader can always tell
-/// what KIND of evidence they are looking at.
-///
-/// The trust ordering is real and is stated in the retrieval contract:
-/// - `Node` — **curated**. A human accepted this class. It outranks everything.
-/// - `Note` — the user's own margin words. Human-authored, quoted verbatim.
-/// - `Lexical` — the terms are literally present.
-/// - `Grep` — an exact string match, with no relevance claim beyond "it's here".
-/// - `Semantic` — **associated**, not asserted. A vector said these are alike.
-///   A `Semantic`-only hit must be verified before being stated as fact.
+/// Which retrieval signal found a candidate. Relevance and source authority
+/// are independent: a semantic match can be an explicit user decision, and a
+/// lexical match can be an assistant guess. Speaker and derivation labels on
+/// evidence carry authority; retrieval arms never promote it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Arm {
@@ -290,6 +344,8 @@ pub enum Arm {
     /// The union arm over imported foreign chains; runs only under
     /// `include_shared`.
     Shared,
+    Claim,
+    Neighbor,
 }
 
 impl Arm {
@@ -301,6 +357,8 @@ impl Arm {
             Arm::Grep => "grep",
             Arm::Semantic => "semantic",
             Arm::Shared => "shared",
+            Arm::Claim => "claim",
+            Arm::Neighbor => "neighbor",
         }
     }
 }
@@ -351,7 +409,7 @@ pub fn rrf_fuse(lists: &[(Arm, Vec<(String, f64)>)]) -> Vec<(String, Vec<ArmHit>
 
 /// Which arms ran and what each returned — so an empty result reads as "the
 /// semantic index isn't built yet" rather than "you never thought about this".
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArmCoverage {
     pub arm: Arm,
@@ -413,7 +471,7 @@ pub fn render_answer_pack_block(
         && pack.prompt_hits.is_empty()
         && pack.browse_hits.is_empty()
         && pack.grep_hits.is_empty()
-        && pack.shared_hits.is_empty();
+        && pack.shared_hits.is_empty() && pack.claims.is_empty();
     if empty {
         return None;
     }
@@ -447,7 +505,7 @@ pub fn render_answer_pack_block(
 
     // The user's own words lead, exactly as in the pack itself.
     if !pack.notes.is_empty() {
-        out.push_str("YOUR NOTES (human-authored — quote verbatim):\n");
+        out.push_str("ANNOTATIONS (recorded notes; authorship not inferred):\n");
         for n in &pack.notes {
             let star = if n.starred { "★ " } else { "" };
             out.push_str(&format!(
@@ -471,8 +529,8 @@ pub fn render_answer_pack_block(
                     .map(|s| format!(" [superseded by #{s}]"))
                     .unwrap_or_default();
                 out.push_str(&format!(
-                    "- #{} {}{sup}\n",
-                    l.link.target_id,
+                    "- {} {}{sup}\n",
+                    if matches!(l.link.target_kind.as_str(),"prompt"|"decision"|"ledger"|"resolution"|"approval"|"review_verdict") {format!("#{}",l.link.target_id)} else {format!("{}:{}",l.link.target_kind,l.link.target_id)},
                     clip_line(l.label.as_deref().unwrap_or("(no preview)"), 160)
                 ));
             }
@@ -481,7 +539,7 @@ pub fn render_answer_pack_block(
         if !node.observations.is_empty() {
             out.push_str("OBSERVATIONS (patterns, not facts — label them as such):\n");
             for o in &node.observations {
-                out.push_str(&format!("- {}\n", clip_line(&o.summary, 200)));
+                out.push_str(&format!("- {} [sources: {}]\n", clip_line(&o.summary, 200),o.cite_seqs.iter().map(|seq|format!("#{seq}")).collect::<Vec<_>>().join(", ")));
             }
             out.push('\n');
         }
@@ -510,21 +568,34 @@ pub fn render_answer_pack_block(
                 )
             };
             out.push_str(&format!(
-                "- #{}{sup}{dupes}{arms} {}\n",
+                "- #{}{sup}{dupes}{arms} [{}; session {}; ts {}] {}\n",
                 h.item.seq,
+                h.item.role.as_deref().unwrap_or("unknown"),
+                h.item.session_id.as_deref().unwrap_or("unknown"),
+                h.item.ts,
                 clip_line(h.item.body.as_deref().unwrap_or(""), INLINE_BODY_CHARS)
             ));
         }
         out.push('\n');
     }
+    if !pack.claims.is_empty() {
+        out.push_str("CITED CLAIMS (derived assertions; alternatives remain unresolved):\n");
+        for claim in &pack.claims {
+            let c=&claim.assertion;
+            let citations=c.sources.iter().map(|s|format!("{}:{} ({:?})",s.chain_id,s.seq,s.role)).collect::<Vec<_>>().join(", ");
+            out.push_str(&format!("- {} · {:?}: {} [valid from {}; recorded {}; sources {}]{}\n",clip_line(&c.subject,100),c.predicate,clip_line(&c.value.supporting_text(),INLINE_BODY_CHARS),c.valid_from,claim.recorded_at,citations,
+                if claim.unresolved_alternatives.is_empty(){String::new()}else{format!(" CONFLICT: {}",claim.unresolved_alternatives.join(", "))}));
+        }
+    }
     if !pack.browse_hits.is_empty() {
         out.push_str("PAGES:\n");
         for b in &pack.browse_hits {
             out.push_str(&format!(
-                "- #{} {} — {}\n",
+                "- #{} {} — {} · {}\n",
                 b.seq.unwrap_or(0),
                 clip_line(b.title.as_deref().unwrap_or(""), 100),
-                b.url
+                b.url,
+                clip_line(&b.snippet, INLINE_BODY_CHARS)
             ));
         }
         out.push('\n');
@@ -569,7 +640,9 @@ pub fn render_answer_pack_block(
             .unwrap_or(0);
         let cut = out[..cut].rfind('\n').unwrap_or(cut);
         out.truncate(cut);
-        out.push_str("\n[prefetch clipped to fit — curl the answer-pack for the rest]\n");
+        let notice = "\n[evidence clipped to budget]\n";
+        if notice.len() <= max_bytes { out.push_str(notice); }
+        while out.len() > max_bytes { out.pop(); }
     }
     Some(out)
 }
@@ -657,6 +730,8 @@ mod tests {
     fn budget_keeps_one_hit_per_arm() {
         let filler = "x".repeat(6_000);
         let mut pack = AnswerPack {
+            claims: Vec::new(),
+            retrieval: RetrievalReport::default(),
             head_seq: 1,
             query: Some("q".into()),
             node: None,

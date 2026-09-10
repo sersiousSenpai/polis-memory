@@ -15,8 +15,8 @@ use std::time::Duration;
 use polis_core::host::{Change, GardenerEvents, IdleSignal, IngestContext, IngestObserver, NoHost, SystemClock};
 use polis_core::ledger::now_millis;
 use polis_core::MemoryApi;
+#[cfg(test)]
 use polis_llm::NoopSink;
-use polis_mcp::remote::RemoteApi;
 use polis_server::standalone::{app, check_bind, StandaloneAuth};
 use polis_server::PolisState;
 use polis_store::PolisStore;
@@ -58,10 +58,11 @@ impl GardenerEvents for LogEvents {
 }
 
 /// `gardener.lock`: one process runs the gardener over a store. The file
-/// carries the holder's pid and address; a holder that no longer answers
-/// its own health route is stale and the lock is taken over.
+/// carries diagnostic pid/address metadata. Ownership is an exclusive SQLite
+/// file lock on a separate sidecar, released by the OS even after a crash.
 pub struct GardenerLock {
     path: PathBuf,
+    _ownership: std::sync::Mutex<rusqlite::Connection>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -72,18 +73,12 @@ struct LockInfo {
 
 impl GardenerLock {
     pub fn acquire(path: &Path, addr: &str) -> Result<GardenerLock, String> {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            if let Ok(info) = serde_json::from_str::<LockInfo>(&text) {
-                let alive = std::process::id() != info.pid && RemoteApi::probe(&format!("http://{}", info.addr), Duration::from_millis(500)).is_some();
-                if alive {
-                    return Err(format!("the gardener is already running (pid {} at {}) — {}", info.pid, info.addr, path.display()));
-                }
-                tracing::info!(pid = info.pid, addr = %info.addr, "taking over a stale gardener lock");
-            }
-        }
+        let ownership = rusqlite::Connection::open(path.with_extension("owner.sqlite3")).map_err(|e| format!("open gardener ownership: {e}"))?;
+        ownership.execute_batch("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE")
+            .map_err(|e| format!("the gardener is already owned — {}: {e}", path.display()))?;
         let info = LockInfo { pid: std::process::id(), addr: addr.to_string() };
         super::home::write_private(path, serde_json::to_string(&info).map_err(|e| e.to_string())?.as_bytes())?;
-        Ok(GardenerLock { path: path.to_path_buf() })
+        Ok(GardenerLock { path: path.to_path_buf(), _ownership: std::sync::Mutex::new(ownership) })
     }
 }
 
@@ -141,12 +136,20 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
 
     let db = home.db_path();
     let store = Arc::new(PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?);
+    let identity = match crate::identity::Identity::load(&home.identity_dir(), home.device_name())? {
+        Some(identity) => {
+            crate::identity::adopt(&store, &identity, &crate::identity::login_name())?;
+            Some(Arc::new(identity))
+        }
+        None => None,
+    };
     let activity = Arc::new(Activity::default());
     // C1: the model transport from the environment (an API key, else a
     // CLI on PATH, else none) and this platform's on-device embedder.
     tracing::info!(model = %super::backend::ensure_default_model(home), "default embedding model");
     let handle = Arc::new(
-        PolisHandle::new(store.clone(), super::backend::agent_for(), Arc::new(NoHost), Arc::new(NoopSink))
+        PolisHandle::new(store.clone(), super::backend::agent_for(), Arc::new(NoHost), Arc::new(crate::usage::LocalUsageSink(store.clone())))
+            .with_identity(identity)
             .with_embedder(super::backend::embedder_for(home)),
     );
     tracing::info!(assets = super::backend::request_apple_assets_if_allowed(), "apple contextual embedding assets");
@@ -183,7 +186,8 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
         Err(e) => tracing::warn!(error = %e, "startup snapshot failed"),
     }
 
-    let router = app(state, auth).nest_service("/mcp", polis_mcp::http_service(api.clone()));
+    let router = polis_server::standalone::guard(
+        app(state, auth.clone()).nest_service("/mcp", polis_mcp::http_service(api.clone())), auth);
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| format!("bind {addr}: {e}"))?;
     let bound = listener.local_addr().map_err(|e| e.to_string())?;
     let token_path = match &opts.token_file {
@@ -204,7 +208,7 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
         None
     } else {
         match GardenerLock::acquire(&home.lock_path(), &bound.to_string()) {
-            Ok(l) => Some(l),
+            Ok(l) => Some(Arc::new(l)),
             Err(e) => {
                 tracing::warn!(error = %e, "gardener not started");
                 None
@@ -214,13 +218,19 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
     let gardener_task = lock.is_some().then(|| {
         let handle = handle.clone();
         let activity = activity.clone();
-        let cfg = GardenerConfig { backup_dir: Some(backups.clone()), backup_every_ms: policy.every_ms, backup_keep: policy.keep, ..GardenerConfig::default() };
+        let cfg = GardenerConfig { backup_dir: Some(backups.clone()), backup_every_ms: policy.every_ms, backup_keep: policy.keep,
+            embed_every_ms: i64::MAX, ..GardenerConfig::default() };
         let tick = Duration::from_secs(opts.tick_secs.max(1));
         let org_node = org_node.clone();
         tokio::spawn(async move {
-            let mut state = GardenerState { last_backup_ms: Some(now_millis()), ..Default::default() };
+            let mut state = GardenerState { last_backup_ms: Some(now_millis()), last_embed_ms: Some(now_millis()), ..Default::default() };
             loop {
                 tokio::time::sleep(tick).await;
+                if let Some(identity) = handle.identity.as_ref() {
+                    if let Err(error) = crate::sharing::flush_redactions(&handle.store, &identity.device_id(), handle.store.author()) {
+                        tracing::warn!(%error, "pending redaction retry failed");
+                    }
+                }
                 let out = gardener::step(&handle.view(), &mut state, &*activity, &SystemClock, &cfg, &LogEvents).await;
                 tracing::debug!(gate = ?out.gate, organized = out.organized, compacted = out.compacted, backed_up = ?out.backed_up, "gardener tick");
                 // E4: whatever the node's own chain grew by (a run's events,
@@ -232,6 +242,38 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
                         Ok(None) => {}
                         Err(e) => tracing::warn!(error = %e, "org node could not publish its own chain"),
                     }
+                }
+            }
+        })
+    });
+
+    // Indexing has its own worker and a two-second cadence. A slow model
+    // consolidation can never hold this loop behind its idle gate or await.
+    let indexing_task = lock.is_some().then(|| {
+        let handle = handle.clone();
+        let ownership = lock.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let worker = handle.clone();
+                let owner = ownership.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    // Keep process ownership until a synchronous provider has
+                    // actually returned, including during daemon shutdown.
+                    let _owner = owner;
+                    crate::index_tick(&worker.view(), gardener::EMBED_BATCH)
+                }).await;
+                if let Err(error) = result { tracing::warn!(%error, "indexing worker interrupted"); }
+            }
+        })
+    });
+    let filing_task = lock.is_some().then(|| {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                if let Err(error) = gardener::basic_filing_once(&handle.view()).await {
+                    tracing::warn!(%error, "basic filing worker failed; durable job will retry");
                 }
             }
         })
@@ -255,6 +297,8 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
     if let Some(t) = gardener_task {
         t.abort();
     }
+    if let Some(t) = indexing_task { t.abort(); }
+    if let Some(t) = filing_task { t.abort(); }
     drop(lock);
     match backup::backup_verify_prune(&store, &backups, policy.keep) {
         Ok(r) => tracing::info!(path = %r.path.display(), verified = r.verdict.ok, "shutdown snapshot"),
@@ -262,4 +306,46 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
     }
     home.remove_serve();
     served.map_err(|e| format!("serve: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ownership_is_atomic_before_health_is_available_and_releases() {
+        let dir = std::env::temp_dir().join(format!("polis-gardener-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gardener.lock");
+        let owner = GardenerLock::acquire(&path, "127.0.0.1:1").unwrap();
+        assert!(GardenerLock::acquire(&path, "127.0.0.1:2").is_err(), "health is intentionally unavailable, but ownership is exclusive");
+        drop(owner);
+        let replacement = GardenerLock::acquire(&path, "127.0.0.1:2").unwrap();
+        drop(replacement);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn assembled_mcp_service_requires_the_http_bearer() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let api: Arc<dyn MemoryApi> = Arc::new(PolisHandle::new(Arc::new(PolisStore::open_in_memory().unwrap()), None, Arc::new(NoHost), Arc::new(NoopSink)));
+        let state = PolisState { api: api.clone(), ingest: Arc::new(Activity::default()), events: Arc::new(LogEvents), sync: Arc::new(polis_core::sync::NoSyncRelay) };
+        let auth = StandaloneAuth { token: Some("test-secret".into()) };
+        let router = polis_server::standalone::guard(app(state, auth.clone()).nest_service("/mcp", polis_mcp::http_service(api)), auth);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#;
+        for bearer in ["", "Authorization: Bearer wrong\r\n", "Authorization: Bearer test-secret\r\n"] {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let request = format!("POST /mcp HTTP/1.1\r\nHost: {addr}\r\n{bearer}Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut response = Vec::new();
+            tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response)).await.unwrap().unwrap();
+            let response = String::from_utf8_lossy(&response);
+            if bearer.contains("test-secret") { assert!(response.starts_with("HTTP/1.1 200"), "{response}"); }
+            else { assert!(response.starts_with("HTTP/1.1 401"), "{response}"); }
+        }
+        server.abort();
+    }
 }

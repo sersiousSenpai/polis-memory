@@ -193,7 +193,7 @@ impl Agent for ClaudeCli {
         let mut errored: Option<String> = None;
         let mut model: Option<String> = None;
         let mut usage = Usage::default();
-        let drained = process::drive(child, |v| {
+        let drained = process::drive_bounded(child, req.timeout_ms, |v| {
             if model.is_none() {
                 model = fold_model(v);
             }
@@ -213,6 +213,7 @@ impl Agent for ClaudeCli {
             }
         })
         .await;
+        if let Some(error) = drained.error { return Err(AgentError::turn(error, usage, session)); }
         if let Some(msg) = errored {
             return Err(AgentError::turn(msg, usage, session));
         }

@@ -3,6 +3,31 @@
 All notable changes to Polis Memory. The format follows Keep a Changelog;
 the project is pre-1.0 and every crate shares one version.
 
+## [Unreleased]
+
+- Enforce project, principal, agent, run, organization, role and source-time
+  eligibility across retrieval and transports. Authenticate the assembled HTTP
+  and MCP daemon. Commit prompt evidence, scope and ledger events atomically.
+- Rank dense class links before output limits, interleave lexical and semantic
+  results, retrieve cited decisions directly, and add bounded conversational
+  neighbors. Preserve assistant roles, source dates, sessions and exact flags.
+- Add valid-time/recorded-time claims with checked source spans, conservative
+  authority, unresolved alternatives and retirement after source forgetting.
+- Persist leased background jobs, independent indexing/basic filing schedules,
+  atomic daemon ownership, bounded model requests and local usage accounting.
+- Resolve forgetting from ledger citations, remove compacted prompt and page
+  bodies and dependent evidence, expire copied queued proposals, persist prompt
+  peer redactions, and retain local forget markers across managed restore.
+- Complete standalone/targeted note forgetting across edits, star events, signed
+  peer redactions and managed restore. Preserve history identities, validate
+  mappings, write note scope atomically and reject delayed organizer copies.
+- Assemble retrieval against a SQLite snapshot, enforce serialized/context
+  budgets, expose arm errors/readiness and inspection cursors, and retain
+  bounded body-free traces. Add `polis inspect` JSON/HTML exports.
+- Generate API schemas and typed Python/TypeScript clients. Repair benchmark
+  profiles, readiness, spend accounting and reproducibility; preserve the paid
+  benchmark hold. Record deterministic before/after reachability results.
+
 ## [0.1.0] — 2026-09-08
 
 The first cut, extracted from Redline on 2026-09-07 with its history and

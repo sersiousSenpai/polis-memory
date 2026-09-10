@@ -129,13 +129,41 @@ impl RemoteApi {
     /// `GET /v1/memory/health` with a short timeout: is a daemon alive at
     /// `base`? The backend chooser's probe.
     pub fn probe(base: &str, timeout: Duration) -> Option<HealthReport> {
-        let api = RemoteApi::new(base, None).with_timeout(timeout);
+        Self::probe_authenticated(base, None, timeout)
+    }
+
+    pub fn probe_authenticated(base: &str, token: Option<String>, timeout: Duration) -> Option<HealthReport> {
+        let api = RemoteApi::new(base, token).with_timeout(timeout);
         api.health().ok()
     }
 }
 
 fn q(v: &Option<String>) -> Option<String> {
     v.as_ref().filter(|s| !s.trim().is_empty()).cloned()
+}
+
+fn add_scope(query: &mut Vec<(&'static str, String)>, scope: &Scope) -> Result<(), MemoryError> {
+    for (key, value) in [("principal", &scope.principal), ("org", &scope.org), ("agent", &scope.agent), ("run", &scope.run), ("project", &scope.project)] {
+        if let Some(value) = q(value) {
+            if let Some((_, existing)) = query.iter().find(|(k, _)| *k == key) {
+                if existing != &value { return Err(MemoryError::Rejected(format!("conflicting {key} filters"))); }
+            } else { query.push((key, value)); }
+        }
+    }
+    if scope.include_shared { query.push(("include_shared", "true".into())); }
+    Ok(())
+}
+
+fn scope_query(scope: &Scope) -> Result<Vec<(&'static str, String)>, MemoryError> {
+    let mut query = Vec::new(); add_scope(&mut query, scope)?; Ok(query)
+}
+
+fn add_filter(query: &mut Vec<(&'static str, String)>, filter: &EvidenceFilter) {
+    if !filter.roles.is_empty() { query.push(("roles", filter.roles.join(","))); }
+    if let Some(ts) = filter.after { query.push(("after", ts.to_string())); }
+    if let Some(ts) = filter.before { query.push(("before", ts.to_string())); }
+    if let Some(ts) = filter.valid_at { query.push(("valid_at", ts.to_string())); }
+    if let Some(ts) = filter.known_at { query.push(("known_at", ts.to_string())); }
 }
 
 #[derive(serde::Deserialize)]
@@ -161,11 +189,54 @@ fn from_value<T: DeserializeOwned>(v: Value, route: &str) -> Result<T, MemoryErr
     serde_json::from_value(v).map_err(|e| MemoryError::Store(format!("{route}: unexpected body: {e}")))
 }
 
-fn unavailable<T>() -> Result<T, MemoryError> {
-    Err(MemoryError::Unavailable("remote writes land in E2 (identity); use the daemon's routes with its token".into()))
+fn proposal_value(proposal: &Proposal) -> Value {
+    match proposal {
+        Proposal::File { parent_id, sub_class, target_kind, target_id, note, rationale } => serde_json::json!({"op":"file","parent_id":parent_id,"sub_class":sub_class,"target_kind":target_kind,"target_id":target_id,"note":note,"rationale":rationale}),
+        Proposal::Create { parent_id, title, rationale } => serde_json::json!({"op":"create","parent_id":parent_id,"title":title,"rationale":rationale}),
+        Proposal::Promote { node_id, new_parent_id, rationale } => serde_json::json!({"op":"promote","node_id":node_id,"new_parent_id":new_parent_id,"rationale":rationale}),
+        Proposal::Split { node_id, into, rationale } => serde_json::json!({"op":"split","node_id":node_id,"into":into,"rationale":rationale}),
+        Proposal::Merge { node_ids, title, parent_id, rationale } => serde_json::json!({"op":"merge","node_ids":node_ids,"title":title,"parent_id":parent_id,"rationale":rationale}),
+        Proposal::Collapse { node_id, summary, cite_seqs, rationale } => serde_json::json!({"op":"collapse","node_id":node_id,"summary":summary,"cite_seqs":cite_seqs,"rationale":rationale}),
+        Proposal::Supersede { old_seq, new_seq, rationale } => serde_json::json!({"op":"supersede","old_seq":old_seq,"new_seq":new_seq,"rationale":rationale}),
+    }
 }
 
 impl MemoryApi for RemoteApi {
+    fn decide(&self, req: &polis_core::diagnostics::DecisionRequest) -> Result<WriteReceipt, MemoryError> {
+        let (_, value) = self.post_json("/v1/memory/decisions", &to_value(req))?; from_value(value, "decisions")
+    }
+
+    fn write_claim(&self, req: &polis_core::claims::ClaimWrite) -> Result<polis_core::claims::Claim, MemoryError> {
+        let (_, value) = self.post_json("/v1/memory/claims", &to_value(req))?; from_value(value, "claims")
+    }
+
+    fn claims(&self, req: &polis_core::claims::ClaimQuery) -> Result<Vec<polis_core::claims::Claim>, MemoryError> {
+        let mut query = scope_query(&req.scope)?;
+        if let Some(q) = &req.q { query.push(("q", q.clone())); }
+        if let Some(subject) = &req.subject { query.push(("subject", subject.clone())); }
+        if let Some(predicate) = &req.predicate { query.push(("predicate", to_value(predicate).as_str().unwrap_or_default().to_string())); }
+        if let Some(t) = req.valid_at { query.push(("valid_at", t.to_string())); }
+        if let Some(t) = req.known_at { query.push(("known_at", t.to_string())); }
+        if let Some(limit) = req.limit { query.push(("limit", limit.to_string())); }
+        add_filter(&mut query, &req.evidence_filter);
+        let value: Value = self.get_json("/v1/memory/claims", &query)?;
+        from_value(value.get("claims").cloned().unwrap_or(Value::Null), "claims")
+    }
+
+    fn evidence(&self, req: &polis_core::diagnostics::EvidenceRequest) -> Result<polis_core::diagnostics::EvidenceRecord, MemoryError> {
+        let mut query = scope_query(&req.scope)?;
+        if let Some(chain) = &req.chain_id { query.push(("chain_id", chain.clone())); }
+        self.get_json(&format!("/v1/memory/evidence/{}", req.seq), &query)
+    }
+
+    fn traces(&self, req: &polis_core::diagnostics::TraceRequest) -> Result<Vec<polis_core::diagnostics::RetrievalTrace>, MemoryError> {
+        let mut query = scope_query(&req.scope)?;
+        if let Some(id) = &req.id { query.push(("id", id.clone())); }
+        if let Some(limit) = req.limit { query.push(("limit", limit.to_string())); }
+        let value: Value = self.get_json("/v1/memory/traces", &query)?;
+        from_value(value.get("traces").cloned().unwrap_or(Value::Null), "traces")
+    }
+
     fn search(&self, req: &SearchRequest) -> Result<AnswerPack, MemoryError> {
         let mut query = Vec::new();
         if let Some(v) = q(&req.q) {
@@ -177,6 +248,11 @@ impl MemoryApi for RemoteApi {
         if let Some(l) = req.limit {
             query.push(("limit", l.to_string()));
         }
+        add_scope(&mut query, &req.scope)?;
+        add_filter(&mut query, &req.filter);
+        for (key, value) in [("candidate_limit", req.candidate_limit), ("max_tokens", req.max_tokens)] { if let Some(value) = value { query.push((key, value.to_string())); } }
+        if let Some(value) = &req.cursor { query.push(("cursor", value.clone())); }
+        if let Some(value) = &req.trace_id { query.push(("trace_id", value.clone())); }
         self.get_json("/v1/memory/answer-pack", &query)
     }
 
@@ -197,6 +273,7 @@ impl MemoryApi for RemoteApi {
         if let Some(l) = req.limit {
             query.push(("limit", l.to_string()));
         }
+        add_scope(&mut query, &req.scope)?;
         self.get_json::<Hits>("/v1/memory/grep", &query).map(|h| h.hits)
     }
 
@@ -208,11 +285,12 @@ impl MemoryApi for RemoteApi {
         if let Some(v) = q(&req.project) {
             query.push(("project", v));
         }
+        add_scope(&mut query, &req.scope)?;
         self.get_json::<Nodes>("/v1/memory/tree", &query).map(|n| n.nodes)
     }
 
-    fn node(&self, id: &str, _scope: &Scope) -> Result<Option<NodeView>, MemoryError> {
-        match self.get_json::<NodeView>(&format!("/v1/memory/node/{}", segment(id)), &[]) {
+    fn node(&self, id: &str, scope: &Scope) -> Result<Option<NodeView>, MemoryError> {
+        match self.get_json::<NodeView>(&format!("/v1/memory/node/{}", segment(id)), &scope_query(scope)?) {
             Ok(v) => Ok(Some(v)),
             Err(MemoryError::NotFound) => Ok(None),
             Err(e) => Err(e),
@@ -224,10 +302,11 @@ impl MemoryApi for RemoteApi {
         if let Some(l) = req.limit {
             query.push(("limit", l.to_string()));
         }
+        add_scope(&mut query, &req.scope)?;
         self.get_json::<Items<LakeItem>>("/v1/memory/prompts", &query).map(|i| i.items)
     }
 
-    fn timeline(&self, f: &LedgerFilters, _scope: &Scope) -> Result<Vec<TimelineItem>, MemoryError> {
+    fn timeline(&self, f: &LedgerFilters, scope: &Scope) -> Result<Vec<TimelineItem>, MemoryError> {
         let mut query: Vec<(&str, String)> = Vec::new();
         for (k, v) in [
             ("kind", &f.kind),
@@ -240,6 +319,7 @@ impl MemoryApi for RemoteApi {
             ("thread_id", &f.thread_id),
             ("browse_id", &f.browse_id),
             ("role", &f.role),
+            ("principal", &f.principal),
         ] {
             if let Some(v) = q(v) {
                 query.push((k, v));
@@ -259,22 +339,23 @@ impl MemoryApi for RemoteApi {
         if let Some(seqs) = &f.seqs {
             query.push(("seqs", seqs.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",")));
         }
+        add_scope(&mut query, scope)?;
         self.get_json::<Items<TimelineItem>>("/v1/memory/ledger", &query).map(|i| i.items)
     }
 
-    fn stats(&self, _scope: &Scope) -> Result<ContextStats, MemoryError> {
-        self.get_json("/v1/context/stats", &[])
+    fn stats(&self, scope: &Scope) -> Result<ContextStats, MemoryError> {
+        self.get_json("/v1/context/stats", &scope_query(scope)?)
     }
 
-    fn map(&self, _scope: &Scope) -> Result<MemoryMapView, MemoryError> {
-        self.get_json("/v1/memory/map", &[])
+    fn map(&self, scope: &Scope) -> Result<MemoryMapView, MemoryError> {
+        self.get_json("/v1/memory/map", &scope_query(scope)?)
     }
 
     fn verify(&self) -> Result<ChainVerdict, MemoryError> {
         self.get_json("/v1/memory/verify", &[])
     }
 
-    fn list_prompts(&self, f: &PromptFilters, _scope: &Scope) -> Result<Vec<LakeItem>, MemoryError> {
+    fn list_prompts(&self, f: &PromptFilters, scope: &Scope) -> Result<Vec<LakeItem>, MemoryError> {
         let mut query: Vec<(&str, String)> = Vec::new();
         for (k, v) in [
             ("session", &f.session_id),
@@ -287,6 +368,7 @@ impl MemoryApi for RemoteApi {
             ("parent_session", &f.parent_session_id),
             ("model", &f.model),
             ("role", &f.role),
+            ("principal", &f.principal), ("agent", &f.agent), ("run", &f.run), ("org", &f.org),
         ] {
             if let Some(v) = q(v) {
                 query.push((k, v));
@@ -299,20 +381,23 @@ impl MemoryApi for RemoteApi {
         if f.include_agent {
             query.push(("include_agent", "1".into()));
         }
+        add_scope(&mut query, scope)?;
         self.get_json::<Items<LakeItem>>("/v1/context/prompts", &query).map(|i| i.items)
     }
 
-    fn browse_search(&self, query_text: &str, limit: i64, _scope: &Scope) -> Result<Vec<BrowseHit>, MemoryError> {
-        self.get_json::<Items<BrowseHit>>("/v1/context/browse/search", &[("q", query_text.to_string()), ("limit", limit.to_string())])
+    fn browse_search(&self, query_text: &str, limit: i64, scope: &Scope) -> Result<Vec<BrowseHit>, MemoryError> {
+        let mut query = vec![("q", query_text.to_string()), ("limit", limit.to_string())]; add_scope(&mut query, scope)?;
+        self.get_json::<Items<BrowseHit>>("/v1/context/browse/search", &query)
             .map(|i| i.items)
     }
 
-    fn thread_tree(&self, kind: &str, id: &str, _scope: &Scope) -> Result<Value, MemoryError> {
-        self.get_json(&format!("/v1/context/tree/{}/{}", segment(kind), segment(id)), &[])
+    fn thread_tree(&self, kind: &str, id: &str, scope: &Scope) -> Result<Value, MemoryError> {
+        self.get_json(&format!("/v1/context/tree/{}/{}", segment(kind), segment(id)), &scope_query(scope)?)
     }
 
-    fn thread(&self, kind: &str, id: &str, limit: i64, _scope: &Scope) -> Result<Option<Value>, MemoryError> {
-        match self.get_json::<Value>(&format!("/v1/context/threads/{}/{}", segment(kind), segment(id)), &[("limit", limit.to_string())]) {
+    fn thread(&self, kind: &str, id: &str, limit: i64, scope: &Scope) -> Result<Option<Value>, MemoryError> {
+        let mut query = vec![("limit", limit.to_string())]; add_scope(&mut query, scope)?;
+        match self.get_json::<Value>(&format!("/v1/context/threads/{}/{}", segment(kind), segment(id)), &query) {
             Ok(v) => Ok(Some(v)),
             Err(MemoryError::NotFound) => Ok(None),
             Err(e) => Err(e),
@@ -327,6 +412,10 @@ impl MemoryApi for RemoteApi {
         if let Some(m) = req.max_tokens {
             query.push(("max_tokens", m.to_string()));
         }
+        add_scope(&mut query, &req.scope)?;
+        add_filter(&mut query, &req.filter);
+        if let Some(value) = req.max_bytes { query.push(("max_bytes", value.to_string())); }
+        if let Some(value) = &req.trace_id { query.push(("trace_id", value.clone())); }
         self.get_json("/v1/memory/context", &query)
     }
 
@@ -368,23 +457,27 @@ impl MemoryApi for RemoteApi {
         let (_, v) = self.post_json("/v1/memory/supersede", &to_value(req))?;
         from_value(v, "supersede")
     }
-    fn stage_proposals(&self, _proposals: &[Proposal], _actor: &str) -> Result<StageResult, MemoryError> {
-        unavailable()
+    fn stage_proposals(&self, proposals: &[Proposal], actor: &str) -> Result<StageResult, MemoryError> {
+        let body = serde_json::json!({"proposals":proposals.iter().map(proposal_value).collect::<Vec<_>>(),"actor":actor});
+        let (_, value) = self.post_json("/v1/memory/proposals", &body)?;
+        from_value(value.get("staged").cloned().unwrap_or(Value::Null), "proposals")
     }
-    fn browse(&self, _req: &BrowseRequest) -> Result<WriteReceipt, MemoryError> {
-        unavailable()
+    fn browse(&self, req: &BrowseRequest) -> Result<WriteReceipt, MemoryError> {
+        let (_, value) = self.post_json("/v1/memory/browse", &to_value(req))?; from_value(value, "browse")
     }
-    fn organize(&self, _scope: &Scope) -> BoxFuture<'_, Result<OrganizeReceipt, MemoryError>> {
-        Box::pin(async { unavailable() })
+    fn organize(&self, scope: &Scope) -> BoxFuture<'_, Result<OrganizeReceipt, MemoryError>> {
+        let scope = scope.clone();
+        Box::pin(async move { let (_, value) = self.post_json("/v1/memory/organize", &to_value(&scope))?; from_value(value, "organize") })
     }
-    fn reindex(&self, _scope: &Scope) -> Result<ReindexReceipt, MemoryError> {
-        unavailable()
+    fn reindex(&self, scope: &Scope) -> Result<ReindexReceipt, MemoryError> {
+        let (_, value) = self.post_json("/v1/memory/reindex", &to_value(scope))?; from_value(value, "reindex")
     }
 
     // --- B2: the runs (reads over the routes; the revert is a POST) ----------
 
-    fn list_runs(&self, limit: i64, _scope: &Scope) -> Result<Vec<ClassRun>, MemoryError> {
-        let v: Value = self.get_json("/v1/memory/runs", &[("limit", limit.to_string())])?;
+    fn list_runs(&self, limit: i64, scope: &Scope) -> Result<Vec<ClassRun>, MemoryError> {
+        let mut query = vec![("limit", limit.to_string())]; add_scope(&mut query, scope)?;
+        let v: Value = self.get_json("/v1/memory/runs", &query)?;
         serde_json::from_value(v.get("runs").cloned().unwrap_or(Value::Array(vec![])))
             .map_err(|e| MemoryError::Store(format!("runs: unexpected body: {e}")))
     }
@@ -406,6 +499,31 @@ impl MemoryApi for RemoteApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proposal_wire_payload_is_accepted_by_the_http_parser() {
+        let proposals = vec![
+            Proposal::File { parent_id:"root".into(),sub_class:Some("sub".into()),target_kind:"prompt".into(),target_id:"42".into(),note:Some("note".into()),rationale:None },
+            Proposal::Create { parent_id:"root".into(),title:"Title".into(),rationale:Some("because".into()) },
+            Proposal::Promote { node_id:"child".into(),new_parent_id:None,rationale:None },
+            Proposal::Split { node_id:"child".into(),into:vec![polis_core::proposal::SplitPart {title:"part".into(),link_ids:vec![1,2]}],rationale:None },
+            Proposal::Merge {node_ids:vec!["a".into(),"b".into()],title:Some("Merged".into()),parent_id:None,rationale:None},
+            Proposal::Collapse {node_id:"child".into(),summary:"Summary".into(),cite_seqs:vec![42],rationale:None},
+            Proposal::Supersede {old_seq:1,new_seq:2,rationale:Some("updated".into())},
+        ];
+        let payload = serde_json::json!({"proposals":proposals.iter().map(proposal_value).collect::<Vec<_>>(),"actor":"agent"});
+        assert_eq!(polis_core::proposal::parse_proposals(&payload.to_string()), proposals);
+    }
+
+    #[test]
+    fn scope_and_filter_transport_keep_all_axes_and_reject_conflicts() {
+        let scope = Scope { principal: Some("human".into()), agent: Some("agent".into()), run: Some("run".into()), org: Some("org".into()), project: Some("/project".into()), include_shared: true };
+        let mut query = scope_query(&scope).unwrap();
+        add_filter(&mut query, &EvidenceFilter { roles: vec!["assistant".into()], after: Some(1), before: Some(2), ..Default::default() });
+        for key in ["principal", "agent", "run", "org", "project", "include_shared", "roles", "after", "before"] { assert!(query.iter().any(|(k,_)| *k == key), "{key}"); }
+        let mut conflicting = vec![("project", "/other".into())];
+        assert!(add_scope(&mut conflicting, &scope).is_err());
+    }
 
     #[test]
     fn segments_are_percent_encoded_and_statuses_map_to_the_error_vocabulary() {

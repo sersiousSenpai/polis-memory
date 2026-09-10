@@ -1,0 +1,13 @@
+{
+  "name": "polis-memory",
+  "version": "0.1.0",
+  "description": "Thin typed HTTP client for local Polis memory",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {".": {"types": "./src/index.d.ts", "import": "./src/index.js"}},
+  "files": ["src"],
+  "engines": {"node": ">=18"},
+  "scripts": {"test": "node --test test/*.test.mjs"},
+  "license": "Apache-2.0"
+}

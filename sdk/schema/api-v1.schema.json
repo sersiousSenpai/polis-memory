@@ -1,0 +1,2148 @@
+{
+  "$defs": {
+    "AnswerPack": {
+      "properties": {
+        "armCoverage": {
+          "items": {
+            "$ref": "#/$defs/ArmCoverage"
+          },
+          "type": "array"
+        },
+        "browseHits": {
+          "items": {
+            "$ref": "#/$defs/BrowseHit"
+          },
+          "type": "array"
+        },
+        "claims": {
+          "items": {
+            "$ref": "#/$defs/Claim"
+          },
+          "type": "array"
+        },
+        "grepHits": {
+          "items": {
+            "$ref": "#/$defs/GrepHit"
+          },
+          "type": "array"
+        },
+        "headSeq": {
+          "type": "integer"
+        },
+        "matchedNodes": {
+          "items": {
+            "$ref": "#/$defs/ClassNode"
+          },
+          "type": "array"
+        },
+        "node": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PackNode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "notes": {
+          "items": {
+            "$ref": "#/$defs/UserNote"
+          },
+          "type": "array"
+        },
+        "promptHits": {
+          "items": {
+            "$ref": "#/$defs/PackPromptHit"
+          },
+          "type": "array"
+        },
+        "query": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retrieval": {
+          "$ref": "#/$defs/RetrievalReport"
+        },
+        "sharedHits": {
+          "items": {
+            "$ref": "#/$defs/ForeignHit"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "headSeq",
+        "matchedNodes",
+        "notes",
+        "promptHits",
+        "browseHits",
+        "armCoverage",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "Arm": {
+      "enum": [
+        "Node",
+        "Note",
+        "Lexical",
+        "Grep",
+        "Semantic",
+        "Shared",
+        "Claim",
+        "Neighbor"
+      ],
+      "type": "string"
+    },
+    "ArmCoverage": {
+      "properties": {
+        "absentBecause": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "arm": {
+          "$ref": "#/$defs/Arm"
+        },
+        "hits": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ran": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "arm",
+        "ran",
+        "hits"
+      ],
+      "type": "object"
+    },
+    "ArmHit": {
+      "properties": {
+        "arm": {
+          "$ref": "#/$defs/Arm"
+        },
+        "rank": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "score": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "arm",
+        "rank",
+        "score"
+      ],
+      "type": "object"
+    },
+    "BrowseHit": {
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "integer"
+        },
+        "score": {
+          "type": "number"
+        },
+        "seq": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shotKey": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snippet": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ts": {
+          "type": "integer"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "ts",
+        "url",
+        "snippet",
+        "score",
+        "stage"
+      ],
+      "type": "object"
+    },
+    "Claim": {
+      "properties": {
+        "contradicts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "derivation": {
+          "$ref": "#/$defs/ClaimDerivation"
+        },
+        "eventSeq": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "modelVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "organizerRun": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "predicate": {
+          "$ref": "#/$defs/ClaimPredicate"
+        },
+        "recordedAt": {
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/ClaimSource"
+          },
+          "type": "array"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "supersedes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "unresolvedAlternatives": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "validFrom": {
+          "type": "integer"
+        },
+        "validUntil": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "$ref": "#/$defs/ClaimValue"
+        }
+      },
+      "required": [
+        "id",
+        "subject",
+        "predicate",
+        "value",
+        "scope",
+        "sources",
+        "derivation",
+        "validFrom",
+        "recordedAt",
+        "eventSeq",
+        "unresolvedAlternatives"
+      ],
+      "type": "object"
+    },
+    "ClaimDerivation": {
+      "enum": [
+        "structured",
+        "gardener"
+      ],
+      "type": "string"
+    },
+    "ClaimPredicate": {
+      "enum": [
+        "preference",
+        "project_configuration",
+        "selected_technology",
+        "constraint",
+        "decision",
+        "relationship"
+      ],
+      "type": "string"
+    },
+    "ClaimQuery": {
+      "properties": {
+        "evidenceFilter": {
+          "$ref": "#/$defs/EvidenceFilter"
+        },
+        "knownAt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "predicate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClaimPredicate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "q": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validAt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ClaimRole": {
+      "enum": [
+        "user",
+        "assistant",
+        "agent",
+        "system",
+        "tool"
+      ],
+      "type": "string"
+    },
+    "ClaimSource": {
+      "properties": {
+        "chainId": {
+          "type": "string"
+        },
+        "quote": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/ClaimRole"
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "startByte": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "chainId",
+        "seq",
+        "role",
+        "quote"
+      ],
+      "type": "object"
+    },
+    "ClaimValue": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "text"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "boolean"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "number"
+            },
+            "value": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ClaimWrite": {
+      "properties": {
+        "contradicts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "derivation": {
+          "$ref": "#/$defs/ClaimDerivation"
+        },
+        "id": {
+          "type": "string"
+        },
+        "modelVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "organizerRun": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "predicate": {
+          "$ref": "#/$defs/ClaimPredicate"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/ClaimSource"
+          },
+          "type": "array"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "supersedes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "validFrom": {
+          "type": "integer"
+        },
+        "validUntil": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "$ref": "#/$defs/ClaimValue"
+        }
+      },
+      "required": [
+        "id",
+        "subject",
+        "predicate",
+        "value",
+        "scope",
+        "sources",
+        "derivation",
+        "validFrom"
+      ],
+      "type": "object"
+    },
+    "ClassLink": {
+      "properties": {
+        "createdAt": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "integer"
+        },
+        "nodeId": {
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "targetId": {
+          "type": "string"
+        },
+        "targetKind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "nodeId",
+        "targetKind",
+        "targetId",
+        "status",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ClassNode": {
+      "properties": {
+        "createdAt": {
+          "type": "integer"
+        },
+        "curatedBy": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "ipName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "parentId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pinned": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "title",
+        "status",
+        "pinned",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ClassObservation": {
+      "properties": {
+        "citeSeqs": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "createdAt": {
+          "type": "integer"
+        },
+        "createdSeq": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dismissed": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "integer"
+        },
+        "nodeId": {
+          "type": "string"
+        },
+        "pinned": {
+          "type": "boolean"
+        },
+        "retiredAt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retiredReason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "nodeId",
+        "summary",
+        "citeSeqs",
+        "pinned",
+        "dismissed",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ContextBlock": {
+      "properties": {
+        "coverage": {
+          "items": {
+            "$ref": "#/$defs/ArmCoverage"
+          },
+          "type": "array"
+        },
+        "retrieval": {
+          "$ref": "#/$defs/RetrievalReport"
+        },
+        "terms": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truncated": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "terms"
+      ],
+      "type": "object"
+    },
+    "ContextRequest": {
+      "properties": {
+        "filter": {
+          "$ref": "#/$defs/EvidenceFilter"
+        },
+        "maxBytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maxTokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "node": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "q": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "traceId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DecisionRequest": {
+      "properties": {
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "sourceSeq": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "EvidenceFilter": {
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "before": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "knownAt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "roles": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "validAt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "EvidenceRecord": {
+      "properties": {
+        "chainId": {
+          "type": "string"
+        },
+        "item": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LakeItem"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "seq",
+        "chainId",
+        "status"
+      ],
+      "type": "object"
+    },
+    "EvidenceRequest": {
+      "properties": {
+        "chainId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "seq": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "ForeignHit": {
+      "properties": {
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/ArmHit"
+          },
+          "type": "array"
+        },
+        "chainId": {
+          "type": "string"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "redaction": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "score": {
+          "type": "number"
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "chainId",
+        "source",
+        "seq",
+        "role",
+        "redaction",
+        "arms",
+        "score"
+      ],
+      "type": "object"
+    },
+    "ForgetReceipt": {
+      "properties": {
+        "forgotten": {
+          "type": "boolean"
+        },
+        "seq": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "forgotten"
+      ],
+      "type": "object"
+    },
+    "ForgetRequest": {
+      "properties": {
+        "confirm": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "targetId": {
+          "type": "string"
+        },
+        "targetKind": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "GrepHit": {
+      "properties": {
+        "excerpt": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "seq": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ts": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "ts",
+        "label",
+        "excerpt"
+      ],
+      "type": "object"
+    },
+    "IndexReadiness": {
+      "properties": {
+        "eligibleSources": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "indexedSources": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pendingSources": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "IngestItem": {
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ts": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "IngestReceipt": {
+      "properties": {
+        "recorded": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "skipped": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "recorded",
+        "skipped"
+      ],
+      "type": "object"
+    },
+    "IngestRequest": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/IngestItem"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        }
+      },
+      "type": "object"
+    },
+    "LakeItem": {
+      "properties": {
+        "body": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "missionId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentSessionId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "projectPath": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refKind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "surface": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "threadId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "threadKind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ts": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "ts",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "PackLink": {
+      "properties": {
+        "createdAt": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "integer"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nodeId": {
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "supersededBy": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetId": {
+          "type": "string"
+        },
+        "targetKind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "nodeId",
+        "targetKind",
+        "targetId",
+        "status",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "PackNode": {
+      "properties": {
+        "children": {
+          "items": {
+            "$ref": "#/$defs/ClassNode"
+          },
+          "type": "array"
+        },
+        "grandchildren": {
+          "items": {
+            "$ref": "#/$defs/ClassNode"
+          },
+          "type": "array"
+        },
+        "links": {
+          "items": {
+            "$ref": "#/$defs/PackLink"
+          },
+          "type": "array"
+        },
+        "node": {
+          "$ref": "#/$defs/ClassNode"
+        },
+        "observations": {
+          "items": {
+            "$ref": "#/$defs/ClassObservation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "node",
+        "children",
+        "grandchildren",
+        "links",
+        "observations"
+      ],
+      "type": "object"
+    },
+    "PackPromptHit": {
+      "properties": {
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/ArmHit"
+          },
+          "type": "array"
+        },
+        "body": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duplicateOf": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "missionId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentSessionId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "projectPath": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refKind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stage": {
+          "type": "string"
+        },
+        "supersededBy": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "surface": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "threadId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "threadKind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ts": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "ts",
+        "kind",
+        "stage"
+      ],
+      "type": "object"
+    },
+    "RememberRequest": {
+      "properties": {
+        "asUser": {
+          "type": "boolean"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RetrievalReport": {
+      "properties": {
+        "candidateLimit": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "candidatesConsidered": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "candidatesReturned": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "index": {
+          "$ref": "#/$defs/IndexReadiness"
+        },
+        "snapshotHash": {
+          "type": "string"
+        },
+        "timingsUs": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "traceId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RetrievalTrace": {
+      "properties": {
+        "config": {},
+        "coverage": {},
+        "cuts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "elapsedMs": {
+          "type": "number"
+        },
+        "errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "headSeq": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "replay": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "selectedSeqs": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "snapshotHash": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "Scope": {
+      "properties": {
+        "agent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "includeShared": {
+          "type": "boolean"
+        },
+        "org": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "principal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SearchRequest": {
+      "properties": {
+        "candidateLimit": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "filter": {
+          "$ref": "#/$defs/EvidenceFilter"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maxTokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "node": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "q": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "traceId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TraceRequest": {
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        }
+      },
+      "type": "object"
+    },
+    "UserNote": {
+      "properties": {
+        "createdAt": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "integer"
+        },
+        "seq": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "starred": {
+          "type": "boolean"
+        },
+        "targetId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetKind": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "targetKind",
+        "text",
+        "starred",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "WriteReceipt": {
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seq": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "urn:polis:api:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Polis SDK HTTP contracts (generated from serde source)",
+  "x-endpoints": {
+    "GET /v1/memory/answer-pack": {
+      "request": "SearchRequest",
+      "response": "AnswerPack"
+    },
+    "GET /v1/memory/claims": {
+      "request": "ClaimQuery",
+      "response": {
+        "properties": {
+          "claims": {
+            "items": {
+              "$ref": "#/$defs/Claim"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "GET /v1/memory/context": {
+      "request": "ContextRequest",
+      "response": "ContextBlock"
+    },
+    "GET /v1/memory/evidence/:seq": {
+      "request": "EvidenceRequest",
+      "response": "EvidenceRecord"
+    },
+    "GET /v1/memory/traces": {
+      "request": "TraceRequest",
+      "response": {
+        "properties": {
+          "traces": {
+            "items": {
+              "$ref": "#/$defs/RetrievalTrace"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "POST /v1/memory/claims": {
+      "request": "ClaimWrite",
+      "response": "Claim"
+    },
+    "POST /v1/memory/decisions": {
+      "request": "DecisionRequest",
+      "response": "WriteReceipt"
+    },
+    "POST /v1/memory/events": {
+      "request": "IngestRequest",
+      "response": "IngestReceipt"
+    },
+    "POST /v1/memory/remember": {
+      "request": "RememberRequest",
+      "response": "WriteReceipt"
+    }
+  },
+  "x-http-error": {
+    "properties": {
+      "error": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "error"
+    ],
+    "type": "object"
+  },
+  "x-query-mapping": {
+    "candidateLimit": "candidate_limit",
+    "filter": [
+      "roles",
+      "after",
+      "before",
+      "valid_at",
+      "known_at"
+    ],
+    "maxBytes": "max_bytes",
+    "maxTokens": "max_tokens",
+    "scope": [
+      "principal",
+      "project",
+      "agent",
+      "run",
+      "org",
+      "include_shared"
+    ],
+    "traceId": "trace_id"
+  }
+}

@@ -159,7 +159,7 @@ impl Agent for CodexCli {
         let mut text: Option<String> = None;
         let mut errored: Option<String> = None;
         let mut usage = Usage { model: self.model.clone(), ..Default::default() };
-        let drained = process::drive(child, |v| match classify_codex_line(v) {
+        let drained = process::drive_bounded(child, req.timeout_ms, |v| match classify_codex_line(v) {
             CodexLine::Thread(id) => thread = Some(id),
             CodexLine::Message(m) => match &mut text {
                 Some(prev) => {
@@ -173,6 +173,7 @@ impl Agent for CodexCli {
             CodexLine::Ignore => {}
         })
         .await;
+        if let Some(error) = drained.error { return Err(AgentError::turn(error, usage, thread)); }
         if let Some(msg) = errored {
             return Err(AgentError::turn(msg, usage, thread));
         }

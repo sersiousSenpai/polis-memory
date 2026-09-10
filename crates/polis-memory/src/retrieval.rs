@@ -50,42 +50,11 @@ pub fn list_prompts(polis: &Polis<'_>, filters: &PromptFilters) -> Result<Vec<La
     Ok(items)
 }
 
-/// `build_stats` memoized on the ledger head. Five GROUP BY aggregations over
-/// the whole lake, and the Memory surface's facet rails re-read them on every
-/// `memory-changed` — which a browse capture burst fires repeatedly.
-///
-/// The head seq is a sound cache key because every axis this counts is derived
-/// from a table that appends a ledger event when it changes: a prompt, an
-/// event, a class link, an author. Nothing here can move without the head
-/// moving, so a hit is never stale.
+/// Build from this store. Aggregates deliberately have no process-global cache:
+/// different stores can share a ledger sequence, and derived projections can
+/// change without moving the ledger head.
 pub fn build_stats_cached(polis: &Polis<'_>) -> ContextStats {
-    let db = polis.store;
-    use std::sync::{Mutex, OnceLock};
-    /// Minimum wall-clock between two rebuilds, ON TOP of the head-seq key.
-    ///
-    /// The head key alone is exactly wrong during the one situation that
-    /// matters: a browse capture burst appends an event per page, so every
-    /// poll sees a new head and rebuilds the full five-axis aggregate — the
-    /// cache misses hardest precisely when the app is busiest. A 500 ms floor
-    /// keeps the numbers live to the eye while collapsing a burst into one
-    /// rebuild.
-    const DEBOUNCE_MS: i64 = 500;
-    static CACHE: OnceLock<Mutex<Option<(i64, i64, ContextStats)>>> = OnceLock::new();
-    let cell = CACHE.get_or_init(|| Mutex::new(None));
-    let head = db.max_ledger_seq().unwrap_or(0);
-    let now = now_millis();
-    if let Ok(guard) = cell.lock() {
-        if let Some((at, built_ms, stats)) = guard.as_ref() {
-            if *at == head || now - *built_ms < DEBOUNCE_MS {
-                return stats.clone();
-            }
-        }
-    }
-    let fresh = build_stats(polis);
-    if let Ok(mut guard) = cell.lock() {
-        *guard = Some((head, now, fresh.clone()));
-    }
-    fresh
+    build_stats(polis)
 }
 
 /// Build the stats digest. Best-effort per axis (an unmigrated table yields an
@@ -323,366 +292,414 @@ pub fn build_answer_pack(
     build_answer_pack_scoped(polis, q, node_id, limit, &polis_store::principals::ScopeFilter::default())
 }
 
-/// The pack under an identity scope (E2): the lexical and browse arms bind
-/// the scope's ids; every other arm is a catalog read the scope does not
-/// narrow yet (class nodes are stamped but a class is shared by design).
+/// Compatibility entry point. Production requests use `search_request` so
+/// database errors propagate and a single SQLite snapshot describes the pack.
 pub fn build_answer_pack_scoped(
-    polis: &Polis<'_>,
-    q: Option<&str>,
-    node_id: Option<&str>,
-    limit: i64,
+    polis: &Polis<'_>, q: Option<&str>, node_id: Option<&str>, limit: i64,
     scope: &polis_store::principals::ScopeFilter,
 ) -> AnswerPack {
-    let db = polis.store;
-    // The whole pack is one op (`pack`); every arm below is its own
-    // (`pack.<arm>`), so the stats route can say which arm a slow question
-    // spent its time in. docs/bench.md "answer pack" is this timer.
-    let pack_span = tracing::info_span!("polis.op", op = "pack", ms = tracing::field::Empty);
-    let pack_timer = crate::latency::Timer::start("pack");
-    let head_seq = db.max_ledger_seq().unwrap_or(0);
-    let query = q.map(str::trim).filter(|s| !s.is_empty());
-
-    // --- resolve a node: the explicit id first, then the best title match ---
-    let mut matched: Vec<polis_core::types::ClassNode> = crate::latency::timed("pack.resolve", || {
-        query
-            .map(|term| db.match_class_nodes(term, limit).unwrap_or_default())
-            .unwrap_or_default()
-    });
-    // The best title match is THE class only when the index says it covers
-    // the question (`PolisStore::resolve_class_node`): the cascade's OR stage
-    // finds a node on any single loose term, and that is how a question
-    // about Redline's memory once answered from an astronomy class, then
-    // from "Payload CMS lookup" (`look*` → `lookup`). Weaker matches stay in
-    // `matched` as candidates; the arms below answer regardless.
-    let resolved = node_id
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .and_then(|id| db.get_class_node(id).ok().flatten())
-        // A stale `?node=` falls through to the best COVERING match rather
-        // than returning nothing — the miss path.
-        .or_else(|| query.and_then(|term| db.resolve_class_node(term, limit).ok().flatten()));
-    if let Some(r) = &resolved {
-        matched.retain(|n| n.id != r.id);
+    match assemble_pack(polis, q, node_id, limit, 200, scope, &polis_core::api::EvidenceFilter { roles:scope.roles.clone(), after:scope.after, before:scope.before, ..Default::default() }) {
+        Ok(pack) => { crate::warmth::record_pack(polis.store, &pack, now_millis()); pack },
+        Err(e) => empty_pack(q, e.to_string()),
     }
+}
 
-    // Per-list ceilings applied BEFORE the byte budget. A bulging class can
-    // hold thousands of links, and feeding all of them into a trim loop that
-    // re-serializes per dropped item is quadratic on exactly the nodes most
-    // worth asking about. The budget below still has the final say.
-    let node_cap = (limit * 5).max(20) as usize;
-    let mut over_cap: Vec<&str> = Vec::new();
-    let node = crate::latency::timed("pack.node", || resolved.map(|node| {
-        let mut children = db.list_class_children(&node.id).unwrap_or_default();
-        // ONE query for the whole generation, not one per child — the same
-        // N+1 the Timeline's filing probe had, in the route that is supposed
-        // to be the fast one. A node with 40 children cost 40 round trips
-        // through the connection lock to build a list the pack then caps.
-        // (`link_previews_for_seqs` is the idiom.)
-        let child_ids: Vec<String> = children.iter().map(|c| c.id.clone()).collect();
-        let mut grandchildren = db.list_class_children_for_parents(&child_ids).unwrap_or_default();
-        if children.len() > node_cap {
-            children.truncate(node_cap);
-            over_cap.push("children");
+fn empty_pack(q: Option<&str>, error: String) -> AnswerPack {
+    AnswerPack { head_seq: 0, query: q.map(str::to_string), node: None,
+        matched_nodes: Vec::new(), notes: Vec::new(), prompt_hits: Vec::new(),
+        browse_hits: Vec::new(), grep_hits: Vec::new(), arm_coverage: Vec::new(),
+        truncated: Vec::new(), shared_hits: Vec::new(), claims:Vec::new(),
+        retrieval: RetrievalReport { errors: vec![error], ..Default::default() } }
+}
+
+fn assemble_pack(
+    polis: &Polis<'_>, q: Option<&str>, node_id: Option<&str>, limit: i64,
+    candidate_limit: usize, scope: &polis_store::principals::ScopeFilter,
+    filter: &polis_core::api::EvidenceFilter,
+) -> rusqlite::Result<AnswerPack> {
+    let db = polis.store;
+    let _timer = crate::latency::Timer::start("pack");
+    let (head_seq, snapshot_hash) = db.snapshot_head()?;
+    let query = q.map(str::trim).filter(|s| !s.is_empty());
+    let limit = clamp_answer_pack_limit(Some(limit)) as usize;
+    let pool = candidate_limit.clamp(limit, 200);
+    let plan = query.and_then(plan_fts_query);
+    let terms = plan.as_ref().map(|p| p.terms.clone()).unwrap_or_default();
+    let mut cuts = Vec::new();
+    let mut considered = 0usize;
+    let mut timings=std::collections::BTreeMap::new();
+    let mut arm_start=std::time::Instant::now();
+    macro_rules! mark { ($name:literal) => {{ let duration=arm_start.elapsed();crate::latency::record($name,duration.as_millis().min(u32::MAX as u128) as u32);timings.insert($name.to_string(),duration.as_micros().min(u64::MAX as u128) as u64);arm_start=std::time::Instant::now(); }}; }
+
+    let mut matched = match query { Some(q) => db.match_class_nodes_scoped(q, pool as i64, scope)?, None => Vec::new() };
+    let explicit = match node_id.filter(|id| !id.trim().is_empty()) { Some(id) => db.get_class_node_scoped(id, scope)?, None => None };
+    let resolved = match explicit { Some(n) => Some(n), None => match query { Some(q) => db.resolve_class_node_scoped(q, pool as i64, scope)?, None => None } };
+    if let Some(n) = &resolved { matched.retain(|m| m.id != n.id); }
+    considered += matched.len();
+    if matched.len() > limit { cuts.push("matchedNodes".into()); matched.truncate(limit); }
+    mark!("pack.resolve");
+    let node = if let Some(node) = resolved {
+        let mut children = db.list_class_children_scoped(&node.id, scope)?;
+        let ids = children.iter().map(|n| n.id.clone()).collect::<Vec<_>>();
+        let mut grandchildren = db.list_class_children_for_parents_scoped(&ids, scope)?;
+        let mut raw_links = db.list_class_links_for_node_scoped(&node.id, scope)?;
+        considered += raw_links.len() + children.len() + grandchildren.len();
+        let seqs = raw_links.iter().filter_map(link_seq).collect::<Vec<_>>();
+        let scores = db.score_link_seqs(&seqs, &terms)?;
+        raw_links.sort_by(|a,b| {
+            let score = |l: &ClassLink| scores.get(&link_seq(l).unwrap_or(0)).copied().unwrap_or(0)
+                + terms.iter().filter(|t| l.note.as_deref().unwrap_or("").to_lowercase().contains(t.as_str())).count() as i64;
+            score(b).cmp(&score(a)).then_with(|| a.id.cmp(&b.id))
+        });
+        // Relevance is established over all eligible links before taking a
+        // bounded preview. A later link has the same opportunity as the first.
+        if raw_links.len() > limit { cuts.push("links".into()); raw_links.truncate(limit); }
+        let seqs = raw_links.iter().filter_map(link_seq).collect::<Vec<_>>();
+        let mut labels = db.link_previews_for_seqs(&seqs)?;
+        let mut source_items=db.lake_items_for_seqs_scoped(&seqs,scope)?;
+        source_items.extend(db.decision_items_scoped(None,Some(&seqs),pool,scope)?.into_iter().map(|(it,_)|it));
+        for item in source_items {if let Some(body)=item.body {labels.insert(item.seq,format!("[{}] {}",item.role.as_deref().unwrap_or("unknown"),polis_core::dedup::excerpt_around(&body,&terms,400)));}}
+
+        let mut superseded = db.supersessions_for_seqs(&seqs)?;
+        let eligible=db.eligible_seqs(&superseded.values().copied().collect::<Vec<_>>(),scope)?;
+        superseded.retain(|_,replacement|eligible.contains(replacement));
+        let links = raw_links.into_iter().map(|link| {
+            let seq = link_seq(&link);
+            PackLink { label: seq.and_then(|s| labels.get(&s).cloned()), superseded_by: seq.and_then(|s| superseded.get(&s).copied()), link }
+        }).collect();
+        let mut observations = db.list_class_observations_scoped(&node.id, false, scope)?;
+        considered += observations.len();
+        for (name, list) in [("children", &mut children), ("grandchildren", &mut grandchildren)] {
+            if list.len() > limit { cuts.push(name.into()); list.truncate(limit); }
         }
-        if grandchildren.len() > node_cap {
-            grandchildren.truncate(node_cap);
-            over_cap.push("grandchildren");
-        }
-        let mut raw_links = db.list_class_links_for_node(&node.id).unwrap_or_default();
-        if raw_links.len() > node_cap {
-            raw_links.truncate(node_cap);
-            over_cap.push("links");
-        }
-        let ledger_seq = |l: &polis_core::types::ClassLink| -> Option<i64> {
-            matches!(l.target_kind.as_str(), "prompt" | "decision" | "ledger")
-                .then(|| l.target_id.trim().parse().ok())
-                .flatten()
-        };
-        let seqs: Vec<i64> = raw_links.iter().filter_map(ledger_seq).collect();
-        // Two batched reads for the whole link set, not two per link.
-        let labels = db.link_previews_for_seqs(&seqs).unwrap_or_default();
-        let superseded = db.supersessions_for_seqs(&seqs).unwrap_or_default();
-        let links: Vec<PackLink> = raw_links
-            .into_iter()
-            .map(|link| {
-                let seq = ledger_seq(&link);
-                PackLink {
-                    label: seq.and_then(|s| labels.get(&s).cloned()),
-                    superseded_by: seq.and_then(|s| superseded.get(&s).copied()),
-                    link,
-                }
-            })
-            .collect();
-        let mut observations = db.list_class_observations(&node.id, false).unwrap_or_default();
-        if observations.len() > node_cap {
-            observations.truncate(node_cap);
-            over_cap.push("observations");
-        }
-        PackNode { node, children, grandchildren, links, observations }
-    }));
-
-    // --- lexical evidence: always produced, node or no node ---
-    let notes = crate::latency::timed("pack.notes", || {
-        query
-            .map(|term| db.search_user_notes(term, limit).unwrap_or_default())
-            .unwrap_or_default()
-    });
-    let plan = query.and_then(polis_core::query::plan_fts_query);
-    let terms: Vec<String> = plan.as_ref().map(|p| p.terms.clone()).unwrap_or_default();
-
-    let mut ranked = crate::latency::timed("pack.lexical", || {
-        query
-            .map(|term| {
-                db.search_prompts_ranked_scoped(term, limit, scope).unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "answer-pack: prompt search failed");
-                    Vec::new()
-                })
-            })
-            .unwrap_or_default()
-    });
-
-    // --- the semantic arm, and the FUSE the pipeline is named for ------------
-    //
-    // The arm reaches what shares no words with the question. It runs last and
-    // it never replaces the lexical ordering — RRF fuses the two, so a hit both
-    // arms found rises and a hit only one found still appears.
-    //
-    // Its absence is a first-class state: `provider_kind() == Absent` means no
-    // on-device model (or a macOS below 14 with no sentence fallback either),
-    // and the pack SAYS so rather than returning a short list that reads as an
-    // empty history.
-    let semantic = crate::latency::timed("pack.semantic", || {
-        query.and_then(|term| crate::semantic_search(polis, term, (limit * 3).max(24) as usize))
-    });
-    let semantic_prompt_hits: Vec<(i64, f64)> = semantic
-        .as_ref()
-        .map(|hits| {
-            hits.iter()
-                .filter(|h| h.target_kind == "prompt")
-                .map(|h| (h.target_id, h.score as f64))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Fuse the two prompt rankings. Keys are ledger seqs for the lexical arm
-    // and prompt ids for the semantic one, so the semantic ids are resolved to
-    // seqs first — a fusion over two different id-spaces would silently agree
-    // with itself about nothing.
-    let arms_by_seq: std::collections::HashMap<i64, Vec<ArmHit>> = if semantic_prompt_hits.is_empty()
-    {
-        std::collections::HashMap::new()
-    } else {
-        let ids: Vec<i64> = semantic_prompt_hits.iter().map(|(id, _)| *id).collect();
-        let seq_of = db.seqs_for_prompt_ids(&ids).unwrap_or_default();
-        let lexical: Vec<(String, f64)> = ranked
-            .iter()
-            .enumerate()
-            .map(|(i, (it, _))| (it.seq.to_string(), -(i as f64)))
-            .collect();
-        let sem: Vec<(String, f64)> = semantic_prompt_hits
-            .iter()
-            .filter_map(|(id, s)| seq_of.get(id).map(|seq| (seq.to_string(), *s)))
-            .collect();
-        let fused = rrf_fuse(&[(Arm::Lexical, lexical), (Arm::Semantic, sem)]);
-
-        // Reorder the lexical results by the fused score, then append any
-        // semantic-only hits the lexical arm never saw. Appending rather than
-        // interleaving is deliberate: a hit no term matched is weaker evidence
-        // and should not displace one that did.
-        let order: std::collections::HashMap<i64, usize> = fused
-            .iter()
-            .enumerate()
-            .filter_map(|(rank, (k, _, _))| k.parse::<i64>().ok().map(|s| (s, rank)))
-            .collect();
-        ranked.sort_by_key(|(it, _)| order.get(&it.seq).copied().unwrap_or(usize::MAX));
-
-        let known: std::collections::HashSet<i64> = ranked.iter().map(|(it, _)| it.seq).collect();
-        let extra: Vec<i64> = fused
-            .iter()
-            .filter_map(|(k, _, _)| k.parse::<i64>().ok())
-            .filter(|s| !known.contains(s))
-            .take(limit as usize)
-            .collect();
-        if !extra.is_empty() {
-            if let Ok(items) = db.lake_items_for_seqs(&extra) {
-                ranked.extend(items.into_iter().map(|it| (it, polis_core::query::MatchStage::Or)));
-            }
-        }
-        fused
-            .into_iter()
-            .filter_map(|(k, arms, _)| k.parse::<i64>().ok().map(|s| (s, arms)))
-            .collect()
+        if observations.len() > limit { cuts.push("observations".into()); observations.truncate(limit); }
+        Some(PackNode { node, children, grandchildren, links, observations })
+    } else { None };
+    mark!("pack.node");
+    let mut notes = match query { Some(q) => db.search_user_notes_scoped(q, pool as i64, scope)?, None => Vec::new() };
+    considered += notes.len();
+    if notes.len() > limit { notes.truncate(limit); cuts.push("notes".into()); }
+    mark!("pack.notes");
+    let mut ranked = match query { Some(q) => db.search_prompts_ranked_scoped(q, pool as i64, scope)?, None => Vec::new() };
+    if let Some(q)=query { ranked.extend(db.decision_items_scoped(Some(q),None,pool,scope)?); }
+    let lexical_count = ranked.len();
+    mark!("pack.lexical");
+    let mut errors=Vec::new();
+    let semantic = match (query, polis.embedder.as_deref()) {
+        (Some(q), Some(embedder)) => match polis_embed::semantic_search_scoped_checked(db, embedder, q, pool, scope) {
+            Ok(hits)=>hits,Err(e)=>{ errors.push(format!("semantic: {e}"));None }
+        },
+        _ => None,
     };
-
-    // fuse → DEDUP → CLIP → budget. The order is the fix: deduplicating after
-    // clipping cannot work, because a head clip makes near-duplicates
-    // byte-identical and clipping to a fixed 4,000 makes the budget's job
-    // impossible. The live probe returned four copies of one preface and then
-    // dropped every browse hit to fit them.
-    let prompt_hits = {
-        let bodies: Vec<String> = ranked
-            .iter()
-            .map(|(it, _)| it.body.clone().unwrap_or_default())
-            .collect();
-        let cands: Vec<polis_core::dedup::Candidate<'_>> = ranked
-            .iter()
-            .zip(bodies.iter())
-            .map(|((it, _), body)| polis_core::dedup::Candidate {
-                key: it.seq,
-                // The lake's own exact-identity key, already stored and indexed.
-                exact_hash: None,
-                text: body.as_str(),
-            })
-            .collect();
-        let verdicts = polis_core::dedup::dedup(&cands);
-        let survivors: Vec<usize> = verdicts
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| matches!(v, polis_core::dedup::Verdict::Keep { .. }))
-            .map(|(i, _)| i)
-            .collect();
-        // Per-hit budget is computed over the SURVIVORS, so suppressing
-        // duplicates buys the remaining hits more room rather than less.
-        let per_hit = polis_core::dedup::per_hit_budget(MAX_CONTEXT_BYTES, survivors.len());
-        let hit_seqs: Vec<i64> = survivors.iter().map(|i| ranked[*i].0.seq).collect();
-        let hit_superseded = db.supersessions_for_seqs(&hit_seqs).unwrap_or_default();
-        survivors
-            .into_iter()
-            .map(|i| {
-                let (item, stage) = ranked[i].clone();
-                let absorbed = match &verdicts[i] {
-                    polis_core::dedup::Verdict::Keep { absorbed } => absorbed.clone(),
-                    polis_core::dedup::Verdict::Duplicate { .. } => Vec::new(),
-                };
-                let mut item = item;
-                item.body = item
-                    .body
-                    .map(|b| polis_core::dedup::excerpt_around(&b, &terms, per_hit));
-                PackPromptHit {
-                    superseded_by: hit_superseded.get(&item.seq).copied(),
-                    duplicate_of: absorbed,
-                    stage: stage.as_str().to_string(),
-                    arms: arms_by_seq.get(&item.seq).cloned().unwrap_or_default(),
-                    item,
-                }
-            })
-            .collect::<Vec<_>>()
-    };
-
-    // Browse events carry their own exact-identity key — `context_hash`, the
-    // sha256 of the normalized DOM — and 20% of them are exact duplicates today
-    // (829 rows, 665 distinct). Revisiting a page is a real signal about
-    // attention, but four identical copies of it are not four pieces of evidence.
-    let browse_hits = crate::latency::timed("pack.browse", || {
-        let raw = query
-            .map(|term| db.search_browse_events_scoped(term, limit, scope).unwrap_or_default())
-            .unwrap_or_default();
-        let hashes = db
-            .context_hashes_for_browse_ids(&raw.iter().map(|h| h.id).collect::<Vec<_>>())
-            .unwrap_or_default();
-        let texts: Vec<String> = raw
-            .iter()
-            .map(|h| format!("{} {}", h.title.clone().unwrap_or_default(), h.url))
-            .collect();
-        let cands: Vec<polis_core::dedup::Candidate<'_>> = raw
-            .iter()
-            .zip(texts.iter())
-            .map(|(h, t)| polis_core::dedup::Candidate {
-                key: h.seq.unwrap_or(h.id),
-                exact_hash: hashes.get(&h.id).map(String::as_str),
-                text: t.as_str(),
-            })
-            .collect();
-        let verdicts = polis_core::dedup::dedup(&cands);
-        raw.into_iter()
-            .zip(verdicts.iter())
-            .filter(|(_, v)| matches!(v, polis_core::dedup::Verdict::Keep { .. }))
-            .map(|(h, _)| h)
-            .collect::<Vec<_>>()
-    });
-
-    // The grep arm runs only when the question reaches for a literal. Its
-    // needle is the longest quoted phrase, else the longest term — the most
-    // specific thing the user actually typed.
-    let literal_query = matches!((&plan, query), (Some(p), Some(raw)) if polis_core::query::looks_literal(p, raw));
-    let grep_hits = crate::latency::timed("pack.grep", || match (&plan, query) {
-        (Some(plan), Some(raw)) if polis_core::query::looks_literal(plan, raw) => {
-            let needle = plan
-                .phrases
-                .iter()
-                .chain(plan.terms.iter())
-                .max_by_key(|t| t.chars().count())
-                .cloned()
-                .unwrap_or_default();
-            db.grep_memory(&needle, None, false, polis_core::types::GrepScope::All, limit)
-                .unwrap_or_default()
+    let index=if let Some(embedder)=polis.embedder.as_deref() {
+        let model=embedder.model_id();let (total,indexed)=db.scoped_index_readiness(&model,scope)?;
+        IndexReadiness {model:Some(model),eligible_sources:total as usize,indexed_sources:indexed as usize,pending_sources:total.saturating_sub(indexed) as usize}
+    } else {let (total,_)=db.scoped_index_readiness("",scope)?;IndexReadiness {eligible_sources:total as usize,pending_sources:total as usize,..Default::default()}};
+    mark!("pack.semantic");
+    let sem_prompts = semantic.as_ref().into_iter().flatten().filter(|h| h.target_kind == "prompt").collect::<Vec<_>>();
+    let ids = sem_prompts.iter().map(|h| h.target_id).collect::<Vec<_>>();
+    let seq_of = db.seqs_for_prompt_ids(&ids)?;
+    let lexical = ranked.iter().enumerate().map(|(i,(it,_))| (it.seq.to_string(), -(i as f64))).collect();
+    let sem = sem_prompts.iter().filter_map(|h| seq_of.get(&h.target_id).map(|seq| (seq.to_string(), f64::from(h.score)))).collect();
+    let fused = rrf_fuse(&[(Arm::Lexical, lexical), (Arm::Semantic, sem)]);
+    let known = ranked.iter().map(|(it,_)| it.seq).collect::<HashSet<_>>();
+    let extra = fused.iter().filter_map(|(key,_,_)| key.parse::<i64>().ok()).filter(|s| !known.contains(s)).collect::<Vec<_>>();
+    ranked.extend(db.lake_items_for_seqs_scoped(&extra, scope)?.into_iter().map(|it| (it, polis_core::query::MatchStage::Or)));
+    let order = fused.iter().enumerate().filter_map(|(i,(key,_,_))| key.parse::<i64>().ok().map(|s| (s,i))).collect::<HashMap<_,_>>();
+    let arms = fused.into_iter().filter_map(|(key,arms,_)| key.parse::<i64>().ok().map(|s| (s,arms))).collect::<HashMap<_,_>>();
+    ranked.sort_by_key(|(it,_)| order.get(&it.seq).copied().unwrap_or(usize::MAX));
+    considered += ranked.len();
+    // Deduplicate within speaker roles. Identical user and assistant text must
+    // remain independently attributable evidence.
+    let mut by_role: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i,(item,_)) in ranked.iter().enumerate() { by_role.entry(format!("{}:{}",item.kind,item.role.clone().unwrap_or_default())).or_default().push(i); }
+    let mut absorbed = HashMap::new();
+    for indices in by_role.values() {
+        let candidates = indices.iter().map(|&i| polis_core::dedup::Candidate {
+            key: ranked[i].0.seq, exact_hash: None, text: ranked[i].0.body.as_deref().unwrap_or("")
+        }).collect::<Vec<_>>();
+        for (&i, verdict) in indices.iter().zip(polis_core::dedup::dedup(&candidates)) {
+            if let polis_core::dedup::Verdict::Keep { absorbed: duplicates } = verdict { absorbed.insert(i, duplicates); }
         }
-        _ => Vec::new(),
-    });
-
-    // Every arm reports whether it RAN, not just what it returned.
-    let arm_coverage = vec![
-        ArmCoverage {
-            arm: Arm::Node,
-            ran: query.is_some() || node_id.is_some(),
-            hits: usize::from(node.is_some()) + matched.len(),
-            absent_because: None,
-        },
-        ArmCoverage {
-            arm: Arm::Note,
-            ran: query.is_some(),
-            hits: notes.len(),
-            absent_because: None,
-        },
-        ArmCoverage {
-            arm: Arm::Lexical,
-            ran: query.is_some(),
-            hits: prompt_hits.len() + browse_hits.len(),
-            absent_because: None,
-        },
-        ArmCoverage {
-            arm: Arm::Grep,
-            ran: !grep_hits.is_empty() || literal_query,
-            hits: grep_hits.len(),
-            absent_because: (!literal_query).then(|| {
-                "the question doesn't name a literal (a flag, a path, an identifier)".to_string()
-            }),
-        },
-        ArmCoverage {
-            arm: Arm::Semantic,
-            ran: semantic.is_some(),
-            hits: semantic.as_ref().map(Vec::len).unwrap_or(0),
-            absent_because: semantic.is_none().then(|| {
-                match polis.provider_kind() {
-                    polis_embed::ProviderKind::Absent => {
-                        "no on-device embedding provider is available".to_string()
-                    }
-                    _ => "the semantic index is not built yet".to_string(),
-                }
-            }),
-        },
+    }
+    let mut superseded = db.supersessions_for_seqs(&ranked.iter().map(|(it,_)| it.seq).collect::<Vec<_>>())?;
+    let eligible=db.eligible_seqs(&superseded.values().copied().collect::<Vec<_>>(),scope)?;
+    superseded.retain(|_,replacement|eligible.contains(replacement));
+    let mut prompt_hits = ranked.into_iter().enumerate().filter_map(|(i,(mut item,stage))| {
+        let duplicate_of = absorbed.remove(&i)?;
+        item.body = item.body.map(|b| polis_core::dedup::excerpt_around(&b, &terms, 1600));
+        Some(PackPromptHit { superseded_by: superseded.get(&item.seq).copied(), duplicate_of,
+            stage: if arms.get(&item.seq).is_some_and(|a| a.iter().all(|h| h.arm==Arm::Semantic)) { "semantic".into() } else { stage.as_str().into() },
+            arms: arms.get(&item.seq).cloned().unwrap_or_default(), item })
+    }).collect::<Vec<_>>();
+    // One-hop conversational expansion. A question often contains the search
+    // terms while its immediately following answer contains only the value.
+    let mut anchors=prompt_hits.iter().take(25).filter(|hit| {
+        let text=hit.item.body.as_deref().unwrap_or("").trim().to_ascii_lowercase();
+        (hit.item.role.as_deref()==Some("user") && text.contains('?')) ||
+            ["yes", "no,", "that", "it ", "use that", "the latter", "the former"].iter().any(|p|text.starts_with(p))
+    }).map(|h|h.item.clone()).collect::<Vec<_>>();
+    // Role filters select returned evidence. A permitted user question can
+    // locate an assistant answer without returning the excluded question.
+    if scope.roles.iter().any(|r|r=="assistant") && !scope.roles.iter().any(|r|r=="user") {
+        if let Some(q)=query {
+            let mut questions=scope.clone();questions.roles=vec!["user".into()];
+            anchors.extend(db.search_prompts_ranked_scoped(q,25,&questions)?.into_iter().map(|(item,_)|item).filter(|item|item.body.as_deref().is_some_and(|b|b.contains('?'))));
+        }
+    }
+    let known=prompt_hits.iter().map(|h|h.item.seq).collect::<HashSet<_>>();
+    let mut discovered=HashSet::new();let mut neighbor_seqs=Vec::new();let mut neighbors_by_anchor=HashMap::new();
+    for anchor in anchors.iter().take(25) {
+        if let Some(session)=anchor.session_id.as_deref() {
+            let seqs=db.neighboring_prompt_seqs(anchor.seq,session,scope)?.into_iter().filter(|seq|!known.contains(seq)&&discovered.insert(*seq)).collect::<Vec<_>>();
+            neighbor_seqs.extend(seqs.iter().copied());neighbors_by_anchor.insert(anchor.seq,seqs);
+        }
+    }
+    let neighbor_candidates=neighbor_seqs.len();
+    let mut neighbor_superseded=db.supersessions_for_seqs(&neighbor_seqs)?;
+    let eligible=db.eligible_seqs(&neighbor_superseded.values().copied().collect::<Vec<_>>(),scope)?;
+    neighbor_superseded.retain(|_,replacement|eligible.contains(replacement));
+    let mut neighbors=db.lake_items_for_seqs_scoped(&neighbor_seqs,scope)?.into_iter().map(|mut item| {
+        item.body=item.body.map(|body|polis_core::dedup::excerpt_around(&body,&terms,800));
+        (item.seq,PackPromptHit {superseded_by:neighbor_superseded.get(&item.seq).copied(),item,duplicate_of:Vec::new(),stage:"neighbor".into(),arms:vec![ArmHit {arm:Arm::Neighbor,rank:1,score:0.0}]})
+    }).collect::<HashMap<_,_>>();
+    let mut expanded=Vec::new();
+    for hit in prompt_hits {
+        let seq=hit.item.seq;expanded.push(hit);
+        for neighbor in neighbors_by_anchor.get(&seq).into_iter().flatten() {
+            if let Some(hit)=neighbors.remove(neighbor) {expanded.push(hit);}
+        }
+    }
+    for seq in neighbor_seqs {if let Some(hit)=neighbors.remove(&seq) {expanded.push(hit);}}
+    if expanded.len()>limit {expanded.truncate(limit);cuts.push("promptHits".into());if neighbor_candidates>0 {cuts.push("neighbors".into());}}
+    prompt_hits=expanded;
+    considered+=neighbor_candidates;
+    mark!("pack.rank");
+    let mut browse = match query { Some(q) => db.search_browse_events_scoped(q, pool as i64, scope)?, None => Vec::new() };
+    let browse_lexical_count = browse.len();
+    let lexical = browse.iter().map(|h| (h.id.to_string(), -h.score)).collect();
+    let sem_pages = semantic.as_ref().into_iter().flatten().filter(|h| h.target_kind=="browse_event").collect::<Vec<_>>();
+    let sem = sem_pages.iter().map(|h| (h.target_id.to_string(), f64::from(h.score))).collect();
+    let page_fused = rrf_fuse(&[(Arm::Lexical,lexical),(Arm::Semantic,sem)]);
+    let existing = browse.iter().map(|h| h.id).collect::<HashSet<_>>();
+    let extra = sem_pages.iter().map(|h| h.target_id).filter(|id| !existing.contains(id)).collect::<Vec<_>>();
+    browse.extend(db.browse_hits_for_ids(&extra, &terms)?);
+    let order = page_fused.iter().enumerate().filter_map(|(i,(id,_,_))| id.parse::<i64>().ok().map(|id|(id,i))).collect::<HashMap<_,_>>();
+    browse.sort_by_key(|h| order.get(&h.id).copied().unwrap_or(usize::MAX));
+    considered += browse.len();
+    let hashes = db.context_hashes_for_browse_ids(&browse.iter().map(|h| h.id).collect::<Vec<_>>())?;
+    let mut seen = HashSet::new();
+    browse.retain(|h| seen.insert(hashes.get(&h.id).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| h.id.to_string())));
+    if browse.len()>limit { browse.truncate(limit); cuts.push("browseHits".into()); }
+    mark!("pack.browse");
+    let literal = matches!((&plan,query), (Some(p),Some(q)) if polis_core::query::looks_literal(p,q));
+    let grep_hits = if literal {
+        let needle = plan.as_ref().and_then(|p| p.phrases.iter().chain(p.terms.iter()).max_by_key(|s| (s.starts_with("--") || s.contains(['/','_','.']),s.len())));
+        match needle {
+            Some(needle) if needle.chars().count()>=polis_store::GREP_MIN_LITERAL => db.grep_memory_scoped(needle,None,false,GrepScope::All,limit as i64,scope).map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
+            _ => Vec::new(),
+        }
+    } else { Vec::new() };
+    considered += grep_hits.len();
+    mark!("pack.grep");
+    let mut shared_error=None;
+    let shared_hits = if scope.include_shared {
+        match crate::union::shared_hits_scoped_checked(polis,query,limit as i64,scope) {
+            Ok(hits)=>hits,Err(error)=>{errors.push(format!("shared: {error}"));shared_error=Some(error);Vec::new()}
+        }
+    } else { Vec::new() };
+    considered += shared_hits.len();
+    mark!("pack.shared");
+    let coverage = vec![
+        ArmCoverage {arm:Arm::Neighbor,ran:neighbor_candidates>0,hits:neighbor_candidates,absent_because:None},
+        ArmCoverage { arm: Arm::Node, ran: query.is_some()||node_id.is_some(),hits:usize::from(node.is_some())+matched.len(),absent_because:None },
+        ArmCoverage { arm: Arm::Note, ran:query.is_some(),hits:notes.len(),absent_because:None },
+        ArmCoverage { arm: Arm::Lexical, ran:query.is_some(),hits:lexical_count+browse_lexical_count,absent_because:None },
+        ArmCoverage { arm: Arm::Grep, ran:literal,hits:grep_hits.len(),absent_because:(!literal).then(||"query does not name a literal".into()) },
+        ArmCoverage { arm: Arm::Semantic, ran:semantic.is_some(),hits:semantic.as_ref().map_or(0,Vec::len),absent_because:semantic.is_none().then(|| if polis.embedder.is_none() { "no embedding provider configured" } else { "semantic index unavailable, incomplete, or provider failed" }.into()) },
     ];
+    let mut coverage = crate::union::with_shared_coverage(coverage,scope.include_shared,shared_hits.len());
+    if let Some(error)=shared_error {if let Some(arm)=coverage.iter_mut().find(|c|c.arm==Arm::Shared) {arm.ran=false;arm.absent_because=Some(format!("retrieval failed: {error}"));}}
 
-    // --- E3 --- the union arm: foreign hits only under include_shared, labelled by source.
-    let shared_hits = if scope.include_shared { crate::union::shared_hits(polis, query, limit) } else { Vec::new() };
-    let arm_coverage = crate::union::with_shared_coverage(arm_coverage, scope.include_shared, shared_hits.len());
-    let mut pack = AnswerPack {
-        head_seq,
-        query: query.map(str::to_string),
-        node,
-        matched_nodes: matched,
-        notes,
-        prompt_hits,
-        browse_hits,
-        grep_hits,
-        arm_coverage,
-        truncated: over_cap.into_iter().map(str::to_string).collect(),
-        shared_hits,
-    };
+    let claim_scope=polis_core::Scope {principal:scope.principal.clone(),project:scope.project.clone(),agent:scope.agent.clone(),run:scope.run.clone(),org:scope.org.clone(),include_shared:false};
+    let mut claims=if query.is_some() {
+        db.query_claims(&polis_core::claims::ClaimQuery {q:query.map(str::to_string),scope:claim_scope,limit:Some(pool),valid_at:filter.valid_at,known_at:filter.known_at,evidence_filter:filter.clone(),..Default::default()})?
+    } else {Vec::new()};
+    considered+=claims.len();
+    coverage.push(ArmCoverage {arm:Arm::Claim,ran:query.is_some(),hits:claims.len(),absent_because:None});
+    if claims.len()>limit {claims.truncate(limit);cuts.push("claims".into());}
+    mark!("pack.claims");
+    let _ = arm_start;
+    let mut pack = AnswerPack { head_seq, query:query.map(str::to_string),node,matched_nodes:matched,notes,prompt_hits,browse_hits:browse,grep_hits,arm_coverage:coverage,truncated:cuts,shared_hits,claims,
+        retrieval: RetrievalReport { version:"rrf-v2".into(),candidate_limit:pool,candidates_considered:considered,snapshot_hash,errors,timings_us:timings,index,..Default::default() } };
     enforce_pack_budget(&mut pack);
-    crate::warmth::record_pack(&pack, polis_core::ledger::now_millis()); // B3: warmth, flushed by the gardener
-    pack_span.record("ms", pack_timer.stop());
-    pack
+    pack.retrieval.candidates_returned = evidence_count(&pack);
+    Ok(pack)
+}
+
+fn link_seq(link: &ClassLink) -> Option<i64> {
+    matches!(link.target_kind.as_str(),"prompt"|"decision"|"ledger"|"resolution"|"approval"|"review_verdict").then(||link.target_id.parse().ok()).flatten()
+}
+fn evidence_count(pack: &AnswerPack) -> usize {
+    pack.claims.len()+pack.prompt_hits.len()+pack.browse_hits.len()+pack.notes.len()+pack.grep_hits.len()+pack.shared_hits.len()+pack.node.as_ref().map_or(0,|n| n.links.len()+n.observations.len())
+}
+
+/// Execute a production retrieval against one pinned SQLite read snapshot.
+pub fn search_request(polis: &Polis<'_>, req: &polis_core::api::SearchRequest, scope: &polis_store::principals::ScopeFilter) -> Result<AnswerPack, polis_core::MemoryError> {
+    use polis_core::MemoryError;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let mut resolved = scope.clone();
+    resolved.roles = req.filter.roles.iter().map(|r| polis_core::ledger::CorpusRole::parse(r).map(|r|r.as_str().to_string()).ok_or_else(||MemoryError::Rejected(format!("unknown role `{r}`")))).collect::<Result<Vec<_>,_>>()?;
+    resolved.after=req.filter.after; resolved.before=req.filter.before;
+    let scope=&resolved;
+    let start = std::time::Instant::now();
+    let started_at = now_millis();
+    if req.q.as_ref().is_some_and(|q| q.len()>16_384) { return Err(MemoryError::Rejected("query exceeds 16 KiB".into())); }
+    if req.cursor.as_ref().is_some_and(|cursor|cursor.len()>2048) {return Err(MemoryError::Rejected("cursor exceeds 2048 bytes".into()));}
+    if req.trace_id.as_ref().is_some_and(|id| id.len()>128) { return Err(MemoryError::Rejected("traceId exceeds 128 bytes".into())); }
+    if let (Some(after),Some(before))=(scope.after,scope.before) { if after>=before { return Err(MemoryError::Rejected("after must precede before".into())); } }
+    let max_bytes = req.max_tokens.unwrap_or(MAX_CONTEXT_BYTES).min(MAX_CONTEXT_BYTES);
+    if max_bytes<1024 { return Err(MemoryError::Rejected("search maxTokens must be at least 1024; use context for smaller budgets".into())); }
+    let snapshot = polis.store.read_snapshot().map_err(|e| MemoryError::Store(e.to_string()))?;
+    let view = Polis::new(&snapshot, polis.agent.clone(), polis.host, polis.sink).with_embedder(polis.embedder.clone());
+    let limit = clamp_answer_pack_limit(req.limit);
+    let pool = req.candidate_limit.unwrap_or(200).clamp(limit as usize,200);
+    let mut pack = if let Some(cursor) = &req.cursor {
+        inspect_page(&view, req, scope, cursor, limit)?
+    } else {
+        assemble_pack(&view, req.q.as_deref(), req.node.as_deref(), limit, pool, scope, &req.filter).map_err(|e| MemoryError::Store(e.to_string()))?
+    };
+    let id = format!("{}-{}-{}", req.trace_id.as_deref().unwrap_or("retrieval"),started_at,NEXT.fetch_add(1,Ordering::Relaxed));
+    pack.retrieval.trace_id = Some(id.clone());
+    if req.cursor.is_none() && (!pack.truncated.is_empty() || pack.retrieval.candidates_considered>=pool) {
+        pack.retrieval.continuation = Some(inspection_cursor(&pack,req,scope,0));
+    }
+    enforce_pack_budget_bytes(&mut pack,max_bytes);
+    pack.retrieval.candidates_returned = evidence_count(&pack);
+    if req.cursor.is_some() && pack.retrieval.continuation.is_some() {
+        if let Some(last)=pack.prompt_hits.last() { pack.retrieval.continuation=Some(inspection_cursor(&pack,req,scope,last.item.seq)); }
+    }
+    if serde_json::to_vec(&pack).map_err(|e|MemoryError::Store(e.to_string()))?.len()>max_bytes {
+        return Err(MemoryError::Rejected("response metadata exceeds requested budget".into()));
+    }
+    crate::warmth::record_pack(polis.store, &pack, now_millis());
+    let trace = polis_core::diagnostics::RetrievalTrace {
+        id,started_at,elapsed_ms:start.elapsed().as_secs_f64()*1000.0,scope: polis_core::Scope { principal:scope.principal.clone(),project:scope.project.clone(),agent:scope.agent.clone(),run:scope.run.clone(),org:scope.org.clone(),include_shared:scope.include_shared },head_seq:pack.head_seq,snapshot_hash:pack.retrieval.snapshot_hash.clone(),
+        config:serde_json::json!({"version":"rrf-v2","limit":limit,"candidateLimit":pool,"maxBytes":max_bytes,"filter":req.filter,"correlationId":req.trace_id,"timingsUs":pack.retrieval.timings_us,"index":pack.retrieval.index,"selectedForeignCitations":pack.shared_hits.iter().map(|h|h.cite()).collect::<Vec<_>>(),"ranking":pack.prompt_hits.iter().map(|h|serde_json::json!({"seq":h.item.seq,"stage":h.stage,"arms":h.arms})).collect::<Vec<_>>()}),
+        coverage:serde_json::to_value(&pack.arm_coverage).unwrap_or_default(),
+        selected_seqs:pack.prompt_hits.iter().map(|h|h.item.seq).chain(pack.browse_hits.iter().filter_map(|h|h.seq)).chain(pack.notes.iter().filter_map(|n|n.seq)).chain(pack.grep_hits.iter().filter_map(|h|h.seq)).chain(pack.claims.iter().flat_map(|c|c.assertion.sources.iter().map(|s|s.seq))).chain(pack.node.iter().flat_map(|n|n.links.iter().filter_map(|l|link_seq(&l.link)))).collect(),
+        cuts:pack.truncated.clone(),errors:pack.retrieval.errors.clone(),
+        replay:"requires original query and preserved evidence/index snapshot; raw queries are not stored".into(),
+    };
+    drop(view); drop(snapshot);
+    if let Err(e)=polis.store.save_retrieval_trace(&trace) { tracing::warn!(error=%e,"retrieval trace persistence failed"); }
+    Ok(pack)
+}
+
+fn inspection_key(req: &polis_core::api::SearchRequest, scope: &polis_store::principals::ScopeFilter) -> String {
+    polis_core::ledger::sha256_hex(format!("{:?}|{:?}|{:?}|{:?}",req.q,req.node,req.filter,scope).as_bytes())
+}
+fn inspection_cursor(pack: &AnswerPack, req: &polis_core::api::SearchRequest, scope: &polis_store::principals::ScopeFilter, after: i64) -> String {
+    serde_json::json!({"mode":"inspection","head":pack.retrieval.snapshot_hash,"query":inspection_key(req,scope),"after":after}).to_string()
+}
+/// Continuations deliberately expose chronological source inspection, without
+/// pretending the bounded relevance pool contains every possible match.
+fn inspect_page(polis: &Polis<'_>, req: &polis_core::api::SearchRequest, scope: &polis_store::principals::ScopeFilter, cursor: &str, limit:i64) -> Result<AnswerPack,polis_core::MemoryError> {
+    use polis_core::MemoryError;
+    let c:serde_json::Value=serde_json::from_str(cursor).map_err(|_|MemoryError::Rejected("invalid inspection cursor".into()))?;
+    let (head,hash)=polis.store.snapshot_head().map_err(|e|MemoryError::Store(e.to_string()))?;
+    if c["mode"]!="inspection" || c["head"].as_str()!=Some(&hash) || c["query"].as_str()!=Some(&inspection_key(req,scope)) { return Err(MemoryError::Rejected("cursor does not match this query, scope, or evidence snapshot".into())); }
+    let after=c["after"].as_i64().filter(|n|*n>=0).ok_or_else(||MemoryError::Rejected("invalid inspection position".into()))?;
+    let rows=polis.store.list_lake_items_since_scoped(after,limit+1,scope).map_err(|e|MemoryError::Store(e.to_string()))?;
+    let has_more=rows.len()>limit as usize;
+    let mut pack=empty_pack(req.q.as_deref(),String::new()); pack.retrieval.errors.clear();
+    pack.head_seq=head; pack.retrieval.snapshot_hash=hash; pack.retrieval.version="inspection-v1".into(); pack.retrieval.candidate_limit=limit as usize;
+    pack.retrieval.candidates_considered=rows.len();
+    let seqs=rows.iter().map(|r|r.seq).collect::<Vec<_>>();
+    let superseded=polis.store.supersessions_for_seqs(&seqs).map_err(|e|MemoryError::Store(e.to_string()))?;
+    pack.prompt_hits=rows.into_iter().take(limit as usize).map(|item|PackPromptHit { superseded_by:superseded.get(&item.seq).copied(),item,duplicate_of:Vec::new(),stage:"inspection".into(),arms:Vec::new() }).collect();
+    if has_more { let last=pack.prompt_hits.last().map_or(after,|h|h.item.seq); pack.retrieval.continuation=Some(inspection_cursor(&pack,req,scope,last)); }
+    Ok(pack)
+}
+
+pub fn context_request(polis: &Polis<'_>, req: &polis_core::api::ContextRequest, scope: &polis_store::principals::ScopeFilter) -> Result<ContextBlock, polis_core::MemoryError> {
+    let _timer=crate::latency::Timer::start("context");
+    let search = polis_core::api::SearchRequest { q:Some(req.q.clone()),node:req.node.clone(),limit:Some(INLINE_PACK_LIMIT),scope:req.scope.clone(),filter:req.filter.clone(),trace_id:req.trace_id.clone(),..Default::default() };
+    let mut pack=search_request(polis,&search,scope)?;
+    let plan=plan_fts_query(&req.q);
+    // Bytes are a conservative tokenizer-independent ceiling: any supported
+    // byte-level model tokenizer needs no more tokens than UTF-8 bytes.
+    let budget=req.max_tokens.unwrap_or(2000).min(req.max_bytes.unwrap_or(INLINE_PACK_MAX_BYTES)).min(INLINE_PACK_MAX_BYTES);
+    let text=render_answer_pack_block(&pack,plan.as_ref(),budget);
+    let full_len=render_answer_pack_block(&pack,plan.as_ref(),usize::MAX).map_or(0,|s|s.len());
+    let rendered_len=text.as_ref().map_or(0,String::len);
+    if full_len>rendered_len {pack.truncated.push("renderedContext".into());}
+    if let Some(id)=pack.retrieval.trace_id.as_deref() {
+        match polis.store.retrieval_traces(Some(id),1) {
+            Ok(mut traces)=>if let Some(trace)=traces.first_mut() {
+                trace.config["contextMaxBytes"]=budget.into();
+                trace.config["contextRenderedBytes"]=rendered_len.into();
+                trace.config["selectionStage"]=serde_json::json!("selectedSeqs describe the structured pack before context rendering");
+                trace.cuts=pack.truncated.clone();
+                if let Err(error)=polis.store.save_retrieval_trace(trace) {tracing::warn!(%error,"context trace update failed");}
+            },
+            Err(error)=>tracing::warn!(%error,"context trace read failed"),
+        }
+    }
+    Ok(ContextBlock { text,terms:plan.map(|p|p.terms).unwrap_or_default(),coverage:pack.arm_coverage,truncated:pack.truncated,retrieval:pack.retrieval })
+}
+
+/// Scoped threads are reconstructed from ledger-backed turns. Host-only text
+/// has no scope proof and is exposed only through the unscoped host contract.
+pub fn thread_view_scoped(polis: &Polis<'_>, kind: &str, id: &str, limit: i64, scope: &polis_store::principals::ScopeFilter) -> rusqlite::Result<Option<serde_json::Value>> {
+    if scope.is_empty() { if let Some(view) = thread_view(polis, kind, id, limit) { return Ok(Some(view)); } }
+    let items = polis.store.thread_items_scoped(kind, id, limit, scope)?;
+    if items.is_empty() { return Ok(None); }
+    let mut messages = items.into_iter().map(|it| serde_json::json!({"seq":it.seq,"role":it.role.unwrap_or_else(|| "user".into()),"body":it.body.unwrap_or_default(),"createdAt":it.ts})).collect::<Vec<_>>();
+    let mut size = 0; let mut start = messages.len();
+    for (index, message) in messages.iter().enumerate().rev() { size += serde_json::to_vec(message).map(|v|v.len()).unwrap_or(0); if size > MAX_CONTEXT_BYTES { break; } start=index; }
+    messages.drain(..start);
+    Ok(Some(serde_json::json!({"kind":kind,"id":id,"label":format!("{kind} {id}"),"messages":messages,"source":"ledger"})))
+}
+
+pub fn build_thread_tree_scoped(polis: &Polis<'_>, kind: &str, id: &str, scope: &polis_store::principals::ScopeFilter) -> rusqlite::Result<serde_json::Value> {
+    if scope.is_empty() { return Ok(build_thread_tree(polis,kind,id)); }
+    let digests = polis.store.thread_digests_scoped(scope)?;
+    let find = |kind:&str,id:&str| digests.iter().find(|d|d.kind==kind && d.id==id);
+    let Some(node) = find(kind,id) else { return Ok(serde_json::json!({"node":null,"parent":null,"children":[]})); };
+    let render = |d:&polis_store::scoped_views::ThreadDigest| serde_json::json!({"kind":d.kind,"id":d.id,"label":format!("{} {}",d.kind,d.id),"messageCount":d.count,"lastTs":d.last_ts});
+    let parent = polis.store.session_tree_parent(kind,id)?.and_then(|(k,i)|find(&k,&i).map(render));
+    let children = polis.store.session_tree_children(kind,id)?.into_iter().filter_map(|(k,i,created)|find(&k,&i).map(|d| {let mut value=render(d);value["createdAt"]=created.into();value})).collect::<Vec<_>>();
+    Ok(serde_json::json!({"node":render(node),"parent":parent,"children":children}))
+}
+
+pub fn build_memory_map_scoped(polis: &Polis<'_>, scope: &polis_store::principals::ScopeFilter) -> rusqlite::Result<MemoryMapView> {
+    if scope.is_empty() { return Ok(build_memory_map(polis)); }
+    let classes = polis.store.list_class_nodes_scoped(scope)?.into_iter().filter(|n| n.status=="accepted").collect::<Vec<_>>();
+    let class_ids = classes.iter().map(|n| n.id.clone()).collect::<std::collections::HashSet<_>>();
+    let mut nodes=Vec::new(); let mut edges=Vec::new();
+    for node in classes {
+        let parent=node.parent_id.as_ref().filter(|id|class_ids.contains(*id)).map(|id|format!("class:{id}"));
+        let id=format!("class:{}",node.id);
+        if let Some(parent)=&parent { edges.push(MapEdge{kind:"contains".into(),from:parent.clone(),to:id.clone(),weight:1,basis:None}); }
+        let mass=polis.store.list_class_links_for_node_scoped(&node.id,scope)?.len() as i64;
+        nodes.push(MapNode{id,kind:if node.kind=="digest"{"digest"}else{"class"}.into(),label:node.title,mass,parent_id:parent,pinned:node.pinned,project_path:node.project_path,class_node_id:Some(node.id),session_id:None,browse_id:None,thread_id:None});
+    }
+    for thread in polis.store.thread_digests_scoped(scope)? {
+        let session=thread.kind=="session";let browse=thread.kind=="browse";
+        nodes.push(MapNode{id:format!("thread:{}:{}",thread.kind,thread.id),kind:if session{"session"}else{"thread"}.into(),label:format!("{} {}",thread.kind,thread.id),mass:thread.count,parent_id:None,pinned:false,project_path:scope.project.clone(),class_node_id:None,session_id:session.then(||thread.id.clone()),browse_id:browse.then(||thread.id.clone()),thread_id:(!session&&!browse).then_some(thread.id)});
+    }
+    let ids=nodes.iter().map(|n|n.id.clone()).collect::<std::collections::HashSet<_>>();
+    for (ck,ci,pk,pi) in polis.store.list_session_tree_rows()? {
+        let from=format!("thread:{pk}:{pi}");let to=format!("thread:{ck}:{ci}");
+        if ids.contains(&from)&&ids.contains(&to){if let Some(node)=nodes.iter_mut().find(|n|n.id==to){node.parent_id=Some(from.clone());}edges.push(MapEdge{kind:"lineage".into(),from,to,weight:1,basis:None});}
+    }
+    let pairs=polis.store.list_supersession_pairs()?;let seqs=pairs.iter().flat_map(|(a,b)|[*a,*b]).collect::<Vec<_>>();let eligible=polis.store.eligible_seqs(&seqs,scope)?;let endpoints=polis.store.resolve_map_endpoints(&seqs)?;
+    let endpoint=|seq:i64|endpoints.get(&seq).and_then(|(session,class)| class.as_ref().map(|id|format!("class:{id}")).filter(|id|ids.contains(id)).or_else(||session.as_ref().map(|id|format!("thread:session:{id}")).filter(|id|ids.contains(id))));
+    for (old,new) in pairs { if eligible.contains(&old)&&eligible.contains(&new){if let(Some(from),Some(to))=(endpoint(old),endpoint(new)){if from!=to{edges.push(MapEdge{kind:"supersedes".into(),from,to,weight:1,basis:Some(format!("#{old} → #{new}"))});}}} }
+    nodes.sort_by(|a,b|a.id.cmp(&b.id));edges.sort_by(|a,b|(&a.kind,&a.from,&a.to).cmp(&(&b.kind,&b.from,&b.to)));
+    Ok(MemoryMapView{generated_ts:now_millis(),nodes,edges})
 }
 
 /// One session-tree node with its parent and child digests — shared by
@@ -773,7 +790,7 @@ pub fn context_block_scoped(polis: &Polis<'_>, q: &str, node: Option<&str>, max_
         let mut pack = build_answer_pack_scoped(polis, Some(q), node, INLINE_PACK_LIMIT, scope);
         enforce_pack_budget(&mut pack);
         let text = render_answer_pack_block(&pack, plan.as_ref(), max_bytes);
-        ContextBlock { text, terms }
+        ContextBlock { text, terms,coverage:pack.arm_coverage,truncated:pack.truncated,retrieval:pack.retrieval }
     })
 }
 
@@ -798,7 +815,16 @@ pub fn tree_view(
     root: Option<&str>,
     project: Option<&str>,
 ) -> rusqlite::Result<Vec<TreeNodeView>> {
-    let all = polis.store.list_class_nodes_with_counts()?;
+    tree_view_scoped(polis, root, project, &Default::default())
+}
+
+pub fn tree_view_scoped(polis: &Polis<'_>, root: Option<&str>, project: Option<&str>, scope: &polis_store::principals::ScopeFilter) -> rusqlite::Result<Vec<TreeNodeView>> {
+    let mut filter=scope.clone();
+    if let Some(project)=project { if filter.project.as_deref().is_some_and(|p|p!=project) { return Ok(Vec::new()); } filter.project=Some(project.into()); }
+    let all = polis.store.list_class_nodes_scoped(&filter)?.into_iter().map(|node| {
+        let count=polis.store.list_class_links_for_node_scoped(&node.id,&filter)?.len() as i64;
+        Ok((node,count))
+    }).collect::<rusqlite::Result<Vec<_>>>()?;
     let root_id: Option<String> = if let Some(r) = root.filter(|s| !s.trim().is_empty()) {
         Some(r.trim().to_string())
     } else if let Some(p) = project.filter(|s| !s.trim().is_empty()) {
@@ -843,12 +869,16 @@ fn subtree_ids(all: &[(ClassNode, i64)], root: &str) -> std::collections::HashSe
 /// One node with its children, decorated links (lake label + supersession
 /// status) and observations — the node route.
 pub fn node_view(polis: &Polis<'_>, id: &str) -> rusqlite::Result<Option<NodeView>> {
+    node_view_scoped(polis,id,&Default::default())
+}
+
+pub fn node_view_scoped(polis: &Polis<'_>, id: &str, scope: &polis_store::principals::ScopeFilter) -> rusqlite::Result<Option<NodeView>> {
     let db = polis.store;
-    let Some(node) = db.get_class_node(id)? else {
+    let Some(node) = db.get_class_node_scoped(id,scope)? else {
         return Ok(None);
     };
-    let children = db.list_class_children(id)?;
-    let raw_links = db.list_class_links_for_node(id)?;
+    let children = db.list_class_children_scoped(id,scope)?;
+    let raw_links = db.list_class_links_for_node_scoped(id,scope)?;
     let ledger_seq = |l: &ClassLink| -> Option<i64> {
         matches!(l.target_kind.as_str(), "prompt" | "decision" | "ledger")
             .then(|| l.target_id.trim().parse().ok())
@@ -856,7 +886,9 @@ pub fn node_view(polis: &Polis<'_>, id: &str) -> rusqlite::Result<Option<NodeVie
     };
     let seqs: Vec<i64> = raw_links.iter().filter_map(&ledger_seq).collect();
     let labels = db.link_previews_for_seqs(&seqs).unwrap_or_default();
-    let superseded = db.supersessions_for_seqs(&seqs).unwrap_or_default();
+    let mut superseded = db.supersessions_for_seqs(&seqs)?;
+    let eligible=db.eligible_seqs(&superseded.values().copied().collect::<Vec<_>>(),scope)?;
+    superseded.retain(|_,replacement|eligible.contains(replacement));
     let links: Vec<LinkView> = raw_links
         .into_iter()
         .map(|link| {
@@ -868,6 +900,6 @@ pub fn node_view(polis: &Polis<'_>, id: &str) -> rusqlite::Result<Option<NodeVie
             }
         })
         .collect();
-    let observations = db.list_class_observations(id, false)?;
+    let observations = db.list_class_observations_scoped(id,false,scope)?;
     Ok(Some(NodeView { node, children, links, observations }))
 }

@@ -155,6 +155,85 @@ pub fn restore(live: &Path, from: Option<&Path>, dir: &Path) -> Result<RestoreRe
             verdict.first_bad_seq
         ));
     }
+    // The append-only hash tombstones sit outside the replaceable database.
+    // A corrupt live file must not make restore lose its forgetting history.
+    let markers = PathBuf::from(format!("{}.forgotten", live.display()));
+    let mut forgotten = std::collections::BTreeSet::new();
+    match std::fs::read_to_string(&markers) {
+        Ok(text) => for hash in text.lines() {
+            let valid = if let Some(target)=hash.strip_prefix("foreign_capture:") {
+                target.rsplit_once(':').is_some_and(|(chain,seq)| chain.len()==64
+                    && chain.bytes().all(|b|b.is_ascii_hexdigit()) && seq.parse::<i64>().is_ok_and(|n|n>0))
+            } else {
+                let digest=hash.strip_prefix("browse_event:").or_else(|| hash.strip_prefix("user_note:")).unwrap_or(hash);
+                digest.len()==64 && digest.bytes().all(|b|b.is_ascii_hexdigit())
+            };
+            if !valid {
+                return Err(format!("invalid forget registry {} — refusing resurrection risk", markers.display()));
+            }
+            forgotten.insert(hash.to_string());
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(e) => return Err(format!("read forget registry: {e}")),
+    }
+    if live.exists() {
+        if let Ok(current) = PolisStore::open_read_only(live) {
+            let conn = current.conn();
+            let mut stmt = conn.prepare("SELECT body_hash FROM forgotten_sources").map_err(|e| e.to_string())?;
+            for hash in stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())? {
+                forgotten.insert(hash.map_err(|e| e.to_string())?);
+            }
+            let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='forgotten_captures')",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+            if exists {
+                let mut stmt=conn.prepare("SELECT target_kind || ':' || source_hash FROM forgotten_captures").map_err(|e|e.to_string())?;
+                for marker in stmt.query_map([],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())? {forgotten.insert(marker.map_err(|e|e.to_string())?);}
+            }
+            let mut stmt=conn.prepare("SELECT DISTINCT 'foreign_capture:' || target_chain || ':' || target_seq FROM foreign_redactions WHERE chain_id=target_chain
+                UNION SELECT 'foreign_capture:' || replace(substr(key,length('polis.foreignForgotten.')+1),'.',':') FROM polis_meta WHERE key LIKE 'polis.foreignForgotten.%'").map_err(|e|e.to_string())?;
+            for marker in stmt.query_map([],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())? {forgotten.insert(marker.map_err(|e|e.to_string())?);}
+        }
+    }
+    // Prepare and verify the sanitized replacement before moving the live
+    // file, so copy/purge failures cannot leave the user without a database.
+    let staged = live.with_extension(format!("restore-{}.db", std::process::id()));
+    if staged.exists() { return Err(format!("restore staging file already exists: {}", staged.display())); }
+    std::fs::copy(&from, &staged).map_err(|e| format!("stage snapshot: {e}"))?;
+    {
+        let replacement = PolisStore::open(&staged).map_err(|e| e.to_string())?;
+        for hash in &forgotten {
+            if let Some(target)=hash.strip_prefix("foreign_capture:") {
+                let (chain,seq)=target.rsplit_once(':').ok_or("invalid foreign forget marker")?;
+                replacement.tombstone_foreign_capture(chain,seq.parse().map_err(|_|"invalid foreign forget sequence")?).map_err(|e|e.to_string())?;
+                continue;
+            }
+            if let Some(hash)=hash.strip_prefix("user_note:") {
+                let ids = {
+                    let conn=replacement.conn();
+                    let mut stmt=conn.prepare("SELECT ne.note_id FROM note_events ne JOIN ledger_events e ON e.seq=ne.seq WHERE e.entry_hash=?1 AND e.payload_hash=ne.payload_hash").map_err(|e|e.to_string())?;
+                    let rows=stmt.query_map([hash],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
+                    rows
+                };
+                for id in ids { replacement.forget_user_note(id,"restore").map_err(|e|e.to_string())?; }
+                continue;
+            }
+            if let Some(hash)=hash.strip_prefix("browse_event:") {
+                let ids={let conn=replacement.conn();let mut stmt=conn.prepare("SELECT id FROM browse_events WHERE context_hash=?1").map_err(|e|e.to_string())?;let rows=stmt.query_map([hash],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;rows};
+                for id in ids {replacement.forget_browse_event(id,"restore").map_err(|e|e.to_string())?;}
+                continue;
+            }
+            let ids = {
+                let conn = replacement.conn();
+                let mut stmt = conn.prepare("SELECT id FROM prompts WHERE body_hash = ?1").map_err(|e| e.to_string())?;
+                let result = stmt.query_map([hash], |r| r.get::<_, i64>(0)).map_err(|e| e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+                result
+            };
+            for id in ids {
+                replacement.compact_prompt_body(id, "[forgotten]", "forget", "deterministic", "restore").map_err(|e| e.to_string())?;
+            }
+        }
+        if !replacement.verify_ledger_chain().map_err(|e| e.to_string())?.ok { return Err("sanitized restore failed chain verification".into()); }
+        replacement.conn().execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").map_err(|e| e.to_string())?;
+    }
     let kept_as = if live.exists() {
         let bad = live.with_extension("db.bad");
         let _ = std::fs::remove_file(&bad);
@@ -168,7 +247,7 @@ pub fn restore(live: &Path, from: Option<&Path>, dir: &Path) -> Result<RestoreRe
         name.push(sidecar);
         let _ = std::fs::remove_file(PathBuf::from(name));
     }
-    std::fs::copy(&from, live).map_err(|e| format!("copy {} → {}: {e}", from.display(), live.display()))?;
+    std::fs::rename(&staged, live).map_err(|e| format!("install sanitized snapshot: {e}"))?;
     Ok(RestoreReport { from, kept_as, verdict })
 }
 
@@ -269,5 +348,31 @@ mod tests {
         assert!(err.contains("does not verify"), "{err}");
         assert!(live.exists(), "the live file is untouched by a refused restore");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn managed_restore_preserves_forgetting_even_if_live_database_is_corrupt() {
+        let dir = scratch("forget-restore");
+        let live = dir.join("polis.db");
+        let backups = dir.join("backups");
+        let snapshot = {
+            let store = seeded(&live, 1);
+            let snapshot = backup_now(&store, &backups).unwrap();
+            store.compact_prompt_body(1, "private migration", "cold", "deterministic", "test").unwrap();
+            store.compact_prompt_body(1, "[forgotten]", "forget", "deterministic", "test").unwrap();
+            snapshot
+        };
+        assert!(PathBuf::from(format!("{}.forgotten", live.display())).exists());
+        std::fs::write(&live, b"corrupt database").unwrap();
+        restore(&live, Some(&snapshot), &backups).unwrap();
+        let store = PolisStore::open(&live).unwrap();
+        let (body, gist): (String, Option<String>) = store.conn().query_row("SELECT body, gist FROM prompts WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert!(body.is_empty());
+        assert_eq!(gist.as_deref(), Some("[forgotten]"));
+        assert!(!store.restore_prompt_body(1).unwrap());
+        assert_eq!(store.archive_stats().unwrap().0, 0);
+        assert!(store.verify_ledger_chain().unwrap().ok);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -47,12 +47,41 @@ pub(crate) fn memory_error(e: MemoryError) -> Response {
     (status, Json(serde_json::json!({ "error": detail }))).into_response()
 }
 
+/// Flat HTTP representation of the API's scope object.
+#[derive(Clone, Default, Deserialize)]
+pub struct ScopeQ {
+    pub principal: Option<String>, pub org: Option<String>, pub agent: Option<String>, pub run: Option<String>, pub project: Option<String>,
+    #[serde(default, deserialize_with = "query_bool")] pub include_shared: Option<bool>,
+}
+impl From<ScopeQ> for Scope {
+    fn from(q: ScopeQ) -> Scope { Scope { principal: q.principal, org: q.org, agent: q.agent, run: q.run, project: q.project, include_shared: q.include_shared.unwrap_or(false) } }
+}
+
+#[derive(Default, Deserialize)]
+pub struct FilterQ {
+    roles: Option<String>,
+    #[serde(default, deserialize_with = "query_i64")] after: Option<i64>,
+    #[serde(default, deserialize_with = "query_i64")] before: Option<i64>,
+    #[serde(default, deserialize_with = "query_i64")] valid_at: Option<i64>,
+    #[serde(default, deserialize_with = "query_i64")] known_at: Option<i64>,
+}
+fn query_i64<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<i64>, D::Error> {
+    Option::<String>::deserialize(deserializer)?.map(|s| s.parse().map_err(serde::de::Error::custom)).transpose()
+}
+fn query_bool<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    Option::<String>::deserialize(deserializer)?.map(|s| match s.as_str() { "true" | "1" => Ok(true), "false" | "0" => Ok(false), _ => Err(serde::de::Error::custom("expected true or false")) }).transpose()
+}
+impl From<FilterQ> for polis_core::api::EvidenceFilter {
+    fn from(q: FilterQ) -> Self { Self { roles: q.roles.map(|v| v.split(',').map(|s| s.trim().to_string()).collect()).unwrap_or_default(), after: q.after, before: q.before, valid_at: q.valid_at, known_at: q.known_at } }
+}
+
 // ===========================================================================
 // Moved from Redline's lib.rs — the memory routes
 // ===========================================================================
 
 #[derive(Deserialize)]
 pub struct MemoryTreeQ {
+    #[serde(flatten)] scope_filter: ScopeQ,
     project: Option<String>,
     root: Option<String>,
 }
@@ -64,7 +93,7 @@ pub async fn handle_memory_tree(
     State(state): State<PolisState>,
     Query(q): Query<MemoryTreeQ>,
 ) -> Response {
-    match state.api.tree(&TreeRequest { root: q.root, project: q.project, scope: Scope::default() }) {
+    match state.api.tree(&TreeRequest { root: q.root, project: q.project, scope: q.scope_filter.into() }) {
         Ok(views) => Json(serde_json::json!({ "nodes": views })).into_response(),
         Err(e) => memory_error(e),
     }
@@ -76,8 +105,9 @@ pub async fn handle_memory_tree(
 pub async fn handle_memory_node(
     State(state): State<PolisState>,
     Path(id): Path<String>,
+    Query(scope): Query<ScopeQ>,
 ) -> Response {
-    match state.api.node(&id, &Scope::default()) {
+    match state.api.node(&id, &scope.into()) {
         Ok(Some(view)) => Json(view).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no such class node").into_response(),
         Err(e) => memory_error(e),
@@ -86,6 +116,9 @@ pub async fn handle_memory_node(
 
 #[derive(Deserialize)]
 pub struct AnswerPackQ {
+    #[serde(flatten)] filter: FilterQ,
+    candidate_limit: Option<usize>, max_tokens: Option<usize>, cursor: Option<String>, trace_id: Option<String>,
+    #[serde(flatten)] scope_filter: ScopeQ,
     q: Option<String>,
     node: Option<String>,
     limit: Option<i64>,
@@ -106,7 +139,7 @@ pub async fn handle_memory_answer_pack(
     Query(q): Query<AnswerPackQ>,
 ) -> Response {
     let api = state.api.clone();
-    let req = SearchRequest { q: q.q, node: q.node, limit: q.limit, scope: Scope::default() };
+    let req = SearchRequest { q: q.q, node: q.node, limit: q.limit, scope: q.scope_filter.into(), filter: q.filter.into(), candidate_limit: q.candidate_limit, max_tokens: q.max_tokens, cursor: q.cursor, trace_id: q.trace_id };
     // Assembly touches several tables under the DB lock — off the async
     // executor's thread, like every other heavy bridge read.
     let pack = tokio::task::spawn_blocking(move || api.search(&req)).await;
@@ -119,6 +152,7 @@ pub async fn handle_memory_answer_pack(
 
 #[derive(Deserialize)]
 pub struct MemoryGrepQ {
+    #[serde(flatten)] scope_filter: ScopeQ,
     q: Option<String>,
     re: Option<String>,
     case: Option<String>,
@@ -153,7 +187,7 @@ pub async fn handle_memory_grep(
             case_sensitive,
             kinds: scope,
             limit: Some(limit),
-            scope: Scope::default(),
+            scope: q.scope_filter.into(),
         })
     })
     .await;
@@ -168,6 +202,7 @@ pub async fn handle_memory_grep(
 
 #[derive(Deserialize)]
 pub struct MemoryPromptsQ {
+    #[serde(flatten)] scope_filter: ScopeQ,
     since_seq: Option<i64>,
     limit: Option<i64>,
 }
@@ -181,7 +216,7 @@ pub async fn handle_memory_prompts(
 ) -> Response {
     let limit = q.limit.unwrap_or(200).clamp(1, MAX_DELTA_ITEMS as i64);
     let since = q.since_seq.unwrap_or(0).max(0);
-    match state.api.prompts(&PromptsRequest { since_seq: since, limit: Some(limit), scope: Scope::default() }) {
+    match state.api.prompts(&PromptsRequest { since_seq: since, limit: Some(limit), scope: q.scope_filter.into() }) {
         Ok(mut items) => {
             // Byte-budget the response, the way `/v1/context/prompts` does.
             // The item count was capped but the BYTES were not, and this
@@ -214,7 +249,9 @@ pub async fn handle_memory_proposals(
         return Json(serde_json::json!({ "ok": true, "staged": StageResult::default() }))
             .into_response();
     }
-    match state.api.stage_proposals(&proposals, "api") {
+    let payload = serde_json::from_slice::<serde_json::Value>(&body).ok();
+    let actor = payload.as_ref().and_then(|v| v.get("actor")).and_then(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty()).unwrap_or("api");
+    match state.api.stage_proposals(&proposals, actor) {
         Ok(staged) => {
             state.events.changed(&[Change::Catalog]);
             Json(serde_json::json!({ "ok": true, "staged": staged })).into_response()
@@ -225,6 +262,7 @@ pub async fn handle_memory_proposals(
 
 #[derive(Deserialize)]
 pub struct ContextPromptsQ {
+    #[serde(flatten)] scope_filter: ScopeQ,
     session: Option<String>,
     mission: Option<String>,
     surface: Option<String>,
@@ -243,12 +281,6 @@ pub struct ContextPromptsQ {
     /// Opt in to the host's own constructed prefaces, which are excluded by
     /// default. `1`/`true` to include.
     include_agent: Option<String>,
-    /// Identity scope (E2): a principal (human / device / agent id, or an
-    /// aliased legacy name), an agent, a run, an org — bound, never spliced.
-    principal: Option<String>,
-    agent: Option<String>,
-    run: Option<String>,
-    org: Option<String>,
 }
 
 /// `GET /v1/context/prompts?session=&mission=&surface=&project=&since_seq=&q=&limit=&role=&include_agent=`
@@ -259,6 +291,7 @@ pub async fn handle_context_prompts(
     State(state): State<PolisState>,
     Query(q): Query<ContextPromptsQ>,
 ) -> Response {
+    let scope: Scope = q.scope_filter.clone().into();
     let filters = PromptFilters {
         session_id: q.session,
         mission_id: q.mission,
@@ -273,12 +306,12 @@ pub async fn handle_context_prompts(
         model: q.model,
         role: q.role,
         include_agent: matches!(q.include_agent.as_deref(), Some("1") | Some("true")),
-        principal: q.principal,
-        agent: q.agent,
-        run: q.run,
-        org: q.org,
+        principal: q.scope_filter.principal,
+        agent: q.scope_filter.agent,
+        run: q.scope_filter.run,
+        org: q.scope_filter.org,
     };
-    match state.api.list_prompts(&filters, &Scope::default()) {
+    match state.api.list_prompts(&filters, &scope) {
         Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
         Err(e) => memory_error(e),
     }
@@ -286,8 +319,8 @@ pub async fn handle_context_prompts(
 
 /// `GET /v1/context/stats` — aggregate counts (per day / surface / kind /
 /// class / author). Read-only.
-pub async fn handle_context_stats(State(state): State<PolisState>) -> Response {
-    match state.api.stats(&Scope::default()) {
+pub async fn handle_context_stats(State(state): State<PolisState>, Query(scope): Query<ScopeQ>) -> Response {
+    match state.api.stats(&scope.into()) {
         Ok(stats) => Json(stats).into_response(),
         Err(e) => memory_error(e),
     }
@@ -295,6 +328,7 @@ pub async fn handle_context_stats(State(state): State<PolisState>) -> Response {
 
 #[derive(Deserialize)]
 pub struct ContextThreadQ {
+    #[serde(flatten)] scope_filter: ScopeQ,
     limit: Option<i64>,
 }
 
@@ -307,7 +341,7 @@ pub async fn handle_context_thread(
     Query(q): Query<ContextThreadQ>,
 ) -> Response {
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
-    match state.api.thread(&kind, &id, limit, &Scope::default()) {
+    match state.api.thread(&kind, &id, limit, &q.scope_filter.into()) {
         Ok(Some(view)) => Json(view).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "unknown thread kind").into_response(),
         Err(e) => memory_error(e),
@@ -320,8 +354,9 @@ pub async fn handle_context_thread(
 pub async fn handle_context_tree(
     State(state): State<PolisState>,
     Path((kind, id)): Path<(String, String)>,
+    Query(scope): Query<ScopeQ>,
 ) -> Response {
-    match state.api.thread_tree(&kind, &id, &Scope::default()) {
+    match state.api.thread_tree(&kind, &id, &scope.into()) {
         Ok(tree) => Json(tree).into_response(),
         Err(e) => memory_error(e),
     }
@@ -329,6 +364,7 @@ pub async fn handle_context_tree(
 
 #[derive(Deserialize)]
 pub struct BrowseSearchQ {
+    #[serde(flatten)] scope_filter: ScopeQ,
     /// Free-text query — tokenized + quoted into a safe FTS5 MATCH in the DB.
     q: Option<String>,
     limit: Option<i64>,
@@ -344,7 +380,7 @@ pub async fn handle_browse_search(
 ) -> Response {
     let query = q.q.unwrap_or_default();
     let limit = q.limit.unwrap_or(20).clamp(1, 100);
-    match state.api.browse_search(&query, limit, &Scope::default()) {
+    match state.api.browse_search(&query, limit, &q.scope_filter.into()) {
         Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
         Err(e) => memory_error(e),
     }
@@ -356,6 +392,9 @@ pub async fn handle_browse_search(
 
 #[derive(Deserialize)]
 pub struct ContextQ {
+    #[serde(flatten)] filter: FilterQ,
+    max_bytes: Option<usize>, trace_id: Option<String>,
+    #[serde(flatten)] scope_filter: ScopeQ,
     q: Option<String>,
     node: Option<String>,
     max_tokens: Option<usize>,
@@ -373,7 +412,7 @@ pub async fn handle_memory_context(
             .into_response();
     };
     let api = state.api.clone();
-    let req = ContextRequest { q: question, node: q.node, max_tokens: q.max_tokens, scope: Scope::default() };
+    let req = ContextRequest { q: question, node: q.node, max_tokens: q.max_tokens, scope: q.scope_filter.into(), filter: q.filter.into(), max_bytes: q.max_bytes, trace_id: q.trace_id };
     match tokio::task::spawn_blocking(move || api.context(&req)).await {
         Ok(Ok(block)) => Json(block).into_response(),
         Ok(Err(e)) => memory_error(e),
@@ -386,6 +425,7 @@ pub async fn handle_memory_context(
 /// same axes flat, with `seqs` comma-separated.
 #[derive(Deserialize)]
 pub struct LedgerQ {
+    #[serde(flatten)] scope_filter: ScopeQ,
     kind: Option<String>,
     author: Option<String>,
     session: Option<String>,
@@ -403,8 +443,6 @@ pub struct LedgerQ {
     thread_id: Option<String>,
     browse_id: Option<String>,
     role: Option<String>,
-    /// Identity scope (E2): the author resolved through the alias table.
-    principal: Option<String>,
 }
 
 fn flag(v: Option<&str>) -> Option<bool> {
@@ -417,6 +455,7 @@ pub async fn handle_memory_ledger(
     State(state): State<PolisState>,
     Query(q): Query<LedgerQ>,
 ) -> Response {
+    let scope: Scope = q.scope_filter.clone().into();
     let seqs: Option<Vec<i64>> = q.seqs.map(|s| s.split(',').filter_map(|p| p.trim().parse().ok()).collect());
     let filters = LedgerFilters {
         kind: q.kind,
@@ -436,10 +475,10 @@ pub async fn handle_memory_ledger(
         thread_id: q.thread_id,
         browse_id: q.browse_id,
         role: q.role,
-        principal: q.principal,
+        principal: q.scope_filter.principal,
     };
     let api = state.api.clone();
-    match tokio::task::spawn_blocking(move || api.timeline(&filters, &Scope::default())).await {
+    match tokio::task::spawn_blocking(move || api.timeline(&filters, &scope)).await {
         Ok(Ok(items)) => Json(serde_json::json!({ "items": items })).into_response(),
         Ok(Err(e)) => memory_error(e),
         Err(e) => error_response(format!("timeline query failed: {e}")),
@@ -468,9 +507,9 @@ pub async fn handle_memory_health(State(state): State<PolisState>) -> Response {
 }
 
 /// `GET /v1/memory/map` — classes + threads with declared edge kinds.
-pub async fn handle_memory_map(State(state): State<PolisState>) -> Response {
+pub async fn handle_memory_map(State(state): State<PolisState>, Query(scope): Query<ScopeQ>) -> Response {
     let api = state.api.clone();
-    match tokio::task::spawn_blocking(move || api.map(&Scope::default())).await {
+    match tokio::task::spawn_blocking(move || api.map(&scope.into())).await {
         Ok(Ok(map)) => Json(map).into_response(),
         Ok(Err(e)) => memory_error(e),
         Err(e) => error_response(format!("map failed: {e}")),
@@ -588,8 +627,9 @@ pub async fn handle_memory_browse(
 
 /// `POST /v1/memory/organize` — one classifier pass, now. Drives the model;
 /// 503 when the install has none.
-pub async fn handle_memory_organize(State(state): State<PolisState>) -> Response {
-    match state.api.organize(&Scope::default()).await {
+pub async fn handle_memory_organize(State(state): State<PolisState>, scope: Option<Json<Scope>>) -> Response {
+    let scope = scope.map(|s| s.0).unwrap_or_default();
+    match state.api.organize(&scope).await {
         Ok(receipt) => {
             if receipt.ran {
                 state.events.changed(&[Change::Catalog, Change::Ledger]);
@@ -601,9 +641,10 @@ pub async fn handle_memory_organize(State(state): State<PolisState>) -> Response
 }
 
 /// `POST /v1/memory/reindex` — embed one call's worth of the semantic backlog.
-pub async fn handle_memory_reindex(State(state): State<PolisState>) -> Response {
+pub async fn handle_memory_reindex(State(state): State<PolisState>, scope: Option<Json<Scope>>) -> Response {
+    let scope = scope.map(|s| s.0).unwrap_or_default();
     let api = state.api.clone();
-    match tokio::task::spawn_blocking(move || api.reindex(&Scope::default())).await {
+    match tokio::task::spawn_blocking(move || api.reindex(&scope)).await {
         Ok(Ok(receipt)) => {
             if receipt.embedded > 0 {
                 state.events.changed(&[Change::Embeddings]);
@@ -621,6 +662,7 @@ pub async fn handle_memory_reindex(State(state): State<PolisState>) -> Response 
 
 #[derive(Deserialize)]
 pub struct RunsQ {
+    #[serde(flatten)] scope_filter: ScopeQ,
     limit: Option<i64>,
 }
 
@@ -629,7 +671,7 @@ pub struct RunsQ {
 pub async fn handle_memory_runs(State(state): State<PolisState>, Query(q): Query<RunsQ>) -> Response {
     let api = state.api.clone();
     let limit = q.limit.unwrap_or(50);
-    match tokio::task::spawn_blocking(move || api.list_runs(limit, &Scope::default())).await {
+    match tokio::task::spawn_blocking(move || api.list_runs(limit, &q.scope_filter.into())).await {
         Ok(Ok(runs)) => Json(serde_json::json!({ "runs": runs })).into_response(),
         Ok(Err(e)) => memory_error(e),
         Err(e) => error_response(format!("runs query failed: {e}")),
@@ -669,3 +711,41 @@ pub async fn handle_memory_run_revert(State(state): State<PolisState>, Path(id):
 // `#![deny(unused)]`-style builds.
 #[allow(dead_code)]
 fn _uses_trait(_: &dyn MemoryApi) {}
+
+#[derive(Deserialize)]
+pub struct EvidenceQ { chain_id: Option<String>, #[serde(flatten)] scope: ScopeQ }
+
+pub async fn handle_memory_evidence(State(state): State<PolisState>, Path(seq): Path<i64>, Query(q): Query<EvidenceQ>) -> Response {
+    let req = polis_core::diagnostics::EvidenceRequest { seq, chain_id: q.chain_id, scope: q.scope.into() };
+    match state.api.evidence(&req) { Ok(record) => Json(record).into_response(), Err(error) => memory_error(error) }
+}
+
+#[derive(Deserialize)]
+pub struct TraceQ { id: Option<String>, limit: Option<usize>, #[serde(flatten)] scope: ScopeQ }
+
+pub async fn handle_memory_traces(State(state): State<PolisState>, Query(q): Query<TraceQ>) -> Response {
+    let req = polis_core::diagnostics::TraceRequest { id: q.id, limit: q.limit, scope: q.scope.into() };
+    match state.api.traces(&req) { Ok(rows) => Json(serde_json::json!({"traces": rows})).into_response(), Err(error) => memory_error(error) }
+}
+
+#[cfg(test)]
+mod scope_query_tests {
+    use super::*;
+    #[test]
+    fn flat_transport_parameters_preserve_scope_roles_time_and_budgets() {
+        let uri = "/?q=quartz&principal=human&agent=agent&run=run&org=org&project=%2Fproject&include_shared=true&roles=assistant,user&after=10&before=20&candidate_limit=100&max_tokens=300&trace_id=trace".parse().unwrap();
+        let Query(q) = Query::<AnswerPackQ>::try_from_uri(&uri).unwrap();
+        let scope: Scope = q.scope_filter.into();
+        assert_eq!(scope.project.as_deref(), Some("/project"));
+        assert_eq!(scope.principal.as_deref(), Some("human"));
+        assert_eq!(scope.agent.as_deref(), Some("agent"));
+        assert_eq!(scope.run.as_deref(), Some("run"));
+        assert_eq!(scope.org.as_deref(), Some("org"));
+        assert!(scope.include_shared);
+        let filter: polis_core::api::EvidenceFilter = q.filter.into();
+        assert_eq!(filter.roles, vec!["assistant", "user"]);
+        assert_eq!((filter.after, filter.before), (Some(10), Some(20)));
+        assert_eq!((q.candidate_limit, q.max_tokens), (Some(100), Some(300)));
+        assert_eq!(q.trace_id.as_deref(), Some("trace"));
+    }
+}

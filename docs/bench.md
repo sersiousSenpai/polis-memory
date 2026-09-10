@@ -388,3 +388,38 @@ potion-base-8M/`, each verified before it is kept and again before it is
 loaded; a byte that does not hash is never used. `bundled-model` compiles
 the same three files in from `POLIS_BUNDLED_MODEL_DIR` at build time (the
 org node's image; air-gapped installs) and refuses a placeholder at runtime.
+
+## Harness repair, 2026-09-09
+
+The previous `polis.bench/1` external-run recipes are superseded by
+[bench/README.md](../bench/README.md). Paid comparisons remain on hold. The
+workflow now runs only keyless fixtures, and competitor stubs are explicitly
+lexical pipeline fixtures. Existing recorded provider/filing numbers above are
+historical measurements, not new results or proof of leadership.
+
+The v2 harness separates source capture from immediate/indexed/organized
+processing, verifies pinned offline assets and prompt index coverage, preserves
+session dates, and gives every question a fresh namespace. Manifests retain
+configuration, dataset hash, versions, readiness and partial failures. Actual
+provider usage is separate from stub simulation; one atomic ledger covers all
+systems and retries. Final context ceilings, raw-history/lexical baselines,
+disjoint development/heldout selection, category sizes and paired uncertainty
+are now explicit contracts with keyless regression tests.
+
+Outstanding external gates: actual competitor extraction/embed metering,
+verified scored tokenizer integration for Anthropic, a reviewed dollar budget,
+held-out realistic user tasks, clean-platform install timing and scored external
+runs after authorization. No "within five points" or best-in-class conclusion
+can be drawn from the keyless fixtures.
+
+The added synthetic realistic suite passed **8/8 evidence/citation fixtures**
+through the actual freshly built MCP binary: four development and four unchanged
+heldout fixtures. The preserved development baseline was 6/8 before neighboring
+turns and embedded flag retrieval were fixed; see
+[`2026-09-09-realistic-evidence.json`](../bench/results/2026-09-09-realistic-evidence.json)
+and its development-before companion. This measures expected evidence reachability,
+not model answer quality. All six keyless pipeline configurations completed; the
+[table and manifests](../bench/results/keyless-2026-09-09/table.md) suppress answer
+accuracy columns for stubs. The immediate lexical profile still misses a paraphrased
+note-taking preference question. Indexed/organized real-asset runs were not executed
+because no prestaged local Model2Vec assets were present.

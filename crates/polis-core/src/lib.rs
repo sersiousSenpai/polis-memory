@@ -25,7 +25,9 @@
 pub mod api;
 pub mod bundle;
 pub mod coldness;
+pub mod claims;
 pub mod dedup;
+pub mod diagnostics;
 pub mod gist;
 pub mod host;
 pub mod identity;
@@ -69,6 +71,8 @@ mod guards {
         const SOURCES: &[(&str, &str)] = &[
             ("api.rs", include_str!("api.rs")),
             ("bundle.rs", include_str!("bundle.rs")),
+            ("claims.rs", include_str!("claims.rs")),
+            ("diagnostics.rs", include_str!("diagnostics.rs")),
             ("coldness.rs", include_str!("coldness.rs")),
             ("dedup.rs", include_str!("dedup.rs")),
             ("gist.rs", include_str!("gist.rs")),

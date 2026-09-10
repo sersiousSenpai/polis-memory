@@ -10,6 +10,7 @@ pub mod backend;
 pub mod doctor;
 pub mod home;
 pub mod install;
+pub mod inspect;
 pub mod serve;
 
 use std::path::PathBuf;
@@ -103,6 +104,16 @@ enum Cmd {
     /// The capture hook's command: reads the UserPromptSubmit payload on stdin,
     /// records the prompt (through the daemon, or locally), always exits 0.
     Capture,
+    /// Inspect local retrieval traces, source citations, and gardener history.
+    Inspect {
+        #[arg(long)] id: Option<String>,
+        #[arg(long, default_value_t=50)] limit: usize,
+        #[arg(long)] seq: Option<i64>,
+        /// Write a standalone, offline browser inspector.
+        #[arg(long)] html: Option<PathBuf>,
+        /// Export portable diagnostic JSON.
+        #[arg(long)] export: Option<PathBuf>,
+    },
     /// The answer pack for a question — START HERE.
     Search {
         q: Vec<String>,
@@ -540,9 +551,26 @@ fn run(cli: Cli) -> Result<(), String> {
             capture(&home);
             Ok(())
         }
+        Cmd::Inspect { id, limit, seq, html, export } => {
+            let local_diagnostics=cli.remote.is_none() && std::env::var("POLIS_REMOTE").ok().is_none_or(|v|v.trim().is_empty());
+            let api=open(&home,cli.remote)?;
+            let mut data=inspect::export(api.as_ref(),id,limit.min(200),seq)?;
+            if seq.is_none() && local_diagnostics {
+                if let Ok(store)=PolisStore::open(&home.db_path()) {
+                    let conn=store.conn();
+                    let jobs=conn.prepare("SELECT kind,status,attempts,lease_until,error FROM background_jobs ORDER BY updated_at DESC LIMIT 50").and_then(|mut q|q.query_map([],|r|Ok(serde_json::json!({"kind":r.get::<_,String>(0)?,"state":r.get::<_,String>(1)?,"attempts":r.get::<_,i64>(2)?,"deadline":r.get::<_,Option<i64>>(3)?,"error":r.get::<_,Option<String>>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>());
+                    data["jobs"]=match jobs {Ok(rows)=>serde_json::json!(rows),Err(e)=>serde_json::json!({"unavailable":e.to_string()})};
+                    let usage=conn.query_row("SELECT COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(NOT usage_reported),0) FROM model_usage",[],|r|Ok(serde_json::json!({"calls":r.get::<_,i64>(0)?,"inputTokens":r.get::<_,i64>(1)?,"outputTokens":r.get::<_,i64>(2)?,"unknownUsage":r.get::<_,i64>(3)?})));
+                    data["usage"]=match usage {Ok(v)=>v,Err(e)=>serde_json::json!({"unavailable":e.to_string()})};
+                }
+            }
+            if let Some(path)=html {inspect::write_html(&path,&data)?;eprintln!("inspector: {}",path.display());}
+            if let Some(path)=export {std::fs::write(&path,serde_json::to_vec_pretty(&data).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;}
+            emit(json,&data,||serde_json::to_string_pretty(&data).unwrap_or_default());Ok(())
+        }
         Cmd::Search { q, node, limit, shared } => {
             let api = open(&home, cli.remote)?;
-            let req = SearchRequest { q: words(q), node, limit, scope: Scope { include_shared: shared, ..Default::default() } };
+            let req = SearchRequest { q: words(q), node, limit, scope: Scope { include_shared: shared, ..Default::default() }, ..Default::default() };
             let pack = api.search(&req).map_err(|e| e.to_string())?;
             emit(json, &pack, || render::pack(&pack));
             Ok(())
@@ -550,7 +578,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Cmd::Context { q, node, max_tokens, shared } => {
             let api = open(&home, cli.remote)?;
             let q = words(q).ok_or("a question is required")?;
-            let block = api.context(&ContextRequest { q, node, max_tokens, scope: Scope { include_shared: shared, ..Default::default() } }).map_err(|e| e.to_string())?;
+            let block = api.context(&ContextRequest { q, node, max_tokens, scope: Scope { include_shared: shared, ..Default::default() }, ..Default::default() }).map_err(|e| e.to_string())?;
             emit(json, &block, || render::context(&block));
             Ok(())
         }

@@ -1,0 +1,47 @@
+# Package by default. Publishing is an explicit maintainer dispatch with registry credentials.
+name: sdk-release
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the reviewed package versions to PyPI and npm
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - run: python3 sdk/schema/generate.py --check
+      - run: python3 sdk/schema/types.py --check
+      - run: python3 -m unittest discover -s sdk/python/tests -v
+      - run: node --test sdk/typescript/test/*.test.mjs
+      - run: python3 -m pip install build twine
+      - run: python3 -m build sdk/python --outdir sdk-artifacts
+      - run: python3 -m twine check sdk-artifacts/*
+      - run: npm pack ./sdk/typescript --pack-destination sdk-artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: polis-sdk-packages-${{ github.run_id }}
+          path: sdk-artifacts/
+      - name: Publish Python package
+        if: inputs.publish
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: python3 -m twine upload --non-interactive sdk-artifacts/*.whl sdk-artifacts/*.tar.gz
+      - name: Publish npm package
+        if: inputs.publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish sdk-artifacts/*.tgz --access public

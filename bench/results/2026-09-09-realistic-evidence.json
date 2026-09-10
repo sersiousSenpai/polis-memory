@@ -1,0 +1,393 @@
+{
+  "schema": "polis.task-results/1",
+  "commit": "911d24e4348e9906b4fe6cc7a57d44e1dceceede",
+  "date": "2026-09-09",
+  "hardware": "darwin-arm64 arm",
+  "datasetSha256": "c5930227f80cbd9d4b0dd59c78121c2331b3dae30e462765fabe7b47a24b427e",
+  "split": "all",
+  "meaning": "synthetic evidence reachability; not answer-quality scoring",
+  "llmCalls": 0,
+  "tasks": [
+    {
+      "id": "dev-database",
+      "category": "decision",
+      "split": "development",
+      "passed": true,
+      "missing": [],
+      "forbidden": [],
+      "citations": [
+        {
+          "seq": 2,
+          "status": "available"
+        }
+      ],
+      "queryMs": 4.138,
+      "binarySha256": "3c4f31954e91f3db4f158f5b371b20c9dc11c04e23181e7399707207f1fa6957",
+      "retrieval": {
+        "candidateLimit": 200,
+        "candidatesConsidered": 1,
+        "candidatesReturned": 1,
+        "continuation": null,
+        "errors": [],
+        "index": {
+          "eligibleSources": 0,
+          "indexedSources": 0,
+          "model": null,
+          "pendingSources": 0
+        },
+        "snapshotHash": "9a5a659d3f0caac14d41d2ddd09da3beff4877d143636de6c49fbd724b47c045",
+        "timingsUs": {
+          "pack.browse": 234,
+          "pack.claims": 242,
+          "pack.grep": 6,
+          "pack.lexical": 514,
+          "pack.node": 8,
+          "pack.notes": 117,
+          "pack.rank": 372,
+          "pack.resolve": 549,
+          "pack.semantic": 0,
+          "pack.shared": 0
+        },
+        "traceId": "retrieval-1789015853801-1",
+        "version": "rrf-v2"
+      },
+      "truncated": []
+    },
+    {
+      "id": "dev-exact-flag",
+      "category": "identifier",
+      "split": "development",
+      "passed": true,
+      "missing": [],
+      "forbidden": [],
+      "citations": [
+        {
+          "seq": 2,
+          "status": "available"
+        },
+        {
+          "seq": 2,
+          "status": "available"
+        }
+      ],
+      "queryMs": 4.117,
+      "binarySha256": "3c4f31954e91f3db4f158f5b371b20c9dc11c04e23181e7399707207f1fa6957",
+      "retrieval": {
+        "candidateLimit": 200,
+        "candidatesConsidered": 2,
+        "candidatesReturned": 2,
+        "continuation": null,
+        "errors": [],
+        "index": {
+          "eligibleSources": 0,
+          "indexedSources": 0,
+          "model": null,
+          "pendingSources": 0
+        },
+        "snapshotHash": "6906f7c61c5e5db3cda98d51c645ffbabd3422724ccca3de63981011064bffc4",
+        "timingsUs": {
+          "pack.browse": 218,
+          "pack.claims": 226,
+          "pack.grep": 375,
+          "pack.lexical": 464,
+          "pack.node": 0,
+          "pack.notes": 113,
+          "pack.rank": 119,
+          "pack.resolve": 570,
+          "pack.semantic": 0,
+          "pack.shared": 0
+        },
+        "traceId": "retrieval-1789015853926-1",
+        "version": "rrf-v2"
+      },
+      "truncated": []
+    },
+    {
+      "id": "dev-correction",
+      "category": "source-time",
+      "split": "development",
+      "passed": true,
+      "missing": [],
+      "forbidden": [],
+      "citations": [
+        {
+          "seq": 3,
+          "status": "available"
+        }
+      ],
+      "queryMs": 3.689,
+      "binarySha256": "3c4f31954e91f3db4f158f5b371b20c9dc11c04e23181e7399707207f1fa6957",
+      "retrieval": {
+        "candidateLimit": 200,
+        "candidatesConsidered": 1,
+        "candidatesReturned": 1,
+        "continuation": null,
+        "errors": [],
+        "index": {
+          "eligibleSources": 0,
+          "indexedSources": 0,
+          "model": null,
+          "pendingSources": 0
+        },
+        "snapshotHash": "6845cc39a5fe5b217c54c4bfff066b95e1dbc3be2e4cffa38442a370a17ca7dd",
+        "timingsUs": {
+          "pack.browse": 225,
+          "pack.claims": 242,
+          "pack.grep": 5,
+          "pack.lexical": 501,
+          "pack.node": 0,
+          "pack.notes": 119,
+          "pack.rank": 118,
+          "pack.resolve": 475,
+          "pack.semantic": 0,
+          "pack.shared": 0
+        },
+        "traceId": "retrieval-1789015854063-1",
+        "version": "rrf-v2"
+      },
+      "truncated": []
+    },
+    {
+      "id": "dev-assistant-neighbor",
+      "category": "assistant",
+      "split": "development",
+      "passed": true,
+      "missing": [],
+      "forbidden": [],
+      "citations": [
+        {
+          "seq": 2,
+          "status": "available"
+        },
+        {
+          "seq": 3,
+          "status": "available"
+        }
+      ],
+      "queryMs": 4.403,
+      "binarySha256": "3c4f31954e91f3db4f158f5b371b20c9dc11c04e23181e7399707207f1fa6957",
+      "retrieval": {
+        "candidateLimit": 200,
+        "candidatesConsidered": 2,
+        "candidatesReturned": 2,
+        "continuation": null,
+        "errors": [],
+        "index": {
+          "eligibleSources": 0,
+          "indexedSources": 0,
+          "model": null,
+          "pendingSources": 0
+        },
+        "snapshotHash": "1d45610492bdd233a0d562b82ca318feabe58a5be27e1e8c887c5864f7fdbc22",
+        "timingsUs": {
+          "pack.browse": 302,
+          "pack.claims": 245,
+          "pack.grep": 8,
+          "pack.lexical": 584,
+          "pack.node": 0,
+          "pack.notes": 115,
+          "pack.rank": 420,
+          "pack.resolve": 555,
+          "pack.semantic": 0,
+          "pack.shared": 0
+        },
+        "traceId": "retrieval-1789015854178-1",
+        "version": "rrf-v2"
+      },
+      "truncated": []
+    },
+    {
+      "id": "held-indent",
+      "category": "preference",
+      "split": "heldout",
+      "passed": true,
+      "missing": [],
+      "forbidden": [],
+      "citations": [
+        {
+          "seq": 2,
+          "status": "available"
+        }
+      ],
+      "queryMs": 3.552,
+      "binarySha256": "3c4f31954e91f3db4f158f5b371b20c9dc11c04e23181e7399707207f1fa6957",
+      "retrieval": {
+        "candidateLimit": 200,
+        "candidatesConsidered": 1,
+        "candidatesReturned": 1,
+        "continuation": null,
+        "errors": [],
+        "index": {
+          "eligibleSources": 0,
+          "indexedSources": 0,
+          "model": null,
+          "pendingSources": 0
+        },
+        "snapshotHash": "0642a3f18ebd390c5b54b043fa4b27dface4c41fd154d3c59f5d74fe457a27a5",
+        "timingsUs": {
+          "pack.browse": 223,
+          "pack.claims": 235,
+          "pack.grep": 6,
+          "pack.lexical": 377,
+          "pack.node": 0,
+          "pack.notes": 111,
+          "pack.rank": 121,
+          "pack.resolve": 467,
+          "pack.semantic": 0,
+          "pack.shared": 0
+        },
+        "traceId": "retrieval-1789015854302-1",
+        "version": "rrf-v2"
+      },
+      "truncated": []
+    },
+    {
+      "id": "held-two-sessions",
+      "category": "multi-session",
+      "split": "heldout",
+      "passed": true,
+      "missing": [],
+      "forbidden": [],
+      "citations": [
+        {
+          "seq": 2,
+          "status": "available"
+        },
+        {
+          "seq": 3,
+          "status": "available"
+        }
+      ],
+      "queryMs": 4.353,
+      "binarySha256": "3c4f31954e91f3db4f158f5b371b20c9dc11c04e23181e7399707207f1fa6957",
+      "retrieval": {
+        "candidateLimit": 200,
+        "candidatesConsidered": 2,
+        "candidatesReturned": 2,
+        "continuation": null,
+        "errors": [],
+        "index": {
+          "eligibleSources": 0,
+          "indexedSources": 0,
+          "model": null,
+          "pendingSources": 0
+        },
+        "snapshotHash": "05b3c5e6bf1b6c262b2ebd863011533e3c902b5ee6b45709cf7a0760c9629e29",
+        "timingsUs": {
+          "pack.browse": 336,
+          "pack.claims": 286,
+          "pack.grep": 8,
+          "pack.lexical": 562,
+          "pack.node": 0,
+          "pack.notes": 113,
+          "pack.rank": 157,
+          "pack.resolve": 540,
+          "pack.semantic": 0,
+          "pack.shared": 0
+        },
+        "traceId": "retrieval-1789015854428-1",
+        "version": "rrf-v2"
+      },
+      "truncated": []
+    },
+    {
+      "id": "held-source-role",
+      "category": "role-attribution",
+      "split": "heldout",
+      "passed": true,
+      "missing": [],
+      "forbidden": [],
+      "citations": [
+        {
+          "seq": 2,
+          "status": "available"
+        }
+      ],
+      "queryMs": 4.074,
+      "binarySha256": "3c4f31954e91f3db4f158f5b371b20c9dc11c04e23181e7399707207f1fa6957",
+      "retrieval": {
+        "candidateLimit": 200,
+        "candidatesConsidered": 1,
+        "candidatesReturned": 1,
+        "continuation": null,
+        "errors": [],
+        "index": {
+          "eligibleSources": 0,
+          "indexedSources": 0,
+          "model": null,
+          "pendingSources": 0
+        },
+        "snapshotHash": "41b18d7e8b5698c0966a27d0310643ff1b8eeb1163df230b7cdd12e47a9561a8",
+        "timingsUs": {
+          "pack.browse": 226,
+          "pack.claims": 239,
+          "pack.grep": 5,
+          "pack.lexical": 470,
+          "pack.node": 0,
+          "pack.notes": 114,
+          "pack.rank": 123,
+          "pack.resolve": 487,
+          "pack.semantic": 0,
+          "pack.shared": 0
+        },
+        "traceId": "retrieval-1789015854563-1",
+        "version": "rrf-v2"
+      },
+      "truncated": []
+    },
+    {
+      "id": "held-historical-config",
+      "category": "source-time",
+      "split": "heldout",
+      "passed": true,
+      "missing": [],
+      "forbidden": [],
+      "citations": [
+        {
+          "seq": 2,
+          "status": "available"
+        }
+      ],
+      "queryMs": 3.591,
+      "binarySha256": "3c4f31954e91f3db4f158f5b371b20c9dc11c04e23181e7399707207f1fa6957",
+      "retrieval": {
+        "candidateLimit": 200,
+        "candidatesConsidered": 1,
+        "candidatesReturned": 1,
+        "continuation": null,
+        "errors": [],
+        "index": {
+          "eligibleSources": 0,
+          "indexedSources": 0,
+          "model": null,
+          "pendingSources": 0
+        },
+        "snapshotHash": "0b6c42545c9c2d6a127ef570421417c5dc58edd5d9168fe77730fc7b70404eb8",
+        "timingsUs": {
+          "pack.browse": 220,
+          "pack.claims": 238,
+          "pack.grep": 5,
+          "pack.lexical": 391,
+          "pack.node": 0,
+          "pack.notes": 114,
+          "pack.rank": 118,
+          "pack.resolve": 467,
+          "pack.semantic": 0,
+          "pack.shared": 0
+        },
+        "traceId": "retrieval-1789015854685-1",
+        "version": "rrf-v2"
+      },
+      "truncated": []
+    }
+  ],
+  "categoryN": {
+    "assistant": 1,
+    "decision": 1,
+    "identifier": 1,
+    "multi-session": 1,
+    "preference": 1,
+    "role-attribution": 1,
+    "source-time": 2
+  }
+}

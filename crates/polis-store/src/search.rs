@@ -80,7 +80,7 @@ impl PolisStore {
             return Ok(Vec::new());
         };
         let conn = self.conn();
-        let scoped = Self::scope_clause_locked(&conn, "be", scope)?;
+        let scoped = Self::scope_clause_locked(&conn, "be", scope)?.numbered(3);
         let lim = limit.max(1);
         // Same AND-then-OR cascade as the prompt arm. Columns are weighted
         // `title 5 / url 2 / text 1`: a term in a page's title says the page is
@@ -177,7 +177,7 @@ impl PolisStore {
                     p.thread_kind, p.thread_id, p.parent_session_id, p.model";
         let plan = polis_core::query::plan_fts_query(trimmed);
         let conn = self.conn();
-        let scoped = Self::scope_clause_locked(&conn, "p", scope)?;
+        let scoped = Self::scope_clause_locked(&conn, "p", scope)?.numbered(3);
         let lim = limit.max(1);
 
         if let Some(plan) = &plan {
@@ -200,7 +200,7 @@ impl PolisStore {
                     binds.push(b.as_ref());
                 }
                 let rows: Vec<polis_core::types::LakeItem> = stmt
-                    .query_map(binds.as_slice(), Self::row_to_lake_item)?
+                    .query_map(binds.as_slice(), Self::row_to_lake_item_full)?
                     .collect::<rusqlite::Result<_>>()?;
                 if !rows.is_empty() {
                     return Ok(rows.into_iter().map(|r| (r, stage)).collect());
@@ -237,7 +237,7 @@ impl PolisStore {
         for b in &scoped.binds {
             binds.push(b.as_ref());
         }
-        let rows = stmt.query_map(binds.as_slice(), Self::row_to_lake_item)?;
+        let rows = stmt.query_map(binds.as_slice(), Self::row_to_lake_item_full)?;
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
@@ -296,6 +296,10 @@ impl PolisStore {
         scope: GrepScope,
         limit: i64,
     ) -> Result<Vec<GrepHit>, GrepError> {
+        self.grep_memory_scoped(literal, re, case_sensitive, scope, limit, &Default::default())
+    }
+
+    pub fn grep_memory_scoped(&self, literal: &str, re: Option<&str>, case_sensitive: bool, scope: GrepScope, limit: i64, filter: &crate::principals::ScopeFilter) -> Result<Vec<GrepHit>, GrepError> {
         let needle = literal.trim();
         if needle.chars().count() < GREP_MIN_LITERAL {
             return Err(GrepError::LiteralTooShort {
@@ -329,15 +333,18 @@ impl PolisStore {
         // post-filter rather than a second index: two trigram indexes over the
         // same text would double the cost to serve a rare option.
         if scope.wants_prompts() {
-            let mut stmt = conn.prepare(
+            let scoped = Self::scope_clause_locked(&conn, "p", filter)?.numbered(3);
+            let mut stmt = conn.prepare(&format!(
                 "SELECT le.seq, p.id, p.ts, p.surface, p.fts_text
                  FROM prompts_grep
                  JOIN prompts p ON p.id = prompts_grep.rowid
                  JOIN ledger_events le ON le.prompt_id = p.id AND le.kind = 'prompt'
-                 WHERE prompts_grep.fts_text LIKE ?1 ESCAPE '\\'
-                 ORDER BY le.seq DESC LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![pat, limit], |r| {
+                 WHERE prompts_grep.fts_text LIKE ?1 ESCAPE '\\'{}
+                 ORDER BY le.seq DESC LIMIT ?2", scoped.sql
+            ))?;
+            let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&pat, &limit];
+            binds.extend(scoped.binds.iter().map(|v| v.as_ref()));
+            let rows = stmt.query_map(binds.as_slice(), |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, i64>(1)?,
@@ -369,17 +376,20 @@ impl PolisStore {
         }
 
         if scope.wants_browse() {
-            let mut stmt = conn.prepare(
+            let scoped = Self::scope_clause_locked(&conn, "be", filter)?.numbered(3);
+            let mut stmt = conn.prepare(&format!(
                 "SELECT le.seq, be.id, be.ts, be.url, COALESCE(be.title, '')
                  FROM browse_grep
                  JOIN browse_events be ON be.id = browse_grep.rowid
                  LEFT JOIN ledger_events le
                         ON le.ref_kind = 'browse_event' AND le.ref_id = CAST(be.id AS TEXT)
-                 WHERE browse_grep.url LIKE ?1 ESCAPE '\\'
-                    OR browse_grep.title LIKE ?1 ESCAPE '\\'
-                 ORDER BY be.ts DESC LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![pat, limit], |r| {
+                 WHERE (browse_grep.url LIKE ?1 ESCAPE '\\'
+                    OR browse_grep.title LIKE ?1 ESCAPE '\\'){}
+                 ORDER BY be.ts DESC LIMIT ?2", scoped.sql
+            ))?;
+            let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&pat, &limit];
+            binds.extend(scoped.binds.iter().map(|v| v.as_ref()));
+            let rows = stmt.query_map(binds.as_slice(), |r| {
                 Ok((
                     r.get::<_, Option<i64>>(0)?,
                     r.get::<_, i64>(1)?,
@@ -422,6 +432,10 @@ impl PolisStore {
         q: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<polis_core::types::UserNote>> {
+        self.search_user_notes_scoped(q, limit, &Default::default())
+    }
+
+    pub fn search_user_notes_scoped(&self, q: &str, limit: i64, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Vec<polis_core::types::UserNote>> {
         let trimmed = q.trim();
         if trimmed.is_empty() {
             return Ok(Vec::new());
@@ -431,14 +445,18 @@ impl PolisStore {
             .replace('%', "\\%")
             .replace('_', "\\_");
         let conn = self.conn();
+        let scoped = Self::scope_clause_locked(&conn, "un", scope)?.numbered(3);
         let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM user_notes
-             WHERE text LIKE ?1 ESCAPE '\\'
+            "SELECT {} FROM user_notes un
+             WHERE text LIKE ?1 ESCAPE '\\'{}
              ORDER BY starred DESC, updated_at DESC, id DESC LIMIT ?2",
-            Self::USER_NOTE_COLS
+            Self::USER_NOTE_COLS, scoped.sql
         ))?;
+        let pattern = format!("%{escaped}%"); let limit = limit.max(1);
+        let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&pattern, &limit];
+        binds.extend(scoped.binds.iter().map(|v| v.as_ref()));
         let rows = stmt.query_map(
-            params![format!("%{escaped}%"), limit.max(1)],
+            binds.as_slice(),
             Self::row_to_user_note,
         )?;
         rows.collect()
@@ -484,11 +502,15 @@ impl PolisStore {
         q: &str,
         limit: i64,
     ) -> rusqlite::Result<Option<polis_core::types::ClassNode>> {
+        self.resolve_class_node_scoped(q, limit, &Default::default())
+    }
+
+    pub fn resolve_class_node_scoped(&self, q: &str, limit: i64, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Option<polis_core::types::ClassNode>> {
         use polis_core::query::MIN_PREFIX_LEN;
         let Some(plan) = polis_core::query::plan_fts_query(q) else {
             return Ok(None);
         };
-        let candidates = self.match_class_nodes(q, limit)?;
+        let candidates = self.match_class_nodes_scoped(q, limit, scope)?;
         if candidates.is_empty() {
             return Ok(None);
         }
@@ -549,18 +571,23 @@ impl PolisStore {
         q: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<polis_core::types::ClassNode>> {
+        self.match_class_nodes_scoped(q, limit, &Default::default())
+    }
+
+    pub fn match_class_nodes_scoped(&self, q: &str, limit: i64, scope: &crate::principals::ScopeFilter) -> rusqlite::Result<Vec<polis_core::types::ClassNode>> {
         use polis_core::query::MatchStage;
         let Some(plan) = polis_core::query::plan_fts_query(q) else {
             return Ok(Vec::new());
         };
         let conn = self.conn();
+        let scoped = Self::scope_clause_locked(&conn, "n", scope)?.numbered(4);
         let now = polis_core::ledger::now_millis();
         for stage in [MatchStage::And, MatchStage::Or] {
             let Some(match_q) = plan.match_for(stage) else { continue };
             if match_q.is_empty() {
                 continue;
             }
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare(&format!(
                 // bm25 is negative-is-better in FTS5, so it is negated into a
                 // score that sorts DESC with the recency bonus. The 0.2 weight
                 // is deliberately small: recency breaks ties between comparable
@@ -572,15 +599,18 @@ impl PolisStore {
                         n.ip_name, n.status, n.pinned, n.curated_by, n.created_at, n.updated_at
                  FROM class_nodes_fts
                  JOIN class_nodes n ON n.rowid = class_nodes_fts.rowid
-                 WHERE class_nodes_fts MATCH ?1 AND n.retired_by_run IS NULL
+                 WHERE class_nodes_fts MATCH ?1 AND n.retired_by_run IS NULL{}
                  ORDER BY (-bm25(class_nodes_fts, 5.0, 1.0)
                            + 0.2 * MAX(0.0, 1.0 - (?2 - n.updated_at) / 2592000000.0)
                            + CASE WHEN n.status = 'accepted' THEN 0.1 ELSE 0.0 END) DESC,
                           LENGTH(n.title) ASC
-                 LIMIT ?3",
-            )?;
+                 LIMIT ?3", scoped.sql
+            ))?;
+            let limit = limit.max(1);
+            let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&match_q, &now, &limit];
+            binds.extend(scoped.binds.iter().map(|v| v.as_ref()));
             let rows: Vec<polis_core::types::ClassNode> = stmt
-                .query_map(params![match_q, now, limit.max(1)], Self::row_to_class_node)?
+                .query_map(binds.as_slice(), Self::row_to_class_node)?
                 .collect::<rusqlite::Result<_>>()?;
             if !rows.is_empty() {
                 return Ok(rows);

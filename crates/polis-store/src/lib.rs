@@ -21,6 +21,7 @@ pub mod meta;
 pub mod schema;
 pub mod exports;
 pub mod session_tree;
+pub mod scoped_views;
 pub mod embeddings;
 pub mod browse;
 pub mod observations;
@@ -30,12 +31,17 @@ pub mod notes;
 pub mod search;
 pub mod chain;
 pub mod compaction;
+pub mod claims;
+pub mod jobs;
 pub mod prompts;
 pub mod record;
 pub mod runs;
 pub mod centroids;
 pub mod principals;
 pub mod foreign;
+pub mod diagnostics;
+pub mod retrieval_support;
+pub mod decision_evidence;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -125,6 +131,7 @@ pub struct AttachReport {
 
 /// The store: one shared connection, the schema current.
 pub struct PolisStore {
+    cache_id: usize,
     conn: Arc<Mutex<Connection>>,
     last_attach: AttachReport,
     author: String,
@@ -134,6 +141,11 @@ pub struct PolisStore {
 /// trigram tokenizer all predate it; 3.34 is where the FTS5 features used
 /// here are all present).
 pub const MIN_SQLITE: (u32, u32) = (3, 34);
+
+fn next_cache_id() -> usize {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 impl PolisStore {
     /// Attach to a connection the host owns. Verifies capabilities, creates
@@ -164,7 +176,8 @@ impl PolisStore {
             schema::Migration::verify(&c)?;
             report
         };
-        Ok(Self { conn, last_attach: report, author })
+        let cache_id = next_cache_id();
+        Ok(Self { cache_id, conn, last_attach: report, author })
     }
 
     /// Open a store file of its own — a standalone Polis. WAL so readers never
@@ -182,13 +195,38 @@ impl PolisStore {
         ] {
             let _ = conn.execute_batch(pragma);
         }
-        Self::attach(Arc::new(Mutex::new(conn)), AttachOptions::standalone())
+        let store = Self::attach(Arc::new(Mutex::new(conn)), AttachOptions::standalone())?;
+        store.sync_forget_registry()?;
+        Ok(store)
     }
 
     /// An in-memory standalone store (tests, throwaway analysis).
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
         Self::attach(Arc::new(Mutex::new(conn)), AttachOptions::standalone())
+    }
+
+    /// An independent, consistent read view. File stores use a WAL read
+    /// transaction; private in-memory stores are copied under their lock.
+    /// No migration or authoritative writes run on this view.
+    pub fn read_snapshot(&self) -> Result<Self, StoreError> {
+        let source = self.conn();
+        let path: String = source.query_row("SELECT file FROM pragma_database_list WHERE name='main'", [], |r| r.get(0))?;
+        let snapshot = if path.is_empty() {
+            let mut copy = Connection::open_in_memory()?;
+            {
+                let backup = rusqlite::backup::Backup::new(&source, &mut copy)?;
+                backup.run_to_completion(256, std::time::Duration::from_millis(1), None)?;
+            }
+            copy
+        } else {
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
+        };
+        snapshot.busy_timeout(std::time::Duration::from_secs(5))?;
+        snapshot.execute_batch("PRAGMA query_only=ON; BEGIN;")?;
+        // BEGIN is deferred: this read pins the exact snapshot immediately.
+        snapshot.query_row("SELECT COALESCE(MAX(seq), 0) FROM ledger_events", [], |r| r.get::<_, i64>(0))?;
+        Ok(Self { cache_id: self.cache_id, conn: Arc::new(Mutex::new(snapshot)), last_attach: AttachReport::default(), author: self.author.clone() })
     }
 
     /// The SQLite this process linked must carry what the schema uses. Checked
@@ -231,6 +269,8 @@ impl PolisStore {
         schema::Migration::embeddings(conn)?;
         lexical::Lexical::ensure(conn)?;
         schema::Migration::provenance(conn)?;
+        diagnostics::ensure(conn)?;
+        decision_evidence::ensure(conn)?;
         meta::set(conn, meta::SCHEMA_VERSION_KEY, meta::STORE_SCHEMA_VERSION)
     }
 
@@ -457,6 +497,7 @@ impl PolisStore {
         Self::require_capabilities(&conn)?;
         schema::Migration::verify(&conn)?;
         Ok(Self {
+            cache_id: next_cache_id(),
             conn: Arc::new(Mutex::new(conn)),
             last_attach: AttachReport::default(),
             author: default_author(),

@@ -133,6 +133,30 @@ fn subscription_matches(row: &polis_store::foreign::SubscriptionRow, human: &str
 pub fn import(store: &PolisStore, env: &Envelope, opts: &ImportOptions) -> Result<ImportReport, ImportError> {
     let v = envelope::verify(env)?;
     let h = &env.header;
+    for redaction in &env.payload.redactions {
+        if redaction.chain_id != h.chain_id || !env.payload.events.iter().any(|event|event.seq==redaction.event_seq && event.kind==EventKind::Redaction.as_str() && event.payload_hash==redaction.payload_hash()) {
+            return Err(ImportError::Verify(VerifyError::RedactionHashMismatch(redaction.event_seq)));
+        }
+    }
+    for note in &env.payload.notes {
+        let witness = note.seq.and_then(|seq| {
+            env.payload.events.iter().find(|event| event.seq == seq && event.kind == EventKind::Note.as_str())
+        });
+        let valid = witness.is_some_and(|event| {
+            let target_matches = if note.target_kind == "none" {
+                event.ref_kind.as_deref() == Some("none") && event.ref_id.as_deref() == Some(note.id.to_string().as_str())
+            } else {
+                event.ref_kind.as_deref() == Some(note.target_kind.as_str()) && event.ref_id == note.target_id
+            };
+            let body_matches = ["note", "star", "unstar"].iter().any(|action| {
+                polis_core::ledger::decision_payload_hash(&[("action", action), ("text", note.text.as_str())]) == event.payload_hash
+            });
+            target_matches && body_matches
+        });
+        if !valid {
+            return Err(ImportError::Verify(VerifyError::Schema(format!("note {} does not match its source event", note.id))));
+        }
+    }
     let human = &h.principal.human;
     let pubkey_hex = human.pubkey.clone().unwrap_or_default();
     let display_name = human.display_name.clone();
@@ -233,28 +257,15 @@ pub fn import(store: &PolisStore, env: &Envelope, opts: &ImportOptions) -> Resul
     };
     let new_events: Vec<LedgerEventRow> = events.iter().filter(|e| e.seq >= start_seq).cloned().collect();
     let source = display_name.clone().filter(|n| !n.trim().is_empty()).map(|n| format!("shared:{n}")).unwrap_or_else(|| format!("shared:{}", fingerprint(&h.chain_id)));
-    if new_events.is_empty() {
-        return Ok(ImportReport {
-            outcome: ImportOutcome::NoOp,
-            chain_id: h.chain_id.clone(),
-            human: human.principal_id.clone(),
-            source,
-            from_seq: h.segment.from_seq,
-            to_seq: h.segment.to_seq,
-            rows: ImportedRows::default(),
-            vectors_kept: 0,
-            vectors_discarded: 0,
-            trusted_now,
-            verified: v,
-            tree: (0, 0),
-        });
-    }
+    // A replay can carry a body that was withheld earlier, or repair a local
+    // redaction interrupted after the signed event arrived. Its immutable
+    // events were checked above; source hydration must still honor tombstones.
 
     // The rows: prompts at their redaction (a project filter stubs the rest),
     // notes, principal cards, and the redactions this segment carries.
     let mut prompts = Vec::new();
     let mut prompt_seq_by_id: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
-    for e in new_events.iter().filter(|e| e.kind == "prompt") {
+    for e in events.iter().filter(|e| e.kind == "prompt") {
         if let Some(pid) = e.prompt_id {
             prompt_seq_by_id.insert(pid, e.seq);
         }
@@ -274,22 +285,22 @@ pub fn import(store: &PolisStore, env: &Envelope, opts: &ImportOptions) -> Resul
         .iter()
         .map(|(seq, p, redaction, text)| ForeignPromptInput { seq: *seq, prompt_id: p.id, role: &p.role, body_hash: &p.body_hash, redaction, text: *text, project: p.project.as_deref() })
         .collect();
-    let new_seqs: std::collections::HashSet<i64> = new_events.iter().map(|e| e.seq).collect();
+    let source_seqs: std::collections::HashSet<i64> = events.iter().map(|e| e.seq).collect();
     let note_inputs: Vec<ForeignNoteInput<'_>> = env
         .payload
         .notes
         .iter()
-        .filter(|n| n.seq.is_none_or(|s| new_seqs.contains(&s)))
+        .filter(|n| n.seq.is_some_and(|s| source_seqs.contains(&s)))
         .map(|n| ForeignNoteInput { note_id: n.id, seq: n.seq, target_kind: &n.target_kind, target_id: n.target_id.as_deref(), text: &n.text, created_at: n.created_at })
         .collect();
     let redaction_inputs: Vec<ForeignRedactionInput<'_>> = env
         .payload
         .redactions
         .iter()
-        .filter(|r| new_seqs.contains(&r.event_seq))
+        .filter(|r| source_seqs.contains(&r.event_seq))
         .map(|r| ForeignRedactionInput { event_seq: r.event_seq, target_chain: &r.chain_id, target_seq: r.seq })
         .collect();
-    let last = new_events.last().expect("non-empty");
+    let last = events.last().ok_or_else(||ImportError::Gap("empty segment".into()))?;
     let chain = ForeignChain {
         chain_id: h.chain_id.clone(),
         human_id: human.principal_id.clone(),
@@ -340,7 +351,7 @@ pub fn import(store: &PolisStore, env: &Envelope, opts: &ImportOptions) -> Resul
     // E4: the peer's published catalog, if the segment carries one — a
     // snapshot kept beside the chain (the latest wins), never merged.
     let mut tree = (0usize, 0usize);
-    if !env.payload.tree.is_empty() {
+    if !new_events.is_empty() && !env.payload.tree.is_empty() {
         let nodes: Vec<ForeignClassNode> = env
             .payload
             .tree
@@ -357,7 +368,7 @@ pub fn import(store: &PolisStore, env: &Envelope, opts: &ImportOptions) -> Resul
     }
 
     Ok(ImportReport {
-        outcome: ImportOutcome::Appended { appended: new_events.len() },
+        outcome: if new_events.is_empty() { ImportOutcome::NoOp } else { ImportOutcome::Appended { appended: new_events.len() } },
         chain_id: h.chain_id.clone(),
         human: human.principal_id.clone(),
         source,
@@ -378,11 +389,25 @@ pub fn import(store: &PolisStore, env: &Envelope, opts: &ImportOptions) -> Resul
 /// has no event on the chain (nothing a peer could hold).
 pub fn append_redaction(store: &PolisStore, chain_id: &str, prompt_id: i64, actor: &str) -> Result<Option<i64>, String> {
     let Some(target_seq) = store.prompt_event_seq(prompt_id).map_err(|e| e.to_string())? else { return Ok(None) };
+    let mut conn = store.conn();
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+    use rusqlite::OptionalExtension;
     let payload = RedactionPayload { chain_id: chain_id.to_string(), seq: target_seq, event_seq: 0 };
     let hash = payload.payload_hash();
+    let existing: Option<i64> = tx.query_row("SELECT seq FROM ledger_events WHERE kind = 'redaction' AND prompt_id = ?1
+        AND payload_hash = ?2 ORDER BY seq LIMIT 1", rusqlite::params![prompt_id, hash], |r| r.get(0))
+        .optional().map_err(|e| e.to_string())?;
+    if let Some(seq) = existing {
+        // Repair the legacy interruption between appending the event and
+        // storing its readable payload, without appending a duplicate event.
+        let kept = RedactionPayload { event_seq: seq, ..payload };
+        polis_store::meta::set(&tx, &format!("polis.redaction.{seq}"), &serde_json::to_string(&kept).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        tx.execute("UPDATE redaction_outbox SET delivered_at = ?2, error = NULL WHERE prompt_id = ?1", rusqlite::params![prompt_id, polis_core::ledger::now_millis()]).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        return Ok(Some(seq));
+    }
     let ref_id = prompt_id.to_string();
-    let row = store
-        .append_event(&LedgerAppend {
+    let row = polis_store::ledger::append_event(&tx, &LedgerAppend {
             kind: EventKind::Redaction.as_str(),
             author: actor,
             ts: polis_core::ledger::now_millis(),
@@ -395,10 +420,69 @@ pub fn append_redaction(store: &PolisStore, chain_id: &str, prompt_id: i64, acto
         })
         .map_err(|e| e.to_string())?;
     let kept = RedactionPayload { event_seq: row.seq, ..payload };
-    store
-        .set_meta(&format!("polis.redaction.{}", row.seq), &serde_json::to_string(&kept).unwrap_or_default())
+    polis_store::meta::set(&tx, &format!("polis.redaction.{}", row.seq), &serde_json::to_string(&kept).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
+    tx.execute("UPDATE redaction_outbox SET delivered_at = ?2, attempts = attempts + 1, error = NULL WHERE prompt_id = ?1", rusqlite::params![prompt_id, polis_core::ledger::now_millis()]).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(Some(row.seq))
+}
+
+/// Append a generic captured-source redaction from the durable outbox. The
+/// ledger event and exportable payload commit together; retries reuse the event.
+pub fn append_capture_redaction(store:&PolisStore,chain_id:&str,target_seq:i64,actor:&str)->Result<Option<i64>,String> {
+    use rusqlite::OptionalExtension;
+    let mut conn=store.conn();
+    let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
+    let queued:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM capture_redaction_outbox o JOIN ledger_events le ON le.seq=o.target_seq WHERE o.target_seq=?1)",[target_seq],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if !queued {return Ok(None);}
+    let payload=RedactionPayload {chain_id:chain_id.into(),seq:target_seq,event_seq:0};
+    let hash=payload.payload_hash();
+    let existing:Option<i64>=tx.query_row("SELECT seq FROM ledger_events WHERE kind='redaction' AND payload_hash=?1 ORDER BY seq LIMIT 1",[&hash],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    let seq=if let Some(seq)=existing {seq}else {
+        let ref_id=target_seq.to_string();
+        polis_store::ledger::append_event(&tx,&LedgerAppend {kind:EventKind::Redaction.as_str(),author:actor,ts:polis_core::ledger::now_millis(),prompt_id:None,session_id:None,version_number:None,ref_kind:Some("ledger_event"),ref_id:Some(&ref_id),payload_hash:&hash}).map_err(|e|e.to_string())?.seq
+    };
+    let kept=RedactionPayload {event_seq:seq,..payload};
+    polis_store::meta::set(&tx,&format!("polis.redaction.{seq}"),&serde_json::to_string(&kept).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    tx.execute("UPDATE capture_redaction_outbox SET delivered_at=?2,attempts=attempts+1,error=NULL WHERE target_seq=?1",rusqlite::params![target_seq,polis_core::ledger::now_millis()]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;
+    Ok(Some(seq))
+}
+
+/// Retry forgotten captures whose redaction event was interrupted or failed.
+/// The local purge and this durable outbox are committed together.
+pub fn flush_redactions(store: &PolisStore, chain_id: &str, actor: &str) -> Result<usize, String> {
+    let pending = {
+        let conn = store.conn();
+        let mut stmt = conn.prepare("SELECT prompt_id FROM redaction_outbox WHERE delivered_at IS NULL ORDER BY created_at LIMIT 100").map_err(|e| e.to_string())?;
+        let result = stmt.query_map([], |r| r.get::<_, i64>(0)).map_err(|e| e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+        result
+    };
+    let mut delivered = 0;
+    for id in pending {
+        match append_redaction(store, chain_id, id, actor) {
+            Ok(Some(_)) => delivered += 1,
+            Ok(None) => {
+                store.conn().execute("UPDATE redaction_outbox SET delivered_at = ?2, error = NULL WHERE prompt_id = ?1", rusqlite::params![id, polis_core::ledger::now_millis()]).map_err(|e| e.to_string())?;
+            },
+            Err(error) => {
+                store.conn().execute("UPDATE redaction_outbox SET attempts = attempts + 1, error = ?2 WHERE prompt_id = ?1", rusqlite::params![id, error]).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    let pending_captures={
+        let conn=store.conn();
+        let mut stmt=conn.prepare("SELECT target_seq FROM capture_redaction_outbox WHERE delivered_at IS NULL ORDER BY created_at,target_seq LIMIT 100").map_err(|e|e.to_string())?;
+        let rows=stmt.query_map([],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;rows
+    };
+    for seq in pending_captures {
+        match append_capture_redaction(store,chain_id,seq,actor) {
+            Ok(Some(_))=>delivered+=1,
+            Ok(None)=>{store.conn().execute("UPDATE capture_redaction_outbox SET attempts=attempts+1,error='source event missing' WHERE target_seq=?1",[seq]).map_err(|e|e.to_string())?;},
+            Err(error)=>{store.conn().execute("UPDATE capture_redaction_outbox SET attempts=attempts+1,error=?2 WHERE target_seq=?1",rusqlite::params![seq,error]).map_err(|e|e.to_string())?;},
+        }
+    }
+    Ok(delivered)
 }
 
 /// Redactions we emitted that a peer has not yet acknowledged (its reported

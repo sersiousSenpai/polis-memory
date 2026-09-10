@@ -1,0 +1,207 @@
+{
+  "system": "lexical",
+  "subset": 100,
+  "seed": 20260907,
+  "stub": true,
+  "commit": "911d24e4348e9906b4fe6cc7a57d44e1dceceede",
+  "date": "2026-09-09",
+  "hardware": "darwin-arm64 arm",
+  "models": {
+    "answer": "stub",
+    "judge": "stub"
+  },
+  "n": 6,
+  "accuracy": {
+    "categoryN": {
+      "knowledge-update": 1,
+      "multi-session": 1,
+      "single-session-assistant": 1,
+      "single-session-preference": 1,
+      "single-session-user": 1,
+      "temporal-reasoning": 1
+    },
+    "abstention": null,
+    "fixtureReachability": 0.6667,
+    "fixtureByType": {
+      "knowledge-update": 1.0,
+      "multi-session": 0.0,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 1.0,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 0.0
+    }
+  },
+  "cost": {
+    "ingestWallS": 0.0,
+    "llmCallsWrite": 0,
+    "tokensWrite": 0,
+    "queryP50Ms": 0.02,
+    "queryP95Ms": 0.05,
+    "contextTokensP50": 345,
+    "sessionsIngested": 10,
+    "messagesIngested": 20,
+    "wallS": 0.0
+  },
+  "spend": {
+    "budgetTokens": null,
+    "tokensIn": 0,
+    "tokensOut": 0,
+    "calls": 0,
+    "byRole": {},
+    "simulatedTokens": 2829,
+    "failedAttemptsUsageUnknown": 0,
+    "usageBasis": "provider-reported"
+  },
+  "partial": false,
+  "partial_reason": null,
+  "questions": [
+    {
+      "id": "sample_ssu_1",
+      "type": "single-session-user",
+      "correct": true,
+      "abstention": false,
+      "query_ms": 0.05,
+      "context_tokens": 389,
+      "ingest_ms": 0.0,
+      "sessions": 2,
+      "messages": 4,
+      "response_head": "[session=s1 date=2023/05/01 (Mon) 10:00 turn=0 role=user] we chose sqlite fts5 trigram for the grep index, it keeps grep",
+      "readiness": {
+        "verified": true,
+        "emptyStart": true,
+        "backend": "lexical"
+      },
+      "namespace": "d2d82055d4fb4bf6880c77da03d80da1:ee96a1dea4c349b68148b670fddf1795:sample_ssu_1"
+    },
+    {
+      "id": "sample_ssa_1",
+      "type": "single-session-assistant",
+      "correct": true,
+      "abstention": false,
+      "query_ms": 0.01,
+      "context_tokens": 216,
+      "ingest_ms": 0.0,
+      "sessions": 1,
+      "messages": 2,
+      "response_head": "[session=s3 date=2023/05/04 (Thu) 09:00 turn=0 role=user] what port should the standalone daemon use?\n[session=s3 date=2",
+      "readiness": {
+        "verified": true,
+        "emptyStart": true,
+        "backend": "lexical"
+      },
+      "namespace": "d2d82055d4fb4bf6880c77da03d80da1:9b8f145df73e45c5a8111c46dc743b1c:sample_ssa_1"
+    },
+    {
+      "id": "sample_ssp_1",
+      "type": "single-session-preference",
+      "correct": true,
+      "abstention": false,
+      "query_ms": 0.01,
+      "context_tokens": 223,
+      "ingest_ms": 0.0,
+      "sessions": 1,
+      "messages": 2,
+      "response_head": "[session=s4 date=2023/05/05 (Fri) 12:00 turn=0 role=user] I only keep notes as plain markdown files in a git-synced fold",
+      "readiness": {
+        "verified": true,
+        "emptyStart": true,
+        "backend": "lexical"
+      },
+      "namespace": "d2d82055d4fb4bf6880c77da03d80da1:a739c9cd61a64045a50df5163e12b9fe:sample_ssp_1"
+    },
+    {
+      "id": "sample_tr_1",
+      "type": "temporal-reasoning",
+      "correct": false,
+      "abstention": false,
+      "query_ms": 0.02,
+      "context_tokens": 345,
+      "ingest_ms": 0.0,
+      "sessions": 2,
+      "messages": 4,
+      "response_head": "[session=s5 date=2023/05/06 (Sat) 08:00 turn=0 role=user] I started the schema migration today\n[session=s6 date=2023/05/",
+      "readiness": {
+        "verified": true,
+        "emptyStart": true,
+        "backend": "lexical"
+      },
+      "namespace": "d2d82055d4fb4bf6880c77da03d80da1:3b2969178c134950b48f4df9e4b01a67:sample_tr_1"
+    },
+    {
+      "id": "sample_ku_1",
+      "type": "knowledge-update",
+      "correct": true,
+      "abstention": false,
+      "query_ms": 0.02,
+      "context_tokens": 382,
+      "ingest_ms": 0.0,
+      "sessions": 2,
+      "messages": 4,
+      "response_head": "[session=s7 date=2023/05/07 (Sun) 08:00 turn=0 role=user] we use the apple sentence embedder for the semantic arm\n[sessi",
+      "readiness": {
+        "verified": true,
+        "emptyStart": true,
+        "backend": "lexical"
+      },
+      "namespace": "d2d82055d4fb4bf6880c77da03d80da1:8d6b256d124e4b0e90075d155faba7db:sample_ku_1"
+    },
+    {
+      "id": "sample_ms_1_abs",
+      "type": "multi-session",
+      "correct": false,
+      "abstention": true,
+      "query_ms": 0.02,
+      "context_tokens": 363,
+      "ingest_ms": 0.0,
+      "sessions": 2,
+      "messages": 4,
+      "response_head": "[session=s9 date=2023/05/08 (Mon) 08:00 turn=0 role=user] the org node relays envelopes over https with a bearer token\n[",
+      "readiness": {
+        "verified": true,
+        "emptyStart": true,
+        "backend": "lexical"
+      },
+      "namespace": "d2d82055d4fb4bf6880c77da03d80da1:3e0fa30371d645f9b562e5f233ff08e6:sample_ms_1_abs"
+    }
+  ],
+  "manifest": {
+    "runId": "d2d82055d4fb4bf6880c77da03d80da1",
+    "invocationId": "638b28c13c3541c4947296500d2934d5",
+    "datasetSha256": "5e23b0e3a5c7feaa5fa03f46b8f7c0db367272f90ff9a373ba1f0a0758d6e1d6",
+    "questionIds": [
+      "sample_ssu_1",
+      "sample_ssa_1",
+      "sample_ssp_1",
+      "sample_tr_1",
+      "sample_ku_1",
+      "sample_ms_1_abs"
+    ],
+    "split": "full",
+    "splitSeed": 20260907,
+    "captureProfile": "all-roles",
+    "processingProfile": "immediate",
+    "contextTokenizer": "utf8-byte-upper-bound (keyless only)",
+    "contextTokenCeiling": 4000,
+    "timeoutSeconds": 120,
+    "packages": {
+      "mem0ai": null,
+      "graphiti-core": null,
+      "tiktoken": null,
+      "huggingface-hub": null
+    },
+    "python": "3.14.6",
+    "platform": "macOS-14.3-arm64-arm-64bit-Mach-O",
+    "cpuCount": 16,
+    "dirtyWorktree": true,
+    "sourceDatePolicy": "session timestamp shared by its turns; original date retained; no invented offsets",
+    "usagePolicy": "provider-reported tokens only; unknown attempts reserve ceiling and stop",
+    "scoreMeaning": "keyless pipeline fixture, not answer-quality evidence",
+    "ablations": {
+      "capture": "all-roles",
+      "processing": "immediate"
+    }
+  },
+  "failures": [],
+  "schema": "polis.bench/2",
+  "benchmark": "longmemeval-s"
+}

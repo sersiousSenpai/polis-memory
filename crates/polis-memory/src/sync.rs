@@ -64,6 +64,9 @@ pub fn subscription_filter(store: &PolisStore) -> Subscription {
 pub async fn sync(store: &PolisStore, identity: &Identity, login: &str, transport: &dyn SegmentTransport, opts: &SyncOptions) -> SyncReport {
     let mut report = SyncReport::default();
     if opts.publish {
+        if let Err(error) = crate::sharing::flush_redactions(store, &identity.device_id(), login) {
+            report.errors.push((identity.device_id(), format!("pending redaction retry: {error}")));
+        }
         let (head, _) = store.chain_head().unwrap_or((0, String::new()));
         let done = published_up_to(store, transport);
         if head > done {
