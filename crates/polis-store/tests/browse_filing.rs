@@ -25,6 +25,10 @@ fn page_filing_and_filter_use_seq_even_when_a_row_id_collides() {
     assert_eq!(page.class_title.as_deref(), Some("Correct page"));
     let filed = store.query_ledger_events(&LedgerFilters { class_node:Some("correct".into()), ..Default::default() }).unwrap();
     assert_eq!(filed.iter().map(|e| e.event.seq).collect::<Vec<_>>(), vec![3]);
+    let cited = store.query_ledger_events(&LedgerFilters { seqs:Some(vec![1, 999]), ..Default::default() }).unwrap();
+    assert_eq!(cited.iter().map(|e| e.event.seq).collect::<Vec<_>>(), vec![1]);
+    let intersection = store.query_ledger_events(&LedgerFilters { seqs:Some(vec![1]), class_node:Some("correct".into()), ..Default::default() }).unwrap();
+    assert!(intersection.is_empty(), "citation and class filters must intersect");
     let decoy = store.query_ledger_events(&LedgerFilters { class_node:Some("decoy".into()), ..Default::default() }).unwrap();
     assert!(!decoy.iter().any(|e| e.event.seq == seq));
     // Scope joins resolve the link's seq back to its page row before checking
