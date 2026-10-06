@@ -242,13 +242,18 @@ pub fn class_scope(polis: &Polis<'_>, root: &str) -> Result<(BundleTree, ClassKe
             match l.target_kind.as_str() {
                 "prompt" => {
                     if let Ok(id) = l.target_id.parse::<i64>() {
-                        keep.prompt_ids.insert(id);
+                        // A prompt filing names its ledger event, not prompts.id.
+                        let pid: Option<i64> = db.conn().query_row(
+                            "SELECT prompt_id FROM ledger_events WHERE seq = ?1", [id], |r| r.get(0),
+                        ).ok().flatten();
+                        if let Some(pid) = pid { keep.prompt_ids.insert(pid); }
+                        keep.seqs.insert(id);
                     }
                 }
-                "session" | "revision" => {
+                "session" => {
                     keep.session_ids.insert(l.target_id.clone());
                 }
-                "decision" | "ledger" => {
+                "decision" | "revision" | "note" | "browse_event" | "ledger" => {
                     if let Ok(seq) = l.target_id.parse::<i64>() {
                         keep.seqs.insert(seq);
                     }

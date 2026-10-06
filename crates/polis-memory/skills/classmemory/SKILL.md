@@ -145,8 +145,9 @@ Each op:
 
 - `target_kind` ∈ `prompt | session | revision | mission | decision |
   browse_event | note | linked | companion | browse_thread`;
-  `target_id` is the lake id (prompt seq, session id, ledger seq, mission id,
-  thread id; a `note` files by its lake seq, like a decision).
+  `target_id` is always the ledger seq for prompt, revision, decision, note
+  and browse_event. A page row id is never a target. Session, mission and
+  thread targets use their host ids.
 - **Lineage is provenance too.** Delta lines may carry `session=`, `thread=`
   (`kind:id` — the browse tab / linked discussion / draft / voice thread the
   prompt belongs to), and `parent=session:<id>` (the plan session that thread

@@ -341,7 +341,7 @@ pub fn build_classifier_prompt(
         }
         let role = role_for(&it.kind, it.surface.as_deref(), it.role.as_deref());
         let source = match role {
-            "page" => it.ref_id.as_deref().map(|id| format!("browse_event:{id}")),
+            "page" => it.ref_id.as_deref().map(|id| format!("page_row={id}")),
             "foreign" => it.origin.clone(),
             _ => None,
         };
@@ -373,7 +373,7 @@ pub fn build_classifier_prompt(
         "\n## Output\n\nReturn ONLY a JSON object (optionally in a ```json fence) \
          of the form:\n\n\
          {\"proposals\": [\n  \
-         {\"op\":\"file\",\"parent_id\":\"<root/node id>\",\"sub_class\":\"<optional new sub-class title>\",\"target_kind\":\"prompt|session|revision|mission|decision|browse_event|note\",\"target_id\":\"<lake seq/id>\",\"note\":\"<short>\",\"rationale\":\"<why>\"},\n  \
+         {\"op\":\"file\",\"parent_id\":\"<root/node id>\",\"sub_class\":\"<optional new sub-class title>\",\"target_kind\":\"prompt|session|revision|mission|decision|browse_event|note\",\"target_id\":\"<the item’s seq; host id for session/mission/thread>\",\"note\":\"<short>\",\"rationale\":\"<why>\"},\n  \
          {\"op\":\"create\",\"parent_id\":\"<id>\",\"title\":\"<class>\",\"rationale\":\"<why: size×coherence×recency>\"},\n  \
          {\"op\":\"promote\",\"node_id\":\"<id>\",\"new_parent_id\":\"<id>\",\"rationale\":\"<grew, earns its own class>\"},\n  \
          {\"op\":\"split\",\"node_id\":\"<id>\",\"into\":[{\"title\":\"<a>\",\"link_ids\":[]},{\"title\":\"<b>\",\"link_ids\":[]}],\"rationale\":\"<why>\"},\n  \
