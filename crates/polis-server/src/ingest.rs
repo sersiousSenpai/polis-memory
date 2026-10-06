@@ -45,6 +45,30 @@ pub fn ingest_prompt_text(v: &serde_json::Value) -> String {
         .to_string()
 }
 
+/// Preserve capture metadata and merge context even when another host feature
+/// (for example restore) already supplied additionalContext.
+fn merge_annotation(base: &mut serde_json::Value, extra: serde_json::Value) {
+    let (Some(base), serde_json::Value::Object(extra)) = (base.as_object_mut(), extra) else { return; };
+    for (key, value) in extra {
+        match base.get_mut(&key) {
+            Some(serde_json::Value::String(existing)) if key == "additionalContext" && value.is_string() => {
+                if let Some(next) = value.as_str().filter(|s| !s.is_empty()) {
+                    if !existing.is_empty() { existing.push_str("\n\n"); }
+                    existing.push_str(next);
+                }
+            }
+            Some(existing) if existing.is_object() && value.is_object() => merge_annotation(existing, value),
+            Some(_) => {},
+            None => { base.insert(key, value); },
+        }
+    }
+}
+
+fn annotated_response(state: &PolisState, cx: &IngestContext<'_>, status: StatusCode, mut body: serde_json::Value) -> Response {
+    if let Some(extra) = state.ingest.annotate(cx) { merge_annotation(&mut body, extra); }
+    (status, Json(body)).into_response()
+}
+
 /// `POST /v1/prompts/ingest` — the UserPromptSubmit capture hook's sink. Records
 /// interactive prompts (PTY plan sessions + external sessions) into the ledger.
 /// Fail-open: any error returns 200 so the hook never blocks prompt submission.
@@ -106,7 +130,7 @@ pub async fn handle_prompts_ingest(
     // A host's control traffic (Redline: the restore trigger), answered with
     // whatever the host wants the hook to say, and never recorded.
     if let Some(body) = state.ingest.intercept(&cx) {
-        return (StatusCode::OK, Json(body)).into_response();
+        return annotated_response(&state, &cx, StatusCode::OK, body);
     }
 
     let bh = body_hash(&prompt);
@@ -117,23 +141,18 @@ pub async fn handle_prompts_ingest(
         .is_some_and(|s| state.ingest.seat_suppresses(s));
     if claimed || seat_suppresses {
         state.ingest.on_agent_prompt_skipped(&cx, &bh);
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "skipped": "agent_dup",
-                "by": if claimed { "guard" } else { "header" },
-                "seat": agent_seat,
-            })),
-        )
-            .into_response();
+        return annotated_response(&state, &cx, StatusCode::OK, serde_json::json!({
+            "skipped": "agent_dup",
+            "by": if claimed { "guard" } else { "header" },
+            "seat": agent_seat,
+        }));
     }
 
     let origin = state.ingest.classify_origin(cwd.as_deref());
     if origin == Origin::External {
         // External-session capture toggle (default on).
         if !state.ingest.capture_external() {
-            return (StatusCode::OK, Json(serde_json::json!({ "skipped": "external_off" })))
-                .into_response();
+            return annotated_response(&state, &cx, StatusCode::OK, serde_json::json!({ "skipped": "external_off" }));
         }
     }
     let surface = if origin == Origin::Redline {
@@ -148,21 +167,21 @@ pub async fn handle_prompts_ingest(
         session: claude_session_id.clone(),
         project: cwd.clone(),
     };
-    let (response, seq) = match state.api.capture(&req) {
+    let (status, body, seq) = match state.api.capture(&req) {
         Ok(Some(seq)) => {
             state.events.changed(&[Change::Ledger]);
-            ((StatusCode::CREATED, Json(serde_json::json!({ "seq": seq }))).into_response(), Some(seq))
+            (StatusCode::CREATED, serde_json::json!({ "seq": seq }), Some(seq))
         }
-        Ok(None) => ((StatusCode::OK, Json(serde_json::json!({ "skipped": "dup" }))).into_response(), None),
+        Ok(None) => (StatusCode::OK, serde_json::json!({ "skipped": "dup" }), None),
         Err(e) => {
             tracing::warn!(error = %e, "prompt ingest failed");
-            ((StatusCode::OK, Json(serde_json::json!({ "skipped": "error" }))).into_response(), None)
+            (StatusCode::OK, serde_json::json!({ "skipped": "error" }), None)
         }
     };
     // After the row exists (or didn't): the host's follow-through — Redline
     // stamps this session's still-unstamped prompts from the transcript tail.
     state.ingest.on_recorded(&cx, seq);
-    response
+    annotated_response(&state, &cx, status, body)
 }
 
 #[cfg(test)]
@@ -311,4 +330,44 @@ mod tests {
         let (s, v) = post(&app, r#"{"prompt":"at home","cwd":"/home"}"#, &[]).await;
         assert_eq!((s, v["seq"].clone()), (StatusCode::CREATED, serde_json::json!(1)), "the host's own projects still capture");
     }
+    struct AnnotatingHost { log: Mutex<Vec<String>> }
+    impl IngestObserver for AnnotatingHost {
+        fn intercept(&self, cx: &IngestContext<'_>) -> Option<serde_json::Value> {
+            (cx.prompt == "restore control").then(|| serde_json::json!({"skipped":"restore", "hookSpecificOutput":{"hookEventName":"UserPromptSubmit", "additionalContext":"restore protocol"}}))
+        }
+        fn on_recorded(&self, _: &IngestContext<'_>, seq: Option<i64>) {
+            self.log.lock().unwrap().push(format!("recorded:{seq:?}"));
+        }
+        fn on_agent_prompt_skipped(&self, _: &IngestContext<'_>, _: &str) {
+            self.log.lock().unwrap().push("bound launch".into());
+        }
+        fn annotate(&self, _: &IngestContext<'_>) -> Option<serde_json::Value> {
+            self.log.lock().unwrap().push("annotated".into());
+            Some(serde_json::json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit", "additionalContext":"shell context"}}))
+        }
+    }
+
+    #[tokio::test]
+    async fn annotation_records_once_consumes_guards_and_merges_restore_context() {
+        let host = Arc::new(AnnotatingHost { log: Mutex::new(Vec::new()) });
+        let mut state = testing::state();
+        state.ingest = host.clone();
+        let app = testing::app_with(state);
+        let (_, reply) = post(&app, r#"{"prompt":"the visible hosted prompt","session_id":"hosted"}"#, &[]).await;
+        assert_eq!(reply["seq"], 1);
+        assert_eq!(reply["hookSpecificOutput"]["additionalContext"], "shell context");
+        let (_, dup) = post(&app, r#"{"prompt":"the visible hosted prompt","session_id":"hosted"}"#, &[]).await;
+        assert_eq!(dup["skipped"], "dup");
+        assert_eq!(*host.log.lock().unwrap(), vec!["recorded:Some(1)", "annotated", "recorded:None", "annotated"]);
+        polis_core::ledger::register_agent_prompt("annotated launch guard");
+        let (_, guarded) = post(&app, r#"{"prompt":"annotated launch guard","session_id":"hosted"}"#, &[]).await;
+        assert_eq!(guarded["by"], "guard");
+        assert_eq!(guarded["hookSpecificOutput"]["additionalContext"], "shell context");
+        assert!(!polis_core::ledger::claim_agent_prompt(&polis_core::ledger::body_hash("annotated launch guard")));
+        assert!(host.log.lock().unwrap().windows(2).any(|pair| pair == ["bound launch", "annotated"]));
+        let (_, restore) = post(&app, r#"{"prompt":"restore control","session_id":"hosted"}"#, &[]).await;
+        assert_eq!(restore["hookSpecificOutput"]["additionalContext"], "restore protocol\n\nshell context");
+        assert_eq!(restore["skipped"], "restore");
+    }
+
 }

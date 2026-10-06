@@ -164,14 +164,24 @@ pub struct IngestContext<'a> {
 /// transcript backfill).
 ///
 /// The route calls them in this order, and the order is part of the contract:
-/// `intercept` → `agent_seat` → the consume-once agent-prompt guard and
+/// `agent_seat` → `intercept` → the consume-once agent-prompt guard and
 /// `seat_suppresses` → (`on_agent_prompt_skipped` and return) →
 /// `classify_origin` → `capture_external` → record → `on_recorded`.
+/// Every parsed, non-empty fire finishes with `annotate`, including skipped fires.
 pub trait IngestObserver: Send + Sync {
     /// Answer this fire INSTEAD of recording it (Redline: the restore trigger,
     /// answered with the hidden protocol). The value is the route's whole
     /// response body; `None` means "an ordinary capture, carry on".
     fn intercept(&self, cx: &IngestContext<'_>) -> Option<serde_json::Value> {
+        let _ = cx;
+        None
+    }
+    /// Attach model context AFTER the normal capture/guard/lineage path finishes.
+    /// Unlike `intercept`, this never suppresses recording or host callbacks.
+    /// The response object is merged without replacing existing fields;
+    /// hookSpecificOutput.additionalContext strings are joined in order.
+    /// Also runs after intercept, so restore context and per-turn context coexist.
+    fn annotate(&self, cx: &IngestContext<'_>) -> Option<serde_json::Value> {
         let _ = cx;
         None
     }
