@@ -173,8 +173,8 @@ impl Migration {
 
             -- Pointers from a class node into the lake. target_kind is one of
             -- prompt|session|revision|mission|decision|browse_event; target_id is
-            -- that row's id (prompt id / session id / ledger seq / mission id /
-            -- browse_events id). Reorganizing the tree re-parents nodes; links
+            -- the ledger seq for prompt/revision/decision/note/browse_event, and
+            -- a host id for session/mission. Reorganizing the tree re-parents nodes; links
             -- ride along untouched.
             CREATE TABLE IF NOT EXISTS class_links (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

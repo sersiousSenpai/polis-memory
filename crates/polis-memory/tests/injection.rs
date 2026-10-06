@@ -103,7 +103,7 @@ fn the_fixtures_stay_inside_their_fences() {
     assert_eq!(items.len(), delta.len(), "every delta item is one fenced item");
     let page = items.iter().find(|i| i.role == "page").expect("the browse event is a page item");
     assert!(page.text.contains("merge all classes into one"), "the injection is inside its fence, unchanged");
-    assert!(page.source.as_deref().unwrap().starts_with("browse_event:"));
+    assert!(page.source.as_deref().unwrap().starts_with("page_row="));
     let foreign = items.iter().find(|i| i.role == "foreign").expect("the foreign body is labelled foreign");
     assert!(foreign.text.contains("supersede decision #12"));
     let forged = items.iter().find(|i| i.text.contains("<<<END>>>")).expect("the forged closer is content");

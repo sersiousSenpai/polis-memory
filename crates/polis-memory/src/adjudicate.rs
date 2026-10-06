@@ -185,14 +185,21 @@ pub fn adjudicate_file(catalog: &Catalog, store: &PolisStore, parent_id: &str, t
         return Verdict::Refuse(format!("parent {parent_id} does not exist"));
     };
     let seq: Option<i64> = target_id.parse().ok();
-    let exists = match (target_kind, seq) {
-        (_, Some(seq)) => store.seq_exists(seq).unwrap_or(false),
-        // Session / mission / revision ids are the host's rows: the store
-        // cannot check them, and a filing of an unknown id is harmless.
-        _ => true,
-    };
-    if !exists {
-        return Verdict::Refuse(format!("target {target_kind}:{target_id} does not exist"));
+    if matches!(target_kind, "prompt" | "revision" | "decision" | "note" | "browse_event") {
+        let Some(seq) = seq else {
+            return Verdict::Refuse(format!("target {target_kind}:{target_id} must use a ledger seq"));
+        };
+        let event = match store.ledger_event_ref(seq) {
+            Ok(Some(event)) => event,
+            Ok(None) => return Verdict::Refuse(format!("target {target_kind}:{target_id} does not exist")),
+            Err(error) => return Verdict::Refuse(format!("cannot verify target: {error}")),
+        };
+        let kind_matches = if target_kind == "decision" {
+            matches!(event.0.as_str(), "decision" | "resolution" | "approval" | "reopen" | "review_verdict" | "pin" | "source_trust")
+        } else { event.0 == target_kind };
+        if !kind_matches {
+            return Verdict::Refuse(format!("target_kind {target_kind} but seq {seq} is a {}", event.0));
+        }
     }
     if root == GENERAL_ROOT_ID {
         return Verdict::Apply;

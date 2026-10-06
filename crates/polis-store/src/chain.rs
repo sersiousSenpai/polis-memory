@@ -731,32 +731,15 @@ impl PolisStore {
         if f.noted.unwrap_or(false) {
             sql.push_str(" AND (COALESCE(n_on.text, '') <> '' OR COALESCE(n_own.text, '') <> '')");
         }
-        // P4 citation focus: exact seqs (the Ask agent's `#seq` chips). An
-        // empty list behaves like an absent filter, matching every other axis.
-        if let Some(seqs) = f.seqs.as_deref().filter(|s| !s.is_empty()) {
-            let marks = vec!["?"; seqs.len()].join(", ");
-            sql.push_str(&format!(" AND le.seq IN ({marks})"));
-            for s in seqs {
-                binds.push(Box::new(*s));
-            }
-        }
-        // P4 citation focus: events filed under one accepted class node. Same
-        // two-keyspace discipline as the filing probe below — `class_links.
-        // target_id` is the ledger seq for prompt/decision/revision/note
-        // targets but the `browse_events` row id for browse targets.
+        // Every seq-addressable class link uses the ledger seq, including pages.
+        // ref_id is a page row id and must never be compared with target_id.
         if let Some(node) = f.class_node.as_deref().filter(|s| !s.is_empty()) {
             sql.push_str(
-                " AND (EXISTS (SELECT 1 FROM class_links cl
+                " AND EXISTS (SELECT 1 FROM class_links cl
                         WHERE cl.status = 'accepted' AND cl.retired_by_run IS NULL AND cl.node_id = ?
-                          AND cl.target_kind IN ('prompt', 'decision', 'revision', 'note')
-                          AND cl.target_id = CAST(le.seq AS TEXT))
-                    OR (le.ref_kind = 'browse_event'
-                        AND EXISTS (SELECT 1 FROM class_links cl
-                        WHERE cl.status = 'accepted' AND cl.retired_by_run IS NULL AND cl.node_id = ?
-                          AND cl.target_kind = 'browse_event'
-                          AND cl.target_id = le.ref_id)))",
+                          AND cl.target_kind IN ('prompt', 'decision', 'revision', 'note', 'browse_event')
+                          AND cl.target_id = CAST(le.seq AS TEXT))",
             );
-            binds.push(Box::new(node.to_string()));
             binds.push(Box::new(node.to_string()));
         }
         // P5 Map focus: an agent thread's prompts / a browse tab's trail. Both
@@ -837,35 +820,17 @@ impl PolisStore {
         })?;
         let mut items: Vec<polis_core::types::TimelineItem> = rows.collect::<Result<_, _>>()?;
 
-        // Accepted class filing for the WHOLE page in two batched queries.
-        // `class_links.target_id` is the ledger `seq` for prompt/decision/
-        // revision targets but the `browse_events` row id for browse targets —
-        // two keyspaces, probed seq-first, so a numeric browse id can never
-        // shadow a seq (or vice versa).
-        //
-        // This used to be one query per row per keyspace: a 500-row page cost
-        // up to 1,000 executions, each an unindexed scan of `class_links`, all
-        // under the single connection lock. `MIN(cl.id)` reproduces the old
-        // `ORDER BY cl.id LIMIT 1` precedence — the earliest accepted filing
-        // wins — and `idx_class_links_target` now serves the lookup direction.
+        // One batched lookup: class_links.target_id is always the ledger seq
+        // for prompt, decision, revision, note and browse_event targets. Pages
+        // are reached through seq -> ledger_events.ref_id -> browse_events.id.
         let seq_keys: Vec<String> = items.iter().map(|it| it.event.seq.to_string()).collect();
-        let browse_keys: Vec<String> = items
-            .iter()
-            .filter(|it| it.event.ref_kind.as_deref() == Some("browse_event"))
-            .filter_map(|it| it.event.ref_id.clone())
-            .collect();
         let by_seq = Self::filings_for_targets(
             &conn,
-            &["prompt", "decision", "revision", "note"],
+            &["prompt", "decision", "revision", "note", "browse_event"],
             &seq_keys,
         )?;
-        let by_browse = Self::filings_for_targets(&conn, &["browse_event"], &browse_keys)?;
         for it in &mut items {
-            let filing = by_seq.get(&it.event.seq.to_string()).or_else(|| {
-                (it.event.ref_kind.as_deref() == Some("browse_event"))
-                    .then(|| it.event.ref_id.as_deref().and_then(|rid| by_browse.get(rid)))
-                    .flatten()
-            });
+            let filing = by_seq.get(&it.event.seq.to_string());
             if let Some((node_id, title)) = filing {
                 it.class_node_id = Some(node_id.clone());
                 it.class_title = Some(title.clone());
