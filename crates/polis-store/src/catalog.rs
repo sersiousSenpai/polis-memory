@@ -215,12 +215,10 @@ impl PolisStore {
         if self.get_class_node_scoped(node_id, scope)?.is_none() { return Ok(Vec::new()); }
         let links = self.list_class_links_for_node(node_id)?;
         if scope.is_empty() { return Ok(links); }
-        let seqs: Vec<i64> = links.iter().filter(|l| matches!(l.target_kind.as_str(), "prompt" | "decision" | "ledger" | "resolution" | "approval" | "review_verdict")).filter_map(|l| l.target_id.parse().ok()).collect();
+        let seqs: Vec<i64> = links.iter().filter(|l| matches!(l.target_kind.as_str(), "prompt" | "decision" | "ledger" | "resolution" | "approval" | "review_verdict" | "browse_event" | "revision" | "note")).filter_map(|l| l.target_id.parse().ok()).collect();
         let eligible = self.eligible_seqs(&seqs, scope)?;
-        let targets = self.eligible_embedding_targets(scope)?;
         Ok(links.into_iter().filter(|l| match l.target_kind.as_str() {
-            "prompt" | "decision" | "ledger" | "resolution" | "approval" | "review_verdict" => l.target_id.parse::<i64>().ok().is_some_and(|id| eligible.contains(&id)),
-            "browse_event" => l.target_id.parse::<i64>().ok().is_some_and(|id| targets.contains(&("browse_event".into(), id))),
+            "prompt" | "decision" | "ledger" | "resolution" | "approval" | "review_verdict" | "browse_event" | "revision" | "note" => l.target_id.parse::<i64>().ok().is_some_and(|id| eligible.contains(&id)),
             _ => false,
         }).collect())
     }
@@ -246,17 +244,10 @@ impl PolisStore {
                 }
             }
             match p {
-                Proposal::File {
-                    target_kind,
-                    target_id,
-                    ..
-                } => {
+                Proposal::File { target_id, .. } => {
                     if let Ok(seq) = target_id.parse::<i64>() {
-                        let forgotten = if target_kind == "browse_event" {
-                            conn.query_row("SELECT EXISTS(SELECT 1 FROM forgotten_captures WHERE target_kind='browse_event' AND target_id=?1)", [seq], |r|r.get::<_,bool>(0))?
-                        } else {
-                            Self::source_forgotten_locked(conn, seq)?
-                        };
+                        // Filing targets are ledger seqs, including browse events.
+                        let forgotten = Self::source_forgotten_locked(conn, seq)?;
                         if forgotten {
                             return Ok(StagedOutcome::Skipped);
                         }

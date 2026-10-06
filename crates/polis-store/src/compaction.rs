@@ -306,8 +306,9 @@ impl PolisStore {
     fn forget_derived_copies_locked(conn: &Connection, kind: &str, id: i64, seqs: &[i64], ts: i64) -> rusqlite::Result<()> {
         let seq_json = serde_json::to_string(seqs).unwrap();
         let links = conn.prepare("SELECT id,node_id FROM class_links WHERE
-            (target_kind IN ('prompt','decision','ledger','resolution','approval','review_verdict','note','user_note') AND target_id IN (SELECT CAST(value AS TEXT) FROM json_each(?1)))
-            OR (?2='browse_event' AND target_kind=?2 AND target_id=?3)")?.query_map(params![seq_json,kind,id.to_string()],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            target_kind IN ('prompt','decision','ledger','resolution','approval','review_verdict','note','user_note','revision','browse_event')
+            AND target_id IN (SELECT CAST(value AS TEXT) FROM json_each(?1))")?
+            .query_map([&seq_json],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let obs = conn.prepare("SELECT id,node_id FROM class_observations WHERE EXISTS(SELECT 1 FROM json_each(cite_seqs) WHERE value IN (SELECT value FROM json_each(?1)))")?
             .query_map([&seq_json],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let nodes: HashSet<String> = links.iter().chain(obs.iter()).map(|(_,node)|node.clone()).collect();
