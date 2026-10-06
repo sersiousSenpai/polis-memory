@@ -731,6 +731,12 @@ impl PolisStore {
         if f.noted.unwrap_or(false) {
             sql.push_str(" AND (COALESCE(n_on.text, '') <> '' OR COALESCE(n_own.text, '') <> '')");
         }
+        // Exact citation chips intersect the remaining facets. Empty means no filter.
+        if let Some(seqs) = f.seqs.as_deref().filter(|seqs| !seqs.is_empty()) {
+            let marks = vec!["?"; seqs.len()].join(", ");
+            sql.push_str(&format!(" AND le.seq IN ({marks})"));
+            for seq in seqs { binds.push(Box::new(*seq)); }
+        }
         // Every seq-addressable class link uses the ledger seq, including pages.
         // ref_id is a page row id and must never be compared with target_id.
         if let Some(node) = f.class_node.as_deref().filter(|s| !s.is_empty()) {
