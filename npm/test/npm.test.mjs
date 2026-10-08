@@ -18,8 +18,8 @@ test("the launcher maps every built target to its platform package", () => {
   assert.deepEqual(Object.keys(PLATFORMS).sort(), Object.values(TARGETS).map((t) => t.name).sort());
   const seen = [];
   const resolve = (spec) => { seen.push(spec); return `/nm/${spec}`; };
-  assert.equal(binaryPath("darwin", "arm64", resolve), "/nm/@polis-memory/darwin-arm64/bin/polis");
-  assert.equal(binaryPath("win32", "x64", resolve), "/nm/@polis-memory/win32-x64/bin/polis.exe");
+  assert.equal(binaryPath("darwin", "arm64", resolve), "/nm/polis-memory-darwin-arm64/bin/polis");
+  assert.equal(binaryPath("win32", "x64", resolve), "/nm/polis-memory-win32-x64/bin/polis.exe");
   assert.throws(() => binaryPath("freebsd", "x64", resolve), /no prebuilt binary for freebsd-x64/);
   assert.throws(() => binaryPath("linux", "x64", () => { throw new Error("missing"); }), /optional dependency/);
 });
@@ -50,7 +50,7 @@ test("build stages one package per archive and pins the launcher to the version"
   const result = build({ version: "0.2.0", archives, out });
   assert.deepEqual(result.platforms.sort(), ["darwin-arm64", "linux-x64"]);
   const plat = JSON.parse(readFileSync(join(out, "linux-x64", "package.json"), "utf8"));
-  assert.equal(plat.name, "@polis-memory/linux-x64");
+  assert.equal(plat.name, "polis-memory-linux-x64");
   assert.deepEqual([plat.os, plat.cpu, plat.version], [["linux"], ["x64"], "0.2.0"]);
   assert.ok(existsSync(join(out, "linux-x64", "bin", "polis")));
   const launcher = JSON.parse(readFileSync(join(out, "polis-memory", "package.json"), "utf8"));

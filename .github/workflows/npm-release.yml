@@ -1,8 +1,8 @@
 # The `polis-memory` npm launcher and its per-platform binary packages, staged
 # from a published GitHub release's cargo-dist archives. Packages by default;
-# publishing is an explicit maintainer dispatch with NPM_TOKEN (the
-# `@polis-memory` npm scope must exist and the token must be able to publish
-# to it).
+# publishing is an explicit maintainer dispatch with NPM_TOKEN. (A maintainer
+# can instead publish the staged packages locally after `npm login`: the
+# platform packages first, then polis-memory.)
 name: npm-release
 on:
   workflow_dispatch:

@@ -36,8 +36,8 @@ Everything since 0.1.0:
   treat recalled text as data, write decisions. It names the token's path,
   never the token.
 - Distribute through npm: `npx polis-memory setup`. The launcher and
-  per-platform binary packages are built from release archives by
-  `npm-release`. The TypeScript client becomes `@polis-memory/client`.
+  per-platform binary packages (`polis-memory-<platform>`) are built from
+  release archives by `npm/build.mjs` / `npm-release`. The TypeScript client becomes `@polis-memory/client`.
 - Add one-line installers (`scripts/install.sh`, `install.ps1`) that verify
   the release checksum, install to `~/.local/bin` and run setup.
 - The background service carries the PATH it was installed from, so the

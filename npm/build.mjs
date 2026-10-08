@@ -3,7 +3,8 @@
 // Stage the npm packages for one release from its cargo-dist archives:
 //   node npm/build.mjs --version 0.2.0 --archives <dir of polis-memory-*.tar.xz|zip> --out <dir>
 // writes <out>/polis-memory (the launcher, optionalDependencies pinned to
-// this version) and <out>/<platform> for each archive found. Publishing is
+// this version) and <out>/<platform> (published as polis-memory-<platform>)
+// for each archive found. Publishing is
 // the workflow's job (.github/workflows/npm-release.yml): platforms first,
 // then the launcher.
 import { execFileSync } from "node:child_process";
@@ -55,7 +56,7 @@ export function build({ version, archives, out }) {
       join(pkgDir, "package.json"),
       JSON.stringify(
         {
-          name: `@polis-memory/${t.name}`,
+          name: `polis-memory-${t.name}`,
           version,
           description: `The polis binary for ${t.os}-${t.cpu} (installed by the polis-memory package)`,
           os: [t.os],
@@ -78,7 +79,7 @@ export function build({ version, archives, out }) {
   const pkg = JSON.parse(readFileSync(join(launcher, "package.json"), "utf8"));
   pkg.version = version;
   delete pkg.scripts;
-  pkg.optionalDependencies = Object.fromEntries(Object.values(TARGETS).map((t) => [`@polis-memory/${t.name}`, version]));
+  pkg.optionalDependencies = Object.fromEntries(Object.values(TARGETS).map((t) => [`polis-memory-${t.name}`, version]));
   writeFileSync(join(launcher, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
   return { launcher: "polis-memory", platforms: staged };
 }

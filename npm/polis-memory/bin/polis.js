@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
 // The `polis` launcher: finds the prebuilt binary npm installed for this
-// platform (an optional dependency, @polis-memory/<platform>) and runs it
+// platform (an optional dependency, polis-memory-<platform>) and runs it
 // with the same arguments, stdio and exit code. `polis setup` copies the
 // binary somewhere stable before wiring hooks to it, so clearing the npm
 // cache never breaks an install.
@@ -10,11 +10,11 @@
 const { spawnSync } = require("node:child_process");
 
 const PLATFORMS = {
-  "darwin-arm64": "@polis-memory/darwin-arm64",
-  "darwin-x64": "@polis-memory/darwin-x64",
-  "linux-arm64": "@polis-memory/linux-arm64",
-  "linux-x64": "@polis-memory/linux-x64",
-  "win32-x64": "@polis-memory/win32-x64",
+  "darwin-arm64": "polis-memory-darwin-arm64",
+  "darwin-x64": "polis-memory-darwin-x64",
+  "linux-arm64": "polis-memory-linux-arm64",
+  "linux-x64": "polis-memory-linux-x64",
+  "win32-x64": "polis-memory-win32-x64",
 };
 
 function binaryPath(platform = process.platform, arch = process.arch, resolve = require.resolve) {

@@ -6,11 +6,11 @@
   "files": ["bin", "README.md"],
   "engines": { "node": ">=18" },
   "optionalDependencies": {
-    "@polis-memory/darwin-arm64": "0.0.0-dev",
-    "@polis-memory/darwin-x64": "0.0.0-dev",
-    "@polis-memory/linux-arm64": "0.0.0-dev",
-    "@polis-memory/linux-x64": "0.0.0-dev",
-    "@polis-memory/win32-x64": "0.0.0-dev"
+    "polis-memory-darwin-arm64": "0.0.0-dev",
+    "polis-memory-darwin-x64": "0.0.0-dev",
+    "polis-memory-linux-arm64": "0.0.0-dev",
+    "polis-memory-linux-x64": "0.0.0-dev",
+    "polis-memory-win32-x64": "0.0.0-dev"
   },
   "scripts": { "test": "node --test ../test/*.test.mjs" },
   "repository": { "type": "git", "url": "git+https://github.com/sersiousSenpai/polis-memory.git" },

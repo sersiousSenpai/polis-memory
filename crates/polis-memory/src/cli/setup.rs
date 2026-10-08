@@ -519,8 +519,8 @@ mod tests {
 
     #[test]
     fn a_package_manager_path_is_transient() {
-        assert!(is_transient(Path::new("/Users/a/.npm/_npx/3f2a/node_modules/@polis-memory/darwin-arm64/bin/polis")));
-        assert!(is_transient(Path::new("/usr/local/lib/node_modules/polis-memory/node_modules/@polis-memory/linux-x64/bin/polis")));
+        assert!(is_transient(Path::new("/Users/a/.npm/_npx/3f2a/node_modules/polis-memory-darwin-arm64/bin/polis")));
+        assert!(is_transient(Path::new("/usr/local/lib/node_modules/polis-memory/node_modules/polis-memory-linux-x64/bin/polis")));
         assert!(!is_transient(Path::new("/Users/a/.local/bin/polis")));
         assert!(!is_transient(Path::new("/opt/homebrew/bin/polis")));
         let (same, note) = settle_binary(PathBuf::from("/Users/a/.local/bin/polis")).unwrap();
