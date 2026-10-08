@@ -236,8 +236,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Release build: the p95 budgets (§6.1) are written for optimized code.
+      # In debug the 1k-corpus pack p95 swings 200–290 ms with runner speed
+      # (passed and failed on the same code); in release it is a fraction
+      # of the budget, so a breach here means a real regression.
       - name: the eval gate against bench/results/baseline.json
-        run: cargo test -p polis-memory --features eval --locked -- eval_gate --nocapture
+        run: cargo test --release -p polis-memory --features eval --locked -- eval_gate --nocapture
       - name: the benches build
         run: cargo bench -p polis-memory --locked --no-run
       # C2: the §6.1 row "semantic search alone, 100k chunks" measured in
