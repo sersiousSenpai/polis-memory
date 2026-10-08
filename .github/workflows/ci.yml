@@ -10,6 +10,8 @@
 #               Session C1 grows it into the real flow (init → capture → search
 #               → file); until then it asserts the precondition and the core.
 #   licenses  — cargo-deny against deny.toml (identical to Redline's).
+#   installers — scripts/install.sh against a fake release (verify, install,
+#               setup arguments, bad checksum refused) and the npm launcher.
 #   msrv      — the workspace checks on the pinned `rust-version` (the floor
 #               the dependency graph set; see the workspace Cargo.toml).
 #   lean-core — polis-core links serde, serde_json and sha2 and nothing else
@@ -175,6 +177,24 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses
+
+  installers:
+    name: installers (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: install.sh against a fake release
+        run: sh scripts/test-install.sh
+      - name: npm launcher and package staging
+        run: node --test npm/test/*.test.mjs
 
   msrv:
     name: msrv (rust-version)

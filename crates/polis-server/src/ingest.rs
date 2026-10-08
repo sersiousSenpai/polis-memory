@@ -72,6 +72,10 @@ fn annotated_response(state: &PolisState, cx: &IngestContext<'_>, status: Status
 /// `POST /v1/prompts/ingest` — the UserPromptSubmit capture hook's sink. Records
 /// interactive prompts (PTY plan sessions + external sessions) into the ledger.
 /// Fail-open: any error returns 200 so the hook never blocks prompt submission.
+///
+/// Everything after parsing is synchronous SQLite and observer work, so it
+/// runs on the blocking pool: a slow write (or an observer assembling an
+/// answer pack) never parks a runtime worker other requests are waiting on.
 pub async fn handle_prompts_ingest(
     State(state): State<PolisState>,
     headers: HeaderMap,
@@ -86,7 +90,18 @@ pub async fn handle_prompts_ingest(
         return (StatusCode::OK, Json(serde_json::json!({ "skipped": "unparseable" })))
             .into_response();
     };
-    let prompt = ingest_prompt_text(&v);
+    match tokio::task::spawn_blocking(move || ingest_parsed(&state, &headers, &v)).await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::warn!(error = %e, "prompt ingest worker failed");
+            (StatusCode::OK, Json(serde_json::json!({ "skipped": "error" }))).into_response()
+        }
+    }
+}
+
+/// The route after parsing: the observer forks, the row, the annotation.
+fn ingest_parsed(state: &PolisState, headers: &HeaderMap, v: &serde_json::Value) -> Response {
+    let prompt = ingest_prompt_text(v);
     if prompt.is_empty() {
         return (StatusCode::OK, Json(serde_json::json!({ "skipped": "empty" }))).into_response();
     }
@@ -116,10 +131,10 @@ pub async fn handle_prompts_ingest(
     // run for a header-marked spawn too — the overnight queue's orchestrator is
     // spawned carrying the header, and skipping early would cost it its
     // `running` beacon and its run-watcher anchor.
-    let lookup = HttpHeaders(&headers);
+    let lookup = HttpHeaders(headers);
     let agent_seat = state.ingest.agent_seat(&lookup);
     let cx = IngestContext {
-        payload: &v,
+        payload: v,
         prompt: &prompt,
         headers: &lookup,
         session_id: claude_session_id.as_deref().filter(|s| !s.is_empty()),
@@ -130,7 +145,7 @@ pub async fn handle_prompts_ingest(
     // A host's control traffic (Redline: the restore trigger), answered with
     // whatever the host wants the hook to say, and never recorded.
     if let Some(body) = state.ingest.intercept(&cx) {
-        return annotated_response(&state, &cx, StatusCode::OK, body);
+        return annotated_response(state, &cx, StatusCode::OK, body);
     }
 
     let bh = body_hash(&prompt);
@@ -141,7 +156,7 @@ pub async fn handle_prompts_ingest(
         .is_some_and(|s| state.ingest.seat_suppresses(s));
     if claimed || seat_suppresses {
         state.ingest.on_agent_prompt_skipped(&cx, &bh);
-        return annotated_response(&state, &cx, StatusCode::OK, serde_json::json!({
+        return annotated_response(state, &cx, StatusCode::OK, serde_json::json!({
             "skipped": "agent_dup",
             "by": if claimed { "guard" } else { "header" },
             "seat": agent_seat,
@@ -152,7 +167,7 @@ pub async fn handle_prompts_ingest(
     if origin == Origin::External {
         // External-session capture toggle (default on).
         if !state.ingest.capture_external() {
-            return annotated_response(&state, &cx, StatusCode::OK, serde_json::json!({ "skipped": "external_off" }));
+            return annotated_response(state, &cx, StatusCode::OK, serde_json::json!({ "skipped": "external_off" }));
         }
     }
     let surface = if origin == Origin::Redline {
@@ -181,7 +196,7 @@ pub async fn handle_prompts_ingest(
     // After the row exists (or didn't): the host's follow-through — Redline
     // stamps this session's still-unstamped prompts from the transcript tail.
     state.ingest.on_recorded(&cx, seq);
-    annotated_response(&state, &cx, status, body)
+    annotated_response(state, &cx, status, body)
 }
 
 #[cfg(test)]

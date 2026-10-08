@@ -24,8 +24,31 @@ pub fn render_classmemory_skill(daemon_addr: &str) -> String {
     CLASSMEMORY_SKILL.replace(CLASSMEMORY_SKILL_ADDR, daemon_addr)
 }
 
+/// The agent-facing `polis-memory` skill for a standalone install: how to
+/// search, cite and write the record over MCP, with the daemon's HTTP API as
+/// the fallback. A template with `{{ADDR}}` and `{{TOKEN_PATH}}` (the token's
+/// PATH, never its value); [`render_polis_memory_skill`] fills them. Separate
+/// from [`CLASSMEMORY_SKILL`], whose bytes hosts pin.
+pub const POLIS_MEMORY_SKILL_TEMPLATE: &str = include_str!("../skills/polis-memory/SKILL.md");
+
+/// The `polis-memory` skill for this daemon address and token file.
+pub fn render_polis_memory_skill(daemon_addr: &str, token_path: &str) -> String {
+    POLIS_MEMORY_SKILL_TEMPLATE.replace("{{ADDR}}", daemon_addr).replace("{{TOKEN_PATH}}", token_path)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_standalone_skill_renders_its_address_and_token_path_only() {
+        let text = super::render_polis_memory_skill("127.0.0.1:7677", "/home/u/.polis/token");
+        assert!(text.starts_with("---\nname: polis-memory\n"));
+        assert!(text.contains("http://127.0.0.1:7677/v1/memory/answer-pack") && text.contains("$(cat /home/u/.polis/token)"));
+        assert!(!text.contains("{{") && !text.contains("7676") && !text.contains("Redline"), "host-neutral and fully rendered");
+        for tool in ["memory_search", "memory_grep", "memory_decide", "memory_forget"] {
+            assert!(text.contains(tool), "{tool}");
+        }
+    }
+
     #[test]
     fn the_skill_ships_with_the_crate_and_teaches_the_ops() {
         for op in ["file", "create", "promote", "split", "merge", "collapse", "supersede"] {

@@ -181,6 +181,18 @@ impl Home {
             .unwrap_or_else(|| DEFAULT_LISTEN.to_string())
     }
 
+    /// `scrub = "off"` turns secret redaction at capture off; anything else
+    /// (including no line at all) leaves it on.
+    pub fn scrub_enabled(&self) -> bool {
+        !self.config_get("scrub").is_some_and(|v| v.eq_ignore_ascii_case("off"))
+    }
+
+    /// `inject = "on"` answers each captured prompt with matching memory as
+    /// hidden model context. Off unless set.
+    pub fn inject_enabled(&self) -> bool {
+        self.config_get("inject").is_some_and(|v| v.eq_ignore_ascii_case("on"))
+    }
+
     /// Write the default `config.toml` if there is none.
     pub fn ensure_config(&self) -> Result<bool, String> {
         let path = self.config_path();
@@ -188,7 +200,7 @@ impl Home {
             return Ok(false);
         }
         let text = format!(
-            "# Polis Memory — {}\n#\n# listen: where `polis serve` binds. Loopback by default; a non-loopback\n# address needs `polis serve --token-file` (or the writes are open to the\n# network).\nlisten = \"{}\"\n",
+            "# Polis Memory — {}\n#\n# listen: where `polis serve` binds. Loopback by default; a non-loopback\n# address needs `polis serve --token-file` (or the writes are open to the\n# network).\nlisten = \"{}\"\n#\n# scrub: redact secrets (provider keys, tokens, private keys, PASSWORD=…)\n# from captured text before it is recorded. \"on\" unless set to \"off\".\n# scrub = \"on\"\n#\n# inject: answer each prompt with matching memory from this project as hidden\n# context for the model (Claude Code's capture hook). \"off\" unless set to \"on\".\n# inject = \"off\"\n",
             self.root.display(),
             DEFAULT_LISTEN
         );

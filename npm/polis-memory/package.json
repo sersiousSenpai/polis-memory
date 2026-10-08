@@ -1,0 +1,20 @@
+{
+  "name": "polis-memory",
+  "version": "0.0.0-dev",
+  "description": "Local memory for coding agents — `npx polis-memory setup` connects Claude Code, Codex, Cursor and more",
+  "bin": { "polis": "bin/polis.js", "polis-memory": "bin/polis.js" },
+  "files": ["bin", "README.md"],
+  "engines": { "node": ">=18" },
+  "optionalDependencies": {
+    "@polis-memory/darwin-arm64": "0.0.0-dev",
+    "@polis-memory/darwin-x64": "0.0.0-dev",
+    "@polis-memory/linux-arm64": "0.0.0-dev",
+    "@polis-memory/linux-x64": "0.0.0-dev",
+    "@polis-memory/win32-x64": "0.0.0-dev"
+  },
+  "scripts": { "test": "node --test ../test/*.test.mjs" },
+  "repository": { "type": "git", "url": "git+https://github.com/sersiousSenpai/polis-memory.git" },
+  "homepage": "https://redline.dev/polis",
+  "keywords": ["mcp", "memory", "claude-code", "codex", "cursor", "agents"],
+  "license": "Apache-2.0"
+}

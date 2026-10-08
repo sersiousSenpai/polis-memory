@@ -1,0 +1,741 @@
+{
+ "schema": "polis.inject/1",
+ "description": "Synthetic labelled prompts for the prompt-time injection floor (crates/polis-memory/tests/inject_floor.rs). Should-inject prompts must surface their expected evidence; must-not-inject prompts (generic chores, unrelated questions sharing common words, another project's facts) must inject nothing. Not a real-user quality score.",
+ "project": "/work/bluebird",
+ "filler": {
+  "templates": [
+   "run the tests for {m}",
+   "fix the typo in {m}",
+   "format {m} and commit",
+   "add a unit test for {m}",
+   "refactor {m} to be smaller",
+   "update the dependencies used by {m}",
+   "lint {m} and fix the warnings",
+   "rename the variables in {m}",
+   "write docs for {m}",
+   "check the build logs for {m}"
+  ],
+  "modules": [
+   "auth.rs",
+   "the parser",
+   "the README",
+   "the checkout page",
+   "the settings screen",
+   "main.rs",
+   "the billing service",
+   "the search index",
+   "the API client",
+   "the CLI",
+   "the login form",
+   "the cache layer",
+   "the router",
+   "the job queue",
+   "the config loader",
+   "the logger",
+   "the payment form",
+   "the user model",
+   "the admin panel",
+   "the email sender"
+  ],
+  "project": "/work/bluebird"
+ },
+ "corpus": [
+  {
+   "body": "The Bluebird API port is 9090 after the March migration.",
+   "role": "assistant",
+   "session": "fact-port",
+   "project": "/work/bluebird",
+   "ts": 1000000
+  },
+  {
+   "body": "We pinned the release build to cargo build --frozen so CI never touches the lockfile.",
+   "role": "user",
+   "session": "fact-frozen",
+   "project": "/work/bluebird",
+   "ts": 1060000
+  },
+  {
+   "body": "Bluebird production database is PostgreSQL 16 on RDS.",
+   "role": "user",
+   "session": "fact-database",
+   "project": "/work/bluebird",
+   "ts": 1120000
+  },
+  {
+   "body": "The deployment region for Bluebird is eu-west-2.",
+   "role": "assistant",
+   "session": "fact-region",
+   "project": "/work/bluebird",
+   "ts": 1180000
+  },
+  {
+   "body": "My indentation preference is tabs, displayed four wide.",
+   "role": "user",
+   "session": "fact-indent",
+   "project": "/work/bluebird",
+   "ts": 1240000
+  },
+  {
+   "body": "The flaky test is payments::refund_idempotency; it races the ledger writer.",
+   "role": "user",
+   "session": "fact-flaky",
+   "project": "/work/bluebird",
+   "ts": 1300000
+  },
+  {
+   "body": "Use the staging bucket bluebird-artifacts-stg for preview uploads.",
+   "role": "assistant",
+   "session": "fact-bucket",
+   "project": "/work/bluebird",
+   "ts": 1360000
+  },
+  {
+   "body": "Feature flag checkout_v2 stays off until the PCI review finishes.",
+   "role": "user",
+   "session": "fact-flag",
+   "project": "/work/bluebird",
+   "ts": 1420000
+  },
+  {
+   "body": "The webhook signing secret rotates every 90 days and ops owns the rotation.",
+   "role": "user",
+   "session": "fact-webhook",
+   "project": "/work/bluebird",
+   "ts": 1480000
+  },
+  {
+   "body": "The rate limit for the public API is 600 requests per minute per key.",
+   "role": "assistant",
+   "session": "fact-ratelimit",
+   "project": "/work/bluebird",
+   "ts": 1540000
+  },
+  {
+   "body": "We chose Tantivy over Meilisearch for search because it embeds in-process.",
+   "role": "user",
+   "session": "fact-tantivy",
+   "project": "/work/bluebird",
+   "ts": 1600000
+  },
+  {
+   "body": "The nightly reconciliation cron runs at 02:30 UTC.",
+   "role": "user",
+   "session": "fact-cron",
+   "project": "/work/bluebird",
+   "ts": 1660000
+  },
+  {
+   "body": "The Grafana dashboard for latency is named bluebird-p95-latency.",
+   "role": "assistant",
+   "session": "fact-grafana",
+   "project": "/work/bluebird",
+   "ts": 1720000
+  },
+  {
+   "body": "Migrations live in db/migrations and are applied with sqlx migrate.",
+   "role": "user",
+   "session": "fact-sqlx",
+   "project": "/work/bluebird",
+   "ts": 1780000
+  },
+  {
+   "body": "The mobile app's minimum iOS version is 16.4.",
+   "role": "user",
+   "session": "fact-ios",
+   "project": "/work/bluebird",
+   "ts": 1840000
+  },
+  {
+   "body": "The error budget for the checkout SLO is 0.1% monthly.",
+   "role": "assistant",
+   "session": "fact-slo",
+   "project": "/work/bluebird",
+   "ts": 1900000
+  },
+  {
+   "body": "Use pnpm, not npm, in the web workspace; npm breaks the lockfile.",
+   "role": "user",
+   "session": "fact-pnpm",
+   "project": "/work/bluebird",
+   "ts": 1960000
+  },
+  {
+   "body": "The on-call rotation hands off Mondays at 10:00 Pacific.",
+   "role": "user",
+   "session": "fact-oncall",
+   "project": "/work/bluebird",
+   "ts": 2020000
+  },
+  {
+   "body": "Kafka topic orders.v3 replaced orders.v2 in September.",
+   "role": "assistant",
+   "session": "fact-kafka",
+   "project": "/work/bluebird",
+   "ts": 2080000
+  },
+  {
+   "body": "Session cookies expire after 12 hours of inactivity.",
+   "role": "user",
+   "session": "fact-cookies",
+   "project": "/work/bluebird",
+   "ts": 2140000
+  },
+  {
+   "body": "The PDF renderer is wkhtmltopdf pinned at 0.12.6.",
+   "role": "user",
+   "session": "fact-pdf",
+   "project": "/work/bluebird",
+   "ts": 2200000
+  },
+  {
+   "body": "Image uploads are capped at 25 MB by the nginx client_max_body_size.",
+   "role": "assistant",
+   "session": "fact-upload",
+   "project": "/work/bluebird",
+   "ts": 2260000
+  },
+  {
+   "body": "Terraform state for Bluebird lives in the s3 backend bluebird-tfstate with DynamoDB locking.",
+   "role": "user",
+   "session": "fact-terraform",
+   "project": "/work/bluebird",
+   "ts": 2320000
+  },
+  {
+   "body": "Background jobs use Sidekiq with 25 concurrency per pod.",
+   "role": "user",
+   "session": "fact-sidekiq",
+   "project": "/work/bluebird",
+   "ts": 2380000
+  },
+  {
+   "body": "Localization falls back to en-GB, not en-US.",
+   "role": "assistant",
+   "session": "fact-locale",
+   "project": "/work/bluebird",
+   "ts": 2440000
+  },
+  {
+   "body": "The GraphQL gateway times out upstream calls after 8 seconds.",
+   "role": "user",
+   "session": "fact-graphql",
+   "project": "/work/bluebird",
+   "ts": 2500000
+  },
+  {
+   "body": "Customer exports are generated as Parquet, not CSV, since v4.",
+   "role": "user",
+   "session": "fact-exports",
+   "project": "/work/bluebird",
+   "ts": 2560000
+  },
+  {
+   "body": "Code owners for the billing module are @maria and @dev-ops-team.",
+   "role": "assistant",
+   "session": "fact-owners",
+   "project": "/work/bluebird",
+   "ts": 2620000
+  },
+  {
+   "body": "We disabled HTTP/3 on the CDN after the QUIC handshake bug.",
+   "role": "user",
+   "session": "fact-http3",
+   "project": "/work/bluebird",
+   "ts": 2680000
+  },
+  {
+   "body": "Password hashing uses argon2id with a 64 MiB memory cost.",
+   "role": "user",
+   "session": "fact-argon",
+   "project": "/work/bluebird",
+   "ts": 2740000
+  },
+  {
+   "body": "The Heron API port is 7070.",
+   "role": "user",
+   "session": "heron-0",
+   "project": "/work/heron",
+   "ts": 2800000
+  },
+  {
+   "body": "Heron deploys to us-east-1 with blue-green releases.",
+   "role": "user",
+   "session": "heron-1",
+   "project": "/work/heron",
+   "ts": 2860000
+  },
+  {
+   "body": "Heron's database is MySQL 8.",
+   "role": "user",
+   "session": "heron-2",
+   "project": "/work/heron",
+   "ts": 2920000
+  },
+  {
+   "body": "Heron uses yarn berry in its monorepo.",
+   "role": "user",
+   "session": "heron-3",
+   "project": "/work/heron",
+   "ts": 2980000
+  },
+  {
+   "body": "The Heron on-call rotation is weekly, handing off Fridays.",
+   "role": "user",
+   "session": "heron-4",
+   "project": "/work/heron",
+   "ts": 3040000
+  }
+ ],
+ "cases": [
+  {
+   "id": "inject-port",
+   "split": "development",
+   "prompt": "what port does the Bluebird API listen on?",
+   "expectInject": true,
+   "expected": [
+    "9090"
+   ]
+  },
+  {
+   "id": "inject-frozen",
+   "split": "heldout",
+   "prompt": "should the release build use --frozen?",
+   "expectInject": true,
+   "expected": [
+    "--frozen"
+   ]
+  },
+  {
+   "id": "inject-database",
+   "split": "development",
+   "prompt": "which database does Bluebird production run on?",
+   "expectInject": true,
+   "expected": [
+    "PostgreSQL"
+   ]
+  },
+  {
+   "id": "inject-region",
+   "split": "heldout",
+   "prompt": "what's the Bluebird deployment region again?",
+   "expectInject": true,
+   "expected": [
+    "eu-west-2"
+   ]
+  },
+  {
+   "id": "inject-indent",
+   "split": "development",
+   "prompt": "remind me of my indentation preference",
+   "expectInject": true,
+   "expected": [
+    "tabs"
+   ]
+  },
+  {
+   "id": "inject-flaky",
+   "split": "heldout",
+   "prompt": "refund_idempotency is failing again, what do we know about it?",
+   "expectInject": true,
+   "expected": [
+    "races the ledger writer"
+   ]
+  },
+  {
+   "id": "inject-bucket",
+   "split": "development",
+   "prompt": "which staging bucket do preview uploads go to?",
+   "expectInject": true,
+   "expected": [
+    "bluebird-artifacts-stg"
+   ]
+  },
+  {
+   "id": "inject-flag",
+   "split": "heldout",
+   "prompt": "can we enable checkout_v2 yet?",
+   "expectInject": true,
+   "expected": [
+    "PCI review"
+   ]
+  },
+  {
+   "id": "inject-webhook",
+   "split": "development",
+   "prompt": "how often does the webhook signing secret rotate?",
+   "expectInject": true,
+   "expected": [
+    "90 days"
+   ]
+  },
+  {
+   "id": "inject-ratelimit",
+   "split": "heldout",
+   "prompt": "what is the rate limit on the public API?",
+   "expectInject": true,
+   "expected": [
+    "600 requests"
+   ]
+  },
+  {
+   "id": "inject-tantivy",
+   "split": "development",
+   "prompt": "why did we pick tantivy for search?",
+   "expectInject": true,
+   "expected": [
+    "embeds in-process"
+   ]
+  },
+  {
+   "id": "inject-cron",
+   "split": "heldout",
+   "prompt": "when does nightly reconciliation run?",
+   "expectInject": true,
+   "expected": [
+    "02:30 UTC"
+   ]
+  },
+  {
+   "id": "inject-grafana",
+   "split": "development",
+   "prompt": "which grafana dashboard shows latency?",
+   "expectInject": true,
+   "expected": [
+    "bluebird-p95-latency"
+   ]
+  },
+  {
+   "id": "inject-sqlx",
+   "split": "heldout",
+   "prompt": "how do we apply the sqlx migrations?",
+   "expectInject": true,
+   "expected": [
+    "db/migrations"
+   ]
+  },
+  {
+   "id": "inject-ios",
+   "split": "development",
+   "prompt": "what minimum iOS version does the mobile app support?",
+   "expectInject": true,
+   "expected": [
+    "16.4"
+   ]
+  },
+  {
+   "id": "inject-slo",
+   "split": "heldout",
+   "prompt": "what's the error budget on the checkout SLO?",
+   "expectInject": true,
+   "expected": [
+    "0.1%"
+   ]
+  },
+  {
+   "id": "inject-pnpm",
+   "split": "development",
+   "prompt": "pnpm or npm for the web workspace?",
+   "expectInject": true,
+   "expected": [
+    "pnpm, not npm"
+   ]
+  },
+  {
+   "id": "inject-oncall",
+   "split": "heldout",
+   "prompt": "when does the on-call rotation hand off?",
+   "expectInject": true,
+   "expected": [
+    "Mondays"
+   ]
+  },
+  {
+   "id": "inject-kafka",
+   "split": "development",
+   "prompt": "which kafka topic carries orders now?",
+   "expectInject": true,
+   "expected": [
+    "orders.v3"
+   ]
+  },
+  {
+   "id": "inject-cookies",
+   "split": "heldout",
+   "prompt": "how long until session cookies expire?",
+   "expectInject": true,
+   "expected": [
+    "12 hours"
+   ]
+  },
+  {
+   "id": "inject-pdf",
+   "split": "development",
+   "prompt": "which version of wkhtmltopdf are we pinned to?",
+   "expectInject": true,
+   "expected": [
+    "0.12.6"
+   ]
+  },
+  {
+   "id": "inject-upload",
+   "split": "heldout",
+   "prompt": "what's the image upload size cap?",
+   "expectInject": true,
+   "expected": [
+    "25 MB"
+   ]
+  },
+  {
+   "id": "inject-terraform",
+   "split": "development",
+   "prompt": "where is the terraform state stored?",
+   "expectInject": true,
+   "expected": [
+    "bluebird-tfstate"
+   ]
+  },
+  {
+   "id": "inject-sidekiq",
+   "split": "heldout",
+   "prompt": "what sidekiq concurrency do we run per pod?",
+   "expectInject": true,
+   "expected": [
+    "25 concurrency"
+   ]
+  },
+  {
+   "id": "inject-locale",
+   "split": "development",
+   "prompt": "which locale does localization fall back to?",
+   "expectInject": true,
+   "expected": [
+    "en-GB"
+   ]
+  },
+  {
+   "id": "inject-graphql",
+   "split": "heldout",
+   "prompt": "what's the graphql gateway timeout for upstream calls?",
+   "expectInject": true,
+   "expected": [
+    "8 seconds"
+   ]
+  },
+  {
+   "id": "inject-exports",
+   "split": "development",
+   "prompt": "what format are customer exports generated in?",
+   "expectInject": true,
+   "expected": [
+    "Parquet"
+   ]
+  },
+  {
+   "id": "inject-owners",
+   "split": "heldout",
+   "prompt": "who are the code owners of the billing module?",
+   "expectInject": true,
+   "expected": [
+    "@maria"
+   ]
+  },
+  {
+   "id": "inject-http3",
+   "split": "development",
+   "prompt": "is HTTP/3 enabled on the CDN?",
+   "expectInject": true,
+   "expected": [
+    "QUIC handshake"
+   ]
+  },
+  {
+   "id": "inject-argon",
+   "split": "heldout",
+   "prompt": "which password hashing scheme do we use?",
+   "expectInject": true,
+   "expected": [
+    "argon2id"
+   ]
+  },
+  {
+   "id": "quiet-00",
+   "split": "development",
+   "prompt": "run the tests",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-01",
+   "split": "heldout",
+   "prompt": "fix the typo in the README",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-02",
+   "split": "development",
+   "prompt": "commit and push the changes",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-03",
+   "split": "heldout",
+   "prompt": "format the code",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-04",
+   "split": "development",
+   "prompt": "update the dependencies",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-05",
+   "split": "heldout",
+   "prompt": "add a unit test for this",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-06",
+   "split": "development",
+   "prompt": "rename this variable",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-07",
+   "split": "heldout",
+   "prompt": "refactor this function to be smaller",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-08",
+   "split": "development",
+   "prompt": "write a docstring for this function",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-09",
+   "split": "heldout",
+   "prompt": "check the build logs",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-10",
+   "split": "development",
+   "prompt": "bump the version number",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-11",
+   "split": "heldout",
+   "prompt": "open a pull request",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-12",
+   "split": "development",
+   "prompt": "rebase on main",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-13",
+   "split": "heldout",
+   "prompt": "lint the project",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-14",
+   "split": "development",
+   "prompt": "clean up unused imports",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-15",
+   "split": "heldout",
+   "prompt": "what port does the sample flask app in the tutorial use?",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-16",
+   "split": "development",
+   "prompt": "explain how postgres vacuum works",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-17",
+   "split": "heldout",
+   "prompt": "what's a good region to visit in Portugal?",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-18",
+   "split": "development",
+   "prompt": "how do I write a cron expression for every 5 minutes?",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-19",
+   "split": "heldout",
+   "prompt": "what is the time complexity of quicksort?",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-20",
+   "split": "development",
+   "prompt": "summarize this error message for me",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-21",
+   "split": "heldout",
+   "prompt": "translate this paragraph into Spanish",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-22",
+   "split": "development",
+   "prompt": "which iOS simulator should I install for testing?",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-23",
+   "split": "heldout",
+   "prompt": "what port does the Heron API use?",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-24",
+   "split": "development",
+   "prompt": "what database does Heron use?",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-25",
+   "split": "heldout",
+   "prompt": "how do feature flags work in LaunchDarkly?",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-26",
+   "split": "development",
+   "prompt": "explain the difference between tabs and spaces in Python",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-27",
+   "split": "heldout",
+   "prompt": "what is a good default timeout for HTTP clients?",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-28",
+   "split": "development",
+   "prompt": "how do I upload an image to S3 from the CLI?",
+   "expectInject": false
+  },
+  {
+   "id": "quiet-29",
+   "split": "heldout",
+   "prompt": "what does the PCI DSS standard require?",
+   "expectInject": false
+  }
+ ]
+}

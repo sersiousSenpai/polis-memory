@@ -440,6 +440,27 @@ pub const INLINE_PACK_LIMIT: i64 = 8;
 /// hits at 4,000 would be the whole budget spent on one arm.
 pub const INLINE_BODY_CHARS: usize = 400;
 
+/// `YYYY-MM-DD HH:MM` (UTC) from unix milliseconds — a day-precision civil
+/// date is all a summary needs, and it saves a calendar dependency.
+pub fn ymd_hm(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, m) = (rem / 3600, (rem % 3600) / 60);
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}")
+}
+
 /// Render an answer pack as the compact evidence block that rides inside an Ask
 /// prompt, or `None` when there is nothing honest to say.
 ///

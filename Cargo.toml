@@ -22,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 # MSRV. Raised 1.85 → 1.88 in Session E1: `rmcp` 3.2 (the MCP SDK behind
 # polis-mcp) requires 1.88; the previous floor was `reqwest` 0.13 and `uuid`
@@ -39,13 +39,13 @@ homepage = "https://github.com/sersiousSenpai/polis-memory"
 # The intra-workspace edges. `version` beside `path` is what lets each crate
 # publish: cargo strips the path and keeps the version requirement.
 [workspace.dependencies]
-polis-core = { version = "0.1.0", path = "crates/polis-core" }
-polis-store = { version = "0.1.0", path = "crates/polis-store" }
-polis-embed = { version = "0.1.0", path = "crates/polis-embed" }
-polis-llm = { version = "0.1.0", path = "crates/polis-llm" }
-polis-server = { version = "0.1.0", path = "crates/polis-server" }
-polis-mcp = { version = "0.1.0", path = "crates/polis-mcp" }
-polis-memory = { version = "0.1.0", path = "crates/polis-memory" }
+polis-core = { version = "0.2.0", path = "crates/polis-core" }
+polis-store = { version = "0.2.0", path = "crates/polis-store" }
+polis-embed = { version = "0.2.0", path = "crates/polis-embed" }
+polis-llm = { version = "0.2.0", path = "crates/polis-llm" }
+polis-server = { version = "0.2.0", path = "crates/polis-server" }
+polis-mcp = { version = "0.2.0", path = "crates/polis-mcp" }
+polis-memory = { version = "0.2.0", path = "crates/polis-memory" }
 
 # Clippy runs with `-D warnings` in CI. The one lint switched off, and why:
 # the store's row readers return the tuple their SQL selects, documented at

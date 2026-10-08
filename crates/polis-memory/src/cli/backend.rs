@@ -67,30 +67,33 @@ fn normalize(base: &str) -> String {
 /// Open the chosen backend as the one surface.
 pub fn open(home: &Home, backend: &Backend) -> Result<Arc<dyn MemoryApi>, String> {
     match backend {
-        Backend::Local => {
-            let db = home.db_path();
-            if !db.exists() {
-                return Err(format!("no store at {} — run `polis init` first", db.display()));
-            }
-            let store = Arc::new(PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?);
-            // The identity, when `polis init` has made one: adoption is
-            // idempotent and cheap, so every open re-runs it — a store that
-            // grew new author strings gets their aliases without a command.
-            let identity = match crate::identity::Identity::load(&home.identity_dir(), home.device_name())? {
-                Some(id) => {
-                    if let Err(e) = crate::identity::adopt(&store, &id, &crate::identity::login_name()) {
-                        tracing::warn!(error = %e, "adoption on open failed");
-                    }
-                    Some(Arc::new(id))
-                }
-                None => None,
-            };
-            Ok(Arc::new(
-                PolisHandle::new(store, agent_for(), Arc::new(NoHost), Arc::new(NoopSink)).with_identity(identity).with_embedder(embedder_for(home)),
-            ))
-        }
+        Backend::Local => Ok(open_local(home)?),
         Backend::Remote { base } => Ok(Arc::new(RemoteApi::new(base.clone(), home.read_token()))),
     }
+}
+
+/// The store file, opened in this process (no daemon).
+pub fn open_local(home: &Home) -> Result<Arc<PolisHandle>, String> {
+    let db = home.db_path();
+    if !db.exists() {
+        return Err(format!("no store at {} — run `polis init` first", db.display()));
+    }
+    let store = Arc::new(PolisStore::open(&db).map_err(|e| format!("open {}: {e}", db.display()))?);
+    // The identity, when `polis init` has made one: adoption is
+    // idempotent and cheap, so every open re-runs it — a store that
+    // grew new author strings gets their aliases without a command.
+    let identity = match crate::identity::Identity::load(&home.identity_dir(), home.device_name())? {
+        Some(id) => {
+            if let Err(e) = crate::identity::adopt(&store, &id, &crate::identity::login_name()) {
+                tracing::warn!(error = %e, "adoption on open failed");
+            }
+            Some(Arc::new(id))
+        }
+        None => None,
+    };
+    Ok(Arc::new(
+        PolisHandle::new(store, agent_for_home(home), Arc::new(NoHost), Arc::new(NoopSink)).with_identity(identity).with_embedder(embedder_for(home)).with_scrub(home.scrub_enabled()),
+    ))
 }
 
 /// The model a standalone `polis` speaks to (plan §4.7, C1's transport
@@ -105,6 +108,45 @@ pub fn open(home: &Home, backend: &Backend) -> Result<Arc<dyn MemoryApi>, String
 /// 5. Nothing → `None`: the no-model state. Capture, retrieval and filing
 ///    still work (R12); ambiguous items wait in `~inbox`.
 pub fn agent_for() -> Option<Arc<dyn Agent>> {
+    agent_from_env()
+}
+
+/// The gardener's model as this home's `config.toml` chooses it
+/// (`gardener_model`):
+///
+/// - `"claude-cli"` / `"codex-cli"`: that CLI on PATH (the user's own
+///   subscription), never an API key, even when one is set;
+/// - `"none"`: no model calls at all (capture, retrieval and filing work);
+/// - `"auto"` or unset: [`agent_for`]'s environment order.
+pub fn agent_for_home(home: &Home) -> Option<Arc<dyn Agent>> {
+    match home.config_get("gardener_model").map(|v| v.to_ascii_lowercase()).as_deref() {
+        Some("none") => {
+            tracing::info!(backend = "none", "gardener_model = \"none\": no model calls");
+            None
+        }
+        Some("claude-cli") => find_on_path("claude").map(|bin| Arc::new(polis_llm::claude_cli::ClaudeCli::new(bin.to_string_lossy().to_string())) as Arc<dyn Agent>),
+        Some("codex-cli") => find_on_path("codex").map(|bin| Arc::new(polis_llm::codex_cli::CodexCli::new(bin.to_string_lossy().to_string())) as Arc<dyn Agent>),
+        _ => agent_from_env(),
+    }
+}
+
+/// A paid HTTP model the environment would select without this home ever
+/// choosing one (`gardener_model` unset): the cost surprise `doctor` names.
+pub fn implicit_paid_model(home: &Home) -> Option<&'static str> {
+    if home.config_get("gardener_model").is_some() || std::env::var("POLIS_NO_NETWORK").is_ok_and(|v| v == "1") {
+        return None;
+    }
+    let set = |k: &str| std::env::var(k).is_ok_and(|v| !v.trim().is_empty());
+    if set("ANTHROPIC_API_KEY") {
+        Some("ANTHROPIC_API_KEY")
+    } else if set("OPENAI_BASE_URL") && set("OPENAI_API_KEY") {
+        Some("OPENAI_API_KEY")
+    } else {
+        None
+    }
+}
+
+fn agent_from_env() -> Option<Arc<dyn Agent>> {
     let no_network = std::env::var("POLIS_NO_NETWORK").map(|v| v == "1").unwrap_or(false);
     let nonempty = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     if !no_network {

@@ -1,14 +1,16 @@
 # Polis HTTP clients
 
 These dependency-free clients are implemented and tested locally. They have **not**
-been published to PyPI/npm. Install from this checkout:
+been published to PyPI/npm. The TypeScript client's package name is
+`@polis-memory/client` (the unscoped `polis-memory` npm name is the installer,
+`npx polis-memory setup`). Install from this checkout:
 
 ```sh
 python3 -m pip install ./sdk/python
 npm install ./sdk/typescript
 ```
 
-Run `polis init`, then `polis serve`. Read its local bearer token from
+Run `polis setup` (or `polis init`, then `polis serve`). Read its local bearer token from
 `$POLIS_HOME/token` (default `~/.polis/token`) and supply it to the client.
 Never place that token in source control. The daemon authenticates reads and
 writes. A principal selects memory; it is not a replacement for authentication.

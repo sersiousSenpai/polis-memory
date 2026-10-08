@@ -146,6 +146,52 @@ pub fn install(client: Client, path: Option<PathBuf>, polis: Option<PathBuf>) ->
     Ok((path, outcome))
 }
 
+/// Remove `mcpServers.polis` from a JSON config, leaving everything else.
+/// Returns whether there was one.
+pub fn uninstall_json(path: &Path) -> Result<bool, String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Ok(false) };
+    let Ok(mut root) = serde_json::from_str::<Value>(&text) else {
+        return Err(format!("{} is not valid JSON; left as is", path.display()));
+    };
+    let removed = root.get_mut("mcpServers").and_then(Value::as_object_mut).is_some_and(|s| s.remove("polis").is_some());
+    if removed {
+        std::fs::write(path, format!("{}\n", serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?)).map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    Ok(removed)
+}
+
+/// Remove the `[mcp_servers.polis]` section (up to the next table header)
+/// from Codex's TOML. Returns whether there was one.
+pub fn uninstall_codex(path: &Path) -> Result<bool, String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Ok(false) };
+    let mut out = Vec::new();
+    let mut skipping = false;
+    let mut removed = false;
+    for line in text.lines() {
+        let header = line.trim_start().starts_with('[');
+        if header {
+            skipping = line.trim() == "[mcp_servers.polis]" || line.trim().starts_with("[mcp_servers.polis.");
+            removed |= skipping;
+        }
+        if !skipping {
+            out.push(line);
+        }
+    }
+    if removed {
+        let mut joined = out.join("\n").trim_end().to_string();
+        joined.push('\n');
+        std::fs::write(path, joined).map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    Ok(removed)
+}
+
+/// Remove `polis` from a client's config at its usual path.
+pub fn uninstall(client: Client) -> Result<(PathBuf, bool), String> {
+    let path = client.default_path().ok_or("cannot resolve the client's config path (no HOME)")?;
+    let removed = if client.is_json() { uninstall_json(&path)? } else { uninstall_codex(&path)? };
+    Ok((path, removed))
+}
+
 /// Is `polis` configured for a client, at its usual path?
 pub fn client_has_polis(client: Client) -> bool {
     let Some(path) = client.default_path() else { return false };
@@ -196,6 +242,14 @@ mod tests {
         assert_eq!(install_codex(&codex, polis).unwrap(), "present (left as is)");
         let text = std::fs::read_to_string(&codex).unwrap();
         assert!(text.starts_with("model = \"x\"\n") && text.contains("[mcp_servers.polis]"));
+        std::fs::write(&codex, format!("{text}\n[profiles.fast]\nmodel = \"y\"\n")).unwrap();
+        assert!(uninstall_codex(&codex).unwrap());
+        assert_eq!(std::fs::read_to_string(&codex).unwrap(), "model = \"x\"\n\n[profiles.fast]\nmodel = \"y\"\n");
+        assert!(!uninstall_codex(&codex).unwrap());
+        assert!(uninstall_json(&path).unwrap());
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(v["mcpServers"].get("polis").is_none() && v["mcpServers"]["other"]["command"] == "x" && v["theme"] == "dark");
+        assert!(!uninstall_json(&path).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

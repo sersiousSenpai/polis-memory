@@ -34,16 +34,19 @@ pub mod fence;
 pub mod gardener;
 pub mod health;
 pub mod identity;
+pub mod inject;
 pub mod latency;
 pub mod mirror;
 pub mod organize;
 pub mod orgnode;
 pub mod retrieval;
 pub mod scripted;
+pub mod scrub;
 pub mod revert;
 pub mod sharing;
 pub mod skill;
 pub mod sync;
+pub mod transcript;
 pub mod transport;
 pub mod union;
 pub mod warmth;
@@ -208,11 +211,95 @@ pub struct PolisHandle {
     /// The key this process writes as (E2). `None` = a store nobody has
     /// adopted yet: writes carry the store's legacy author string.
     pub identity: Option<Arc<identity::Identity>>,
+    /// Redact secrets from captured bodies before they are hashed
+    /// ([`scrub`]). Off unless a host opts in: what an embedding host
+    /// records (and hashes) does not change under it. The `polis` binary
+    /// turns it on (config `scrub`).
+    pub scrub: bool,
 }
+
+/// `polis_meta` key prefix for the running count of redactions, by kind.
+pub const SCRUB_COUNT_PREFIX: &str = "polis.scrub.redacted.";
+/// `polis_meta` key: assistant turns not recorded because they restated
+/// injected memory.
+pub const ECHO_SKIPPED_KEY: &str = "polis.capture.echoSkipped";
 
 impl PolisHandle {
     pub fn new(store: Arc<PolisStore>, agent: Option<Arc<dyn Agent>>, host: Arc<dyn HostResolver>, sink: Arc<dyn UsageSink>) -> Self {
-        Self { store, agent, host, sink, embedder: None, identity: None }
+        Self { store, agent, host, sink, embedder: None, identity: None, scrub: false }
+    }
+
+    pub fn with_scrub(mut self, scrub: bool) -> Self {
+        self.scrub = scrub;
+        self
+    }
+
+    /// The body a write records: scrubbed when scrubbing is on, with each
+    /// redaction counted by kind in `polis_meta` (never the value).
+    fn scrubbed(&self, body: &str) -> String {
+        if !self.scrub {
+            return body.to_string();
+        }
+        let out = scrub::scrub(body);
+        for (kind, n) in &out.redactions {
+            let key = format!("{SCRUB_COUNT_PREFIX}{kind}");
+            let counted = self.store.conn().execute(
+                "INSERT INTO polis_meta(key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + ?2 AS TEXT)",
+                rusqlite::params![key, *n as i64],
+            );
+            if let Err(e) = counted {
+                tracing::warn!(error = %e, kind, "could not count a redaction");
+            }
+        }
+        if out.total() > 0 {
+            tracing::info!(redactions = out.total(), "secrets redacted before recording");
+        }
+        out.text
+    }
+
+    /// Is this assistant text a restatement of memory the capture hook
+    /// injected into the same session? Such a turn is the record repeating
+    /// itself, not new evidence: recording it would let an echo outrank, and
+    /// look more recent than, its source. Only a near-duplicate of a whole
+    /// injected body counts; a reply that also says something new is kept.
+    fn is_echo(&self, injected: &mut std::collections::HashMap<String, Vec<u64>>, session: Option<&str>, body: &str) -> bool {
+        let Some(session) = session.filter(|s| !s.is_empty()) else { return false };
+        let hashes = injected.entry(session.to_string()).or_insert_with(|| {
+            self.store
+                .injected_bodies(session, 50)
+                .map(|rows| rows.iter().map(|(_, b)| polis_core::dedup::simhash(b)).collect())
+                .unwrap_or_default()
+        });
+        if hashes.is_empty() {
+            return false;
+        }
+        let own = polis_core::dedup::simhash(body);
+        let echo = hashes.iter().any(|h| polis_core::dedup::near_duplicate(*h, own));
+        if echo {
+            let counted = self.store.conn().execute(
+                "INSERT INTO polis_meta(key, value) VALUES (?1, '1')
+                 ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
+                [ECHO_SKIPPED_KEY],
+            );
+            if let Err(e) = counted {
+                tracing::warn!(error = %e, "could not count a skipped echo");
+            }
+        }
+        echo
+    }
+
+    /// Redactions made at capture so far, by kind.
+    pub fn redaction_counts(&self) -> Vec<(String, i64)> {
+        let conn = self.store.conn();
+        let Ok(mut stmt) = conn.prepare("SELECT substr(key, ?2), CAST(value AS INTEGER) FROM polis_meta WHERE key LIKE ?1 ORDER BY key") else {
+            return Vec::new();
+        };
+        let prefix = format!("{SCRUB_COUNT_PREFIX}%");
+        let start = SCRUB_COUNT_PREFIX.len() as i64 + 1;
+        stmt.query_map(rusqlite::params![prefix, start], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
     }
 
     pub fn with_embedder(mut self, embedder: Option<Arc<dyn Embedder>>) -> Self {
@@ -440,17 +527,18 @@ impl MemoryApi for PolisHandle {
         // The hook's row, exactly as Redline's ingest route always built it
         // (`source: Hook`, the captured-text role classifier, no seat, no
         // model — the transcript backfill stamps that later).
+        let body = self.scrubbed(&req.body);
         let input = PromptInput {
             source: PromptSource::Hook,
             origin: req.origin,
             surface: req.surface.clone(),
-            role: CorpusRole::classify_captured(&req.body),
+            role: CorpusRole::classify_captured(&body),
             user_text: None,
             session_id: req.session.clone(),
             claude_session_id: req.session.clone(),
             mission_id: None,
             project_path: req.project.clone(),
-            body: req.body.clone(),
+            body,
             thread: None,
             // The hook fires inside a harness session: the writer is the
             // `claude-code` agent under this device (E2). Without an identity
@@ -486,7 +574,7 @@ impl MemoryApi for PolisHandle {
                     claude_session_id: req.scope.run.clone(),
                     mission_id: None,
                     project_path: req.project.clone().or_else(|| req.scope.project.clone()),
-                    body: req.text.clone(),
+                    body: self.scrubbed(&req.text),
                     thread: None,
                     author: Some(actor),
                     model: None,
@@ -509,6 +597,9 @@ impl MemoryApi for PolisHandle {
             if let Some(role) = &item.role { if CorpusRole::parse(role).is_none() { return Err(MemoryError::Rejected(format!("unknown role `{role}`"))); } }
         }
         let mut receipt = IngestReceipt::default();
+        // Per session: the simhashes of what the capture hook injected into
+        // it, read once per batch (see `is_echo`).
+        let mut injected: std::collections::HashMap<String, Vec<u64>> = std::collections::HashMap::new();
         for item in &req.items {
             let _item_timer = latency::Timer::start("ingest.item");
             if item.body.trim().is_empty() {
@@ -516,6 +607,11 @@ impl MemoryApi for PolisHandle {
                 continue;
             }
             let role = item.role.as_deref().and_then(CorpusRole::parse).unwrap_or(CorpusRole::User);
+            let body = self.scrubbed(&item.body);
+            if role == CorpusRole::Assistant && self.is_echo(&mut injected, item.session.as_deref(), &body) {
+                receipt.skipped += 1;
+                continue;
+            }
             let input = PromptInput {
                 source: PromptSource::Api,
                 origin: Origin::External,
@@ -525,7 +621,7 @@ impl MemoryApi for PolisHandle {
                 claude_session_id: item.run.clone().or_else(|| req.scope.run.clone()),
                 mission_id: None,
                 project_path: item.project.clone().or_else(|| req.scope.project.clone()),
-                body: item.body.clone(),
+                body,
                 thread: None,
                 author: Some(actor.clone()),
                 model: None,

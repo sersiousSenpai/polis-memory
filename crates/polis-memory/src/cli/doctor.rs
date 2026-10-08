@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use polis_core::MemoryApi;
-use polis_server::hook::CaptureHookSpec;
+use polis_server::hook::{CaptureHookSpec, StopHookSpec};
 use polis_store::PolisStore;
 use serde::Serialize;
 
@@ -37,6 +37,24 @@ pub struct Doctor {
     pub hook_installed: bool,
     pub hook_current: bool,
     pub hook_settings: Option<String>,
+    /// The Stop hook that records the assistant's replies.
+    pub stop_hook_installed: bool,
+    pub stop_hook_current: bool,
+    /// Codex / Cursor capture hooks of ours present (`polis hook install --client …`).
+    pub capture_codex: bool,
+    pub capture_cursor: bool,
+    /// config.toml `inject` / `scrub`.
+    pub inject: bool,
+    pub scrub: bool,
+    /// Secrets redacted at capture so far, by kind.
+    pub redactions: Vec<(String, i64)>,
+    /// Assistant turns not recorded because they restated injected memory.
+    pub echoes_skipped: i64,
+    /// Captured sources the local embedder has not indexed yet (capped).
+    pub embedding_backlog: Option<usize>,
+    /// A paid model the environment selects for the gardener without this
+    /// home having chosen one (the variable that selects it).
+    pub implicit_paid_model: Option<String>,
     pub client_claude: bool,
     pub client_codex: bool,
     pub client_project: bool,
@@ -132,6 +150,19 @@ pub fn run(home: &Home) -> Doctor {
                 Ok(jobs) => d.background_jobs = jobs,
                 Err(error) => d.problems.push(format!("read durable jobs: {error}")),
             }
+            let prefix = crate::SCRUB_COUNT_PREFIX;
+            d.redactions = store
+                .conn()
+                .prepare("SELECT substr(key, ?2), CAST(value AS INTEGER) FROM polis_meta WHERE key LIKE ?1 ORDER BY key")
+                .and_then(|mut stmt| {
+                    stmt.query_map(rusqlite::params![format!("{prefix}%"), prefix.len() as i64 + 1], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .collect::<rusqlite::Result<Vec<(String, i64)>>>()
+                })
+                .unwrap_or_default();
+            d.echoes_skipped = store.meta(crate::ECHO_SKIPPED_KEY).ok().flatten().and_then(|v| v.parse().ok()).unwrap_or(0);
+            if let Some(embedder) = super::backend::embedder_for(home) {
+                d.embedding_backlog = store.embedding_backlog(&embedder.model_id(), EMBED_BACKLOG_CAP as i64 + 1).ok().map(|b| b.len());
+            }
             // E4: an org node reports, per subscriber, what it has not yet
             // acknowledged — the relay's view of the cooperative limit.
             if let (Some(org), Some(id)) = (home.config_get("org"), identity.as_ref()) {
@@ -166,6 +197,9 @@ pub fn run(home: &Home) -> Doctor {
             }
             None => match PolisStore::open(&db) {
                 Ok(store) => {
+                    // The organizer model the daemon would use, as this
+                    // home's config resolves it (no daemon to ask).
+                    d.model = super::backend::agent_for_home(home).map(|a| format!("{} (gardener_model = {})", a.name(), home.config_get("gardener_model").unwrap_or_else(|| "auto".into())));
                     // C1: the embedder this process would file with (the
                     // daemon path reads it from health; here it is a fact
                     // of the platform).
@@ -219,12 +253,37 @@ pub fn run(home: &Home) -> Doctor {
     d.backups = backup::list_snapshots(&backups).len();
     d.newest_verifying_backup = backup::newest_verifying(&backups).map(|p| p.display().to_string());
 
+    // Prompt-time injection, scrubbing, and what the daemon's absence costs.
+    d.inject = home.inject_enabled();
+    d.scrub = home.scrub_enabled();
+    d.implicit_paid_model = super::backend::implicit_paid_model(home).map(str::to_string);
+    if let Some(var) = &d.implicit_paid_model {
+        d.problems.push(format!(
+            "the gardener will call a paid model API because {var} is set, though this home never chose one — set `gardener_model = \"auto\"` in config.toml to confirm, or `\"none\"` for no model calls"
+        ));
+    }
+    match (d.daemon.is_some(), d.embedding_backlog) {
+        (false, Some(n)) if n > 0 => d.problems.push(format!(
+            "the daemon is not running: {} captured source(s) wait for semantic indexing and filing — run `polis serve`, or `polis service install` to keep it running",
+            backlog_label(n)
+        )),
+        (true, Some(n)) if n >= EMBED_BACKLOG_CAP => d.problems.push(format!(
+            "the semantic index is behind by {} source(s) — check `polis serve`'s log for embedding errors",
+            backlog_label(n)
+        )),
+        _ => {}
+    }
+
     // The hook and the clients.
     if let Some(settings) = claude_settings_path() {
         d.hook_settings = Some(settings.display().to_string());
         let spec = super::hook_spec(home);
         d.hook_installed = spec.installed_at(&settings);
         d.hook_current = spec.current_at(&settings);
+        let stop = stop_spec_for(None);
+        d.stop_hook_installed = stop.installed_at(&settings);
+        d.stop_hook_current = stop.current_at(&settings);
+
         // Another capture hook (a host's, e.g. Redline's curl to :7676) beside ours?
         if let Ok(text) = std::fs::read_to_string(&settings) {
             if text.contains("/v1/prompts/ingest") && !text.contains(&spec.ingest_url) {
@@ -232,6 +291,9 @@ pub fn run(home: &Home) -> Doctor {
             }
         }
     }
+    let exe = current_exe();
+    d.capture_codex = super::agents::codex_hooks_path().is_some_and(|p| super::agents::status_at(super::agents::HookClient::Codex, &p, &exe).0);
+    d.capture_cursor = super::agents::cursor_hooks_path().is_some_and(|p| super::agents::status_at(super::agents::HookClient::Cursor, &p, &exe).0);
     d.client_claude = client_has_polis(Client::Claude);
     d.client_project = client_has_polis(Client::Project);
     d.client_codex = client_has_polis(Client::Codex);
@@ -274,6 +336,20 @@ pub fn render(d: &Doctor) -> String {
         d.model.as_deref().unwrap_or("no_model (a fact, not a fault: capture, retrieval and filing work — ambiguous items wait in ~inbox)"),
         d.embedder.as_deref().unwrap_or("absent")
     ));
+    out.push_str(&format!(
+        "replies     {}\n",
+        if d.stop_hook_installed { if d.stop_hook_current { "captured (Stop hook)" } else { "captured · STALE Stop hook — run `polis hook install` again" } } else { "not captured (`polis hook install` adds the Stop hook)" }
+    ));
+    out.push_str(&format!(
+        "inject      {} · scrub {}{}{}\n",
+        if d.inject { "on" } else { "off (config.toml `inject = \"on\"`)" },
+        if d.scrub { "on" } else { "OFF" },
+        if d.redactions.is_empty() { String::new() } else { format!(" · redacted {}", d.redactions.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", ")) },
+        if d.echoes_skipped > 0 { format!(" · {} echo(es) of injected memory not re-recorded", d.echoes_skipped) } else { String::new() }
+    ));
+    if let Some(n) = d.embedding_backlog {
+        out.push_str(&format!("index       {}\n", if n == 0 { "semantic index up to date".to_string() } else { format!("{} source(s) awaiting embedding", backlog_label(n)) }));
+    }
     out.push_str(&format!("hook        {}{}{}\n", if d.hook_installed { "installed" } else { "not installed (`polis hook install`)" }, if d.hook_installed && !d.hook_current { " · STALE — run `polis hook install` again" } else { "" }, d.hook_settings.as_deref().map(|s| format!(" · {s}")).unwrap_or_default()));
     out.push_str(&format!(
         "clients     claude {} · codex {} · project {} · cursor {} · windsurf {} · claude-desktop {}\n",
@@ -284,6 +360,7 @@ pub fn render(d: &Doctor) -> String {
         yn(d.client_windsurf),
         yn(d.client_claude_desktop)
     ));
+    out.push_str(&format!("capture     claude code {} · codex {} · cursor {}\n", yn(d.hook_installed), yn(d.capture_codex), yn(d.capture_cursor)));
     out.push_str(&format!("binaries    {}\n", d.binaries.iter().map(|(n, b)| format!("{n} {}", if *b { "found" } else { "absent" })).collect::<Vec<_>>().join(" · ")));
     out.push_str(&format!("backups     {} · newest verifying: {}\n", d.backups, d.newest_verifying_backup.as_deref().unwrap_or("none")));
     out.push_str(&format!("disk crypt  {}\n", d.fde));
@@ -331,6 +408,18 @@ pub fn render(d: &Doctor) -> String {
         ));
     }
     out
+}
+
+/// Backlog counts stop at this (the count is a probe, not a census).
+const EMBED_BACKLOG_CAP: usize = 1000;
+
+fn backlog_label(n: usize) -> String {
+    if n > EMBED_BACKLOG_CAP { format!("more than {EMBED_BACKLOG_CAP}") } else { n.to_string() }
+}
+
+/// The Stop hook `polis hook install` writes beside the capture hook.
+pub fn stop_spec_for(polis: Option<PathBuf>) -> StopHookSpec {
+    StopHookSpec::new(polis.unwrap_or_else(current_exe))
 }
 
 /// The spec `polis hook` installs: the binary form, aimed at this home's

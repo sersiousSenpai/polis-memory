@@ -1,0 +1,62 @@
+# The `polis-memory` npm launcher and its per-platform binary packages, staged
+# from a published GitHub release's cargo-dist archives. Packages by default;
+# publishing is an explicit maintainer dispatch with NPM_TOKEN (the
+# `@polis-memory` npm scope must exist and the token must be able to publish
+# to it).
+name: npm-release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose archives to package (e.g. v0.2.0)
+        required: true
+      publish:
+        description: Publish to npm (platform packages first, then the launcher)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - run: node --test npm/test/*.test.mjs
+      - name: Download and verify the release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p archives
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D archives -p 'polis-memory-*.tar.xz' -p 'polis-memory-*.zip' -p 'polis-memory-*.sha256'
+          cd archives
+          for sum in *.sha256; do sha256sum -c "$sum"; done
+      - name: Stage packages
+        run: node npm/build.mjs --version "${{ inputs.tag }}" --archives archives --out npm-out
+      - name: Pack
+        run: |
+          set -euo pipefail
+          mkdir -p npm-artifacts
+          for dir in npm-out/*/; do npm pack "$dir" --pack-destination npm-artifacts; done
+          ls -l npm-artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: polis-npm-packages-${{ inputs.tag }}
+          path: npm-artifacts/
+      - name: Publish
+        if: inputs.publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for dir in npm-out/*/; do
+            [ "$(basename "$dir")" = polis-memory ] && continue
+            npm publish "$dir" --access public
+          done
+          npm publish npm-out/polis-memory --access public

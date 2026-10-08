@@ -42,8 +42,9 @@ pub mod foreign;
 pub mod diagnostics;
 pub mod retrieval_support;
 pub mod decision_evidence;
+pub mod injections;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::Connection;
@@ -135,6 +136,9 @@ pub struct PolisStore {
     conn: Arc<Mutex<Connection>>,
     last_attach: AttachReport,
     author: String,
+    /// The main database file, read once at attach; `None` for in-memory
+    /// stores. Lets whole-file work (snapshots) use a connection of its own.
+    file: Option<PathBuf>,
 }
 
 /// The minimum SQLite the schema needs (`RETURNING`, generated columns, the
@@ -177,7 +181,8 @@ impl PolisStore {
             report
         };
         let cache_id = next_cache_id();
-        Ok(Self { cache_id, conn, last_attach: report, author })
+        let file = main_file(&conn.lock().unwrap_or_else(|e| e.into_inner()));
+        Ok(Self { cache_id, conn, last_attach: report, author, file })
     }
 
     /// Open a store file of its own — a standalone Polis. WAL so readers never
@@ -226,7 +231,7 @@ impl PolisStore {
         snapshot.execute_batch("PRAGMA query_only=ON; BEGIN;")?;
         // BEGIN is deferred: this read pins the exact snapshot immediately.
         snapshot.query_row("SELECT COALESCE(MAX(seq), 0) FROM ledger_events", [], |r| r.get::<_, i64>(0))?;
-        Ok(Self { cache_id: self.cache_id, conn: Arc::new(Mutex::new(snapshot)), last_attach: AttachReport::default(), author: self.author.clone() })
+        Ok(Self { cache_id: self.cache_id, conn: Arc::new(Mutex::new(snapshot)), last_attach: AttachReport::default(), author: self.author.clone(), file: None })
     }
 
     /// The SQLite this process linked must carry what the schema uses. Checked
@@ -316,6 +321,14 @@ impl PolisStore {
     ) -> Result<polis_core::ledger::LedgerEventRow, StoreError> {
         Ok(ledger::append_event(&self.conn(), a)?)
     }
+}
+
+/// The main database's file, or `None` for an in-memory connection.
+fn main_file(conn: &Connection) -> Option<PathBuf> {
+    conn.query_row("SELECT file FROM pragma_database_list WHERE name='main'", [], |r| r.get::<_, String>(0))
+        .ok()
+        .filter(|f| !f.is_empty())
+        .map(PathBuf::from)
 }
 
 fn lock(conn: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
@@ -439,6 +452,32 @@ mod tests {
         PolisStore::require_capabilities(&c).unwrap();
     }
 
+    /// A file store's snapshot never waits on the shared connection: taken
+    /// while that lock is held (a long capture, say), it still completes, and
+    /// the copy carries the committed rows.
+    #[test]
+    fn a_file_snapshot_does_not_take_the_shared_lock() {
+        let dir = std::env::temp_dir().join(format!("polis-snap-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Arc::new(PolisStore::open(&dir.join("polis.db")).unwrap());
+        store.set_meta("snapshot.probe", "kept").unwrap();
+        let held = store.conn();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = {
+            let store = store.clone();
+            let dest = dir.join("copy.db");
+            std::thread::spawn(move || tx.send(store.snapshot_to(&dest).map_err(|e| e.to_string())).unwrap())
+        };
+        let result = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the snapshot waited on the held lock");
+        drop(held);
+        worker.join().unwrap();
+        result.unwrap();
+        let copy = Connection::open(dir.join("copy.db")).unwrap();
+        let probe: String = copy.query_row("SELECT value FROM polis_meta WHERE key='snapshot.probe'", [], |r| r.get(0)).unwrap();
+        assert_eq!(probe, "kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn standalone_open_uses_wal() {
         let dir = std::env::temp_dir().join(format!("polis-store-{}", std::process::id()));
@@ -462,12 +501,23 @@ impl PolisStore {
     /// `VACUUM INTO` a consistent copy of the whole database at `dest` — the
     /// crown-jewels backup. Works while the store is open and in use (the
     /// copy is transactionally consistent); `dest` must not exist.
+    ///
+    /// A file store copies through a read-only connection of its own, so the
+    /// shared connection's lock is not held for the length of the copy: WAL
+    /// lets that reader see one consistent snapshot while captures and
+    /// retrieval carry on. An in-memory store copies under its lock.
     pub fn snapshot_to(&self, dest: &Path) -> rusqlite::Result<()> {
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let conn = self.conn();
-        conn.execute("VACUUM INTO ?1", [dest.to_string_lossy().as_ref()])?;
+        let dest = dest.to_string_lossy();
+        if let Some(file) = &self.file {
+            let reader = Connection::open_with_flags(file, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            reader.busy_timeout(std::time::Duration::from_secs(5))?;
+            reader.execute("VACUUM INTO ?1", [dest.as_ref()])?;
+            return Ok(());
+        }
+        self.conn().execute("VACUUM INTO ?1", [dest.as_ref()])?;
         Ok(())
     }
 
@@ -501,6 +551,7 @@ impl PolisStore {
             conn: Arc::new(Mutex::new(conn)),
             last_attach: AttachReport::default(),
             author: default_author(),
+            file: Some(path.to_path_buf()),
         })
     }
 }

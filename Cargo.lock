@@ -1992,7 +1992,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "polis-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2001,7 +2001,7 @@ dependencies = [
 
 [[package]]
 name = "polis-embed"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "block2",
  "fastembed",
@@ -2022,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "polis-llm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "polis-core",
@@ -2035,7 +2035,7 @@ dependencies = [
 
 [[package]]
 name = "polis-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "polis-core",
  "polis-memory",
@@ -2050,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "polis-memory"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2064,6 +2064,7 @@ dependencies = [
  "polis-mcp",
  "polis-server",
  "polis-store",
+ "regex-lite",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2076,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "polis-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "http-body-util",
@@ -2091,7 +2092,7 @@ dependencies = [
 
 [[package]]
 name = "polis-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "polis-core",

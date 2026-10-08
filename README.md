@@ -9,12 +9,13 @@ separately.
 Polis grew inside [Redline](https://github.com/sersiousSenpai/redline) and was
 extracted on 2026-09-07. Nothing here depends on Redline or a Docker service.
 
-**Status:** GitHub v0.1.0 binaries are released. This checkout adds scope and
-provenance fixes, temporal claims, recoverable jobs, persistent retrieval traces,
-and source Python/TypeScript clients; these changes are not yet released.
-External scored benchmarks remain on hold. Local regression results establish
-specific correctness improvements, not best-in-class answer quality.
+**Status:** v0.2.0, pre-1.0. It adds one-command setup across Claude Code,
+Codex, Cursor, Windsurf and Claude Desktop; reply capture; secret redaction;
+opt-in prompt-time memory; and an npm installer. External scored benchmarks
+remain on hold. Local regression results establish specific correctness
+improvements, not best-in-class answer quality.
 See the [build report](docs/memory-quality-build.md),
+[capture and injection](docs/capture.md),
 [measurement configuration](docs/bench.md), and
 [verified distribution status](docs/distribution.md).
 
@@ -29,7 +30,7 @@ core → store → embed → llm → server → mcp → memory.
 | [`polis-store`](crates/polis-store) | The rusqlite store: attach to a host connection or open standalone (WAL), its own migrations under `polis_meta` (never `PRAGMA user_version`), the lexical layer (FTS5 + trigram), the cross-process-safe chain append, the recorders, and the ~120 memory methods (prompts, compaction, chain, search, catalog, supersessions, notes, observations, browse, embeddings rows, session tree, exports) | `polis-core`, `rusqlite` (bundled), `tracing`, `serde_json`, `flate2`, `regex-lite`, `uuid` |
 | [`polis-embed`](crates/polis-embed) | The `Embedder` trait, the on-device Apple backends (feature `apple`, macOS only), the vector cache, brute-force cosine search over the store's int8 index, and the bounded index tick — all taking an explicit embedder (provider SELECTION stays with the host). Portable backends (`model2vec`, `fastembed`, `openai`) come with Program C | `polis-core`, `polis-store`, `tracing`; `apple` → the objc2 family |
 | [`polis-llm`](crates/polis-llm) | The `Agent` trait the gardener speaks, with `Usage` / `UsageSink`; backends `ClaudeCli` (stream-json) and `CodexCli` (`exec --json`) by default, `AnthropicApi` and `OpenAiCompat` behind features; the `StreamLine` classifier | `polis-core`, `async-trait`, `serde`, `tokio` (process); `anthropic` / `openai-compat` → `reqwest` |
-| [`polis-server`](crates/polis-server) | `router<S>()` over `Arc<dyn MemoryApi>` (handlers take `State<PolisState>`; a host provides `FromRef`), the `ROUTES` table (24 rows, `Open \| HookContract \| Write(scope)` — the source of the API doc and the generated clients), the capture route + `IngestObserver` seams, `CaptureHookSpec` (the hook installer); feature `standalone` = bind + token guard | `polis-core`, `axum` 0.7, `serde`, `tokio` (`rt`); `standalone` → tokio `net` |
+| [`polis-server`](crates/polis-server) | `router<S>()` over `Arc<dyn MemoryApi>` (handlers take `State<PolisState>`; a host provides `FromRef`), the `ROUTES` table (41 rows, `Open \| HookContract \| Write(scope)` — the source of the API doc and the generated clients), the capture route + `IngestObserver` seams, `CaptureHookSpec` / `StopHookSpec` (the hook installers); feature `standalone` = bind + token guard | `polis-core`, `axum` 0.7, `serde`, `tokio` (`rt`); `standalone` → tokio `net` |
 | [`polis-mcp`](crates/polis-mcp) | Read and write tools over the Model Context Protocol (`memory_search` first), the compat aliases, resources and the grounding prompt; stdio and a streamable-HTTP tower service a host nests at `/mcp`; feature `remote` = `RemoteApi`, the `MemoryApi` as an HTTP client over a running daemon | `polis-core`, `rmcp`, `serde`, `tokio` (`rt`); `remote` → `ureq` (plain HTTP) |
 | [`polis-memory`](crates/polis-memory) | THE crate an integrator adds: `Polis` (a borrowed view) + `PolisHandle` (owned; implements `MemoryApi`), retrieval (the answer pack, timeline, map, tree / node views), the organizer and the gardener's `step` (organize, compaction, observations, the semantic index, the backup cadence), `backup` (snapshots, verify, restore), bundle export, the markdown mirror, the `classmemory` skill text (shipped in the crate; a template by address), and — feature `cli` — the `polis` binary | re-exports the four crates above; `apple` → `polis-embed/apple`; `cli` → clap + polis-server `standalone` + polis-mcp `remote` |
 
@@ -55,48 +56,87 @@ unifies features across a graph.
 
 ## Install
 
-One line, no toolchain (the release binaries, sha256-checked and attested,
-from the GitHub release; the `cli` build: HTTP model backends, the MCP
-transports, the on-device embedder on macOS):
+One line:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sersiousSenpai/polis-memory/releases/latest/download/polis-memory-installer.sh | sh
+curl -LsSf https://redline.dev/polis/install.sh | sh
 ```
+
+Or with Node:
+
+```sh
+npx polis-memory setup
+```
+
+On Windows:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/sersiousSenpai/polis-memory/releases/latest/download/polis-memory-installer.ps1 | iex"
+irm https://redline.dev/polis/install.ps1 | iex
 ```
 
-The public Homebrew tap and crates.io publication are not established; the
-Python and npm clients are available from source. To build this checkout:
+The script downloads the release binary for your machine, checks its SHA-256
+and puts `polis` in `~/.local/bin`. Then `polis setup` takes over:
+
+- creates your record in `~/.polis`
+- finds Claude Code, Codex, Cursor, Windsurf and Claude Desktop
+- connects each agent's MCP config
+- installs capture hooks where the agent has them (Claude Code, Codex, Cursor)
+  and the `polis-memory` skill for Claude Code
+- fetches the local embedding model
+- picks the organizer model from a CLI you already have (`claude` or
+  `codex`, never an API key)
+- keeps the daemon running as a login service
+
+It shows that plan and asks before changing anything (`--yes` skips the
+question, `--dry-run` only shows it). Restart your agents afterwards so they
+load the tools. Codex asks you to enable new hooks under `/hooks`.
+
+What each agent gets:
+
+| Agent | Search the record (MCP) | Captured automatically |
+|---|---|---|
+| Claude Code | yes | prompts and replies (+ optional prompt-time memory) |
+| Codex | yes | prompts and replies (after enabling the hooks in `/hooks`) |
+| Cursor | yes | prompts and replies |
+| Windsurf, Claude Desktop | yes | no — the agent saves what matters with `memory_remember` / `memory_decide` |
 
 ```sh
-cargo install --path crates/polis-memory --features cli --locked
+polis doctor                       # the install, the chain, the backups, each agent
+polis uninstall                    # remove hooks, MCP entries, the skill and the service; keeps your record
+polis uninstall --purge            # …and delete the record
+```
+
+Set `inject = "on"` in `config.toml` to have each Claude Code prompt answered
+with the matching memory from its project as hidden model context. It's off
+by default; [capture, injection and scrubbing](docs/capture.md) covers the
+relevance floor and its measurement.
+
+**Building from source:**
+
+```sh
+cargo install --path crates/polis-memory --features cli --locked && polis setup
+```
+
+The typed clients install from source:
+
+```sh
 python3 -m pip install ./sdk/python
-npm install ./sdk/typescript
+npm install ./sdk/typescript       # @polis-memory/client
 ```
 
-The GitHub installer installs the published release, which predates the changes
-described in the build report.
+**Under the hood:**
 
-Then:
-
-```sh
-polis init                              # ~/.polis: the store, a private token, config.toml, your key
-polis hook install                      # capture every prompt you submit in Claude Code
-polis mcp install --client claude       # answer questions about them (docs/mcp.md lists every client)
-polis doctor                            # the install, the chain, the backups, the clients
-polis inspect --html inspector.html      # local retrieval traces and background diagnostics
-```
-
-`polis serve` runs the daemon (HTTP routes, MCP at `/mcp`, the gardener,
-rotating verified backups); without it every command opens the store file
-directly and the capture hook writes locally. `polis restore` swaps in the
-newest verifying snapshot when `doctor` reports the chain red or the file
-unsound. Set `POLIS_NO_NETWORK=1` for offline initialization. Capture and lexical retrieval
-need no model or provider key; semantic search needs local embedding assets. The org node
-(`polis serve --org`) ships as a container image for operators only —
-`docs/distribution.md`.
+- `polis serve` is the daemon: HTTP routes, MCP at `/mcp`, the gardener and
+  rotating verified backups. `polis setup` installs it as a service. Without
+  it, every command opens the store file directly and the hooks write
+  locally.
+- `polis restore` swaps in the newest verifying snapshot when `doctor`
+  reports the chain red or the file unsound.
+- `POLIS_NO_NETWORK=1` initializes offline.
+- Capture and lexical retrieval need no model or provider key. Semantic
+  search needs the local embedding assets.
+- The org node (`polis serve --org`) ships as a container image for
+  operators only; see `docs/distribution.md`.
 
 ## MCP
 

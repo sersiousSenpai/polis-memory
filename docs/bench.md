@@ -252,6 +252,21 @@ mechanism's: the plan's "decided by measurement" gate for embeddings (C2)
 re-runs `real_db_filing_calibration` per provider, and the tier turns on for
 the first one that clears the floor.
 
+## Prompt-time injection floor (2026-10-07)
+
+`cargo test -p polis-memory --test inject_floor -- --nocapture` sweeps the
+injection floor over `bench/realistic/inject.json`: 60 labelled prompts over
+synthetic records, with no embedder and no model calls. At the shipped
+`DEFAULT_FLOOR` of 0.50:
+
+- development: hit rate 0.93, false injections 0.00
+- heldout: hit rate 0.87, false injections 0.00
+
+The test gates the heldout split at false injections ≤ 5% and hit rate
+≥ 70% on every push. Method, limits and the thin margin are in
+[docs/capture.md](capture.md#calibration-and-the-gate); the raw sweep is
+`bench/results/2026-10-07-inject-floor.json`.
+
 ## LongMemEval (§6.2, Session F1)
 
 The runner, the competitor scripts, the nightly job and the table live under

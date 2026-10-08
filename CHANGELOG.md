@@ -5,6 +5,75 @@ the project is pre-1.0 and every crate shares one version.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-07
+
+Polis outside Redline. A one-line install (`curl … | sh`, `npx polis-memory
+setup`, PowerShell) and `polis setup` take a new user from nothing to a
+connected setup:
+
+- the record is created
+- Claude Code, Codex and Cursor capture prompts and replies; Windsurf and
+  Claude Desktop search the record
+- a daemon keeps the catalog, index and backups going
+
+Everything since 0.1.0:
+
+- Add `polis setup` and `polis uninstall`. Setup detects Claude Code, Codex,
+  Cursor, Windsurf and Claude Desktop, shows its plan, asks, then:
+  - creates the record
+  - connects each agent's MCP config and capture hooks, plus the skill for
+    Claude Code
+  - fetches the embedding model
+  - records an explicit gardener model (a model CLI the user has, never an
+    API key)
+  - installs the daemon service
+
+  Run from an npm cache, it first copies the binary to `~/.local/bin`.
+  Uninstall reverses all of this and keeps the record unless `--purge`.
+- Capture Codex and Cursor prompts and replies (`polis hook install --client
+  codex|cursor`), using the hook shapes Redline already runs.
+- Add the `polis-memory` agent skill (`polis skill install`): search, cite,
+  treat recalled text as data, write decisions. It names the token's path,
+  never the token.
+- Distribute through npm: `npx polis-memory setup`. The launcher and
+  per-platform binary packages are built from release archives by
+  `npm-release`. The TypeScript client becomes `@polis-memory/client`.
+- Add one-line installers (`scripts/install.sh`, `install.ps1`) that verify
+  the release checksum, install to `~/.local/bin` and run setup.
+- The background service carries the PATH it was installed from, so the
+  gardener finds the `claude` / `codex` CLI.
+- `gardener_model` accepts `claude-cli` and `codex-cli`.
+- Correct the MCP server instructions, which said nothing writes, and list
+  `memory_search` first.
+
+- Add opt-in prompt-time injection (`inject = "on"`). Each captured prompt is
+  answered with up to three earlier same-project records that clear a
+  deterministic lexical floor, as hidden `additionalContext`, in at most
+  1,536 bytes. The floor is calibrated on `bench/realistic/inject.json` and
+  gated in `tests/inject_floor.rs`. Injected sources are recorded per session
+  in `polis_injections`, a local table created on first use (the shared
+  schema and its version are unchanged).
+- Capture assistant replies through a `Stop` hook (`polis capture --event
+  stop`). It reads the transcript incrementally and records text turns with
+  their edited files, not tool payloads or subagent traffic. An assistant
+  turn that restates injected memory is not recorded again.
+- Redact secrets at ingest, before hashing: provider keys, private keys,
+  JWTs, bearer tokens and long `KEY=`/`PASSWORD=` values. This covers
+  capture, replies, `memory_ingest` and `memory_remember`. Counts by kind are
+  kept; values never are. On in the `polis` binary (`scrub = "off"` disables
+  it); off by default for library hosts, which opt in with
+  `PolisHandle::with_scrub(true)`.
+- Run the capture route's SQLite and observer work on the blocking pool.
+  Take snapshots through a dedicated read-only connection, so a backup no
+  longer holds the store lock for the copy. Run the daemon's periodic
+  backups on a blocking worker.
+- Add `polis service install | uninstall | status` (launchd / systemd user
+  service). `polis init` prints semantic-search readiness.
+- `polis doctor` reports reply capture, injection, scrubbing, the embedding
+  backlog, a down daemon with unindexed sources, and a paid gardener model
+  selected only by an environment key. A new `gardener_model` setting
+  (`auto` | `none`) resolves the last one.
+
 - Enforce project, principal, agent, run, organization, role and source-time
   eligibility across retrieval and transports. Authenticate the assembled HTTP
   and MCP daemon. Commit prompt evidence, scope and ledger events atomically.

@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //! The `polis` command (feature `cli`, Session E1):
-//! `init | serve | mcp | hook | capture | search | context | grep | tree |
-//! stats | verify | doctor | restore | backup`. Reads go to a running daemon
+//! `setup | uninstall | init | service | serve | mcp | hook | skill | capture |
+//! search | context | grep | tree | stats | verify | doctor | restore |
+//! backup`. Reads go to a running daemon
 //! when there is one and to the store file otherwise (`backend`); nothing
 //! here needs a model, a key or a network.
 
+pub mod agents;
 pub mod backend;
 pub mod doctor;
 pub mod home;
 pub mod install;
 pub mod inspect;
 pub mod serve;
+pub mod service;
+pub mod setup;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,7 +30,6 @@ use polis_mcp::render;
 use polis_server::hook::CaptureHookSpec;
 use polis_store::PolisStore;
 
-use backend::Backend;
 use home::Home;
 
 #[derive(Parser)]
@@ -66,6 +69,56 @@ enum Cmd {
         #[arg(long, value_name = "NAME", conflicts_with = "from_redline")]
         org: Option<String>,
     },
+    /// Set Polis up in one step: create the record, connect every agent found
+    /// (search tools, capture hooks, the skill), fetch the embedding model,
+    /// choose the organizer model, and keep the daemon running. Shows the
+    /// plan and asks first; safe to re-run.
+    Setup {
+        /// Don't ask; apply the plan.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Show the plan and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Only these agents, comma-separated (claude, codex, cursor,
+        /// windsurf, claude-desktop). Default: every one found.
+        #[arg(long, value_name = "LIST")]
+        clients: Option<String>,
+        /// Don't install the daemon service.
+        #[arg(long)]
+        no_service: bool,
+        /// No organizer model: the catalog files by rules only.
+        #[arg(long)]
+        no_model: bool,
+        /// Don't install the polis-memory skill for Claude Code.
+        #[arg(long)]
+        no_skill: bool,
+        /// The polis binary the hooks, MCP configs and service run.
+        #[arg(long)]
+        polis: Option<PathBuf>,
+    },
+    /// Undo `polis setup`: remove the hooks, MCP entries, skill and service.
+    /// The record stays unless `--purge`.
+    Uninstall {
+        /// Also delete $POLIS_HOME: the record, its backups and this
+        /// device's key. Asks first unless `--yes`.
+        #[arg(long)]
+        purge: bool,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Install or remove the `polis-memory` skill (how an agent searches,
+    /// cites and writes the record) for Claude Code.
+    Skill {
+        #[command(subcommand)]
+        cmd: SkillCmd,
+    },
+    /// Keep `polis serve` running as a per-user service (launchd on macOS,
+    /// systemd on Linux): semantic indexing, filing and backups need it.
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
     /// Run the daemon: HTTP routes, MCP at /mcp, the gardener, rotating backups.
     Serve {
         /// Bind address (default: config.toml `listen`, else 127.0.0.1:7677).
@@ -96,14 +149,25 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<McpCmd>,
     },
-    /// Install, remove or inspect the UserPromptSubmit capture hook.
+    /// Install, remove or inspect the capture hooks: UserPromptSubmit (typed
+    /// prompts) and Stop (the assistant's replies).
     Hook {
         #[command(subcommand)]
         cmd: HookCmd,
     },
-    /// The capture hook's command: reads the UserPromptSubmit payload on stdin,
-    /// records the prompt (through the daemon, or locally), always exits 0.
-    Capture,
+    /// The capture hooks' command: reads the hook payload on stdin and records
+    /// it (through the daemon, or locally); always exits 0. `--event prompt`
+    /// records the typed prompt; `--event stop` the assistant's reply (Claude
+    /// Code: the turns its transcript gained; Codex: its last message);
+    /// `--event response` Cursor's finished reply.
+    Capture {
+        #[arg(long, value_enum, default_value_t = CaptureEvent::Prompt)]
+        event: CaptureEvent,
+        /// The agent whose hook fired: its payload shape (`claude` = Claude
+        /// Code, the default).
+        #[arg(long, value_enum, default_value_t = agents::HookClient::Claude)]
+        client: agents::HookClient,
+    },
     /// Inspect local retrieval traces, source citations, and gardener history.
     Inspect {
         #[arg(long)] id: Option<String>,
@@ -341,6 +405,13 @@ enum McpCmd {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CaptureEvent {
+    Prompt,
+    Stop,
+    Response,
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum ClientArg {
     Claude,
@@ -352,20 +423,62 @@ enum ClientArg {
 }
 
 #[derive(Subcommand)]
+enum SkillCmd {
+    Install {
+        /// Where to write it (default ~/.claude/skills/polis-memory/SKILL.md).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    Uninstall {
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// Write the service definition and start it.
+    Install {
+        /// The polis binary the service runs (default: this one).
+        #[arg(long)]
+        polis: Option<PathBuf>,
+        /// Write the definition without loading or starting it.
+        #[arg(long)]
+        no_start: bool,
+    },
+    /// Stop the service and remove its definition.
+    Uninstall,
+    /// Whether a definition is installed, and whether a daemon is answering.
+    Status,
+}
+
+#[derive(Subcommand)]
 enum HookCmd {
     Install {
-        /// Claude Code's global settings (default ~/.claude/settings.json).
+        /// The agent to capture from: `claude` (Claude Code, the default),
+        /// `codex` (~/.codex/hooks.json) or `cursor` (~/.cursor/hooks.json).
+        #[arg(long, value_enum, default_value_t = agents::HookClient::Claude)]
+        client: agents::HookClient,
+        /// The agent's hook file (default: its usual global one).
         #[arg(long)]
         settings: Option<PathBuf>,
         /// The polis binary the hook runs (default: this one).
         #[arg(long)]
         polis: Option<PathBuf>,
+        /// Capture typed prompts only: skip (or remove) the Stop hook that
+        /// records the assistant's replies.
+        #[arg(long)]
+        no_replies: bool,
     },
     Uninstall {
+        #[arg(long, value_enum, default_value_t = agents::HookClient::Claude)]
+        client: agents::HookClient,
         #[arg(long)]
         settings: Option<PathBuf>,
     },
     Status {
+        #[arg(long, value_enum, default_value_t = agents::HookClient::Claude)]
+        client: agents::HookClient,
         #[arg(long)]
         settings: Option<PathBuf>,
     },
@@ -457,18 +570,21 @@ fn run(cli: Cli) -> Result<(), String> {
             let login = home.config_get("org").unwrap_or_else(crate::identity::login_name);
             let report = crate::identity::adopt(&store, &identity, &login)?;
             let _ = std::fs::create_dir_all(home.models_dir());
-            tracing::info!(model = %backend::ensure_default_model(&home), "default embedding model");
+            // Said out loud, not only logged: whether semantic search will
+            // work is the first thing a new install wants to know.
+            let semantic = backend::ensure_default_model(&home);
+            tracing::info!(model = %semantic, "default embedding model");
             tracing::info!(assets = backend::request_apple_assets_if_allowed(), "apple contextual embedding assets");
             emit(
                 json,
                 &serde_json::json!({
-                    "home": home.root, "db": db, "createdHome": fresh, "createdDb": created_db, "wroteConfig": wrote_config,
+                    "home": home.root, "db": db, "createdHome": fresh, "createdDb": created_db, "wroteConfig": wrote_config, "semantic": semantic,
                     "identity": { "dir": identity_dir, "createdKey": created_key, "principal": identity.principal_id(), "fingerprint": identity.fingerprint(), "device": identity.device_id(), "deviceName": identity.device_name },
                     "adopt": report,
                 }),
                 || {
                     format!(
-                        "home     {}{}\nstore    {}{}\ntoken    {}\nconfig   {}{}\nidentity {} ({}; key {})\n         principal {}  device {} ({})\n         bind #{}{}; aliases +{}, stamped {} rows{}\n\nnext: `polis hook install` (capture prompts), `polis mcp install --client claude` (answer them), `polis serve` (a daemon with the gardener and backups).",
+                        "home     {}{}\nstore    {}{}\ntoken    {}\nconfig   {}{}\nidentity {} ({}; key {})\n         principal {}  device {} ({})\n         bind #{}{}; aliases +{}, stamped {} rows{}\nsemantic {}\n\nnext: `polis setup` connects your agents and keeps the daemon running (or step by step: `polis hook install`, `polis mcp install --client claude`, `polis service install`).",
                         home.root.display(),
                         if fresh { " (created)" } else { "" },
                         db.display(),
@@ -490,12 +606,73 @@ fn run(cli: Cli) -> Result<(), String> {
                             let u = &report.unscoped;
                             let left = u.prompts + u.browse_events + u.user_notes + u.class_nodes + u.class_observations;
                             if left > 0 { format!(", {left} still unscoped") } else { String::new() }
-                        }
+                        },
+                        semantic
                     )
                 },
             );
             Ok(())
         }
+        Cmd::Setup { yes, dry_run, clients, no_service, no_model, no_skill, polis } => {
+            let opts = setup::SetupOptions { yes, dry_run, clients: clients.map(|c| vec![c]), no_service, no_model, no_skill, polis };
+            let report = setup::run(&home, &opts)?;
+            emit(json, &serde_json::to_value(&report).map_err(|e| e.to_string())?, || setup::render(&report));
+            if report.problems.is_empty() { Ok(()) } else { Err(format!("{} step(s) need attention (above)", report.problems.len())) }
+        }
+        Cmd::Uninstall { purge, yes } => {
+            if purge && !yes && !setup::confirm(&format!("Delete {} — the record, its backups and this device's key?", home.root.display())) {
+                return Err("uninstall cancelled — nothing changed".into());
+            }
+            let report = setup::uninstall(&home, purge);
+            emit(json, &serde_json::to_value(&report).map_err(|e| e.to_string())?, || setup::render_uninstall(&report, &home));
+            if report.problems.is_empty() { Ok(()) } else { Err(format!("{} step(s) failed (above)", report.problems.len())) }
+        }
+        Cmd::Skill { cmd } => {
+            let default = || setup::claude_skill_path().ok_or_else(|| "no skill path (set HOME or pass --path)".to_string());
+            match cmd {
+                SkillCmd::Install { path } => {
+                    let path = path.map(Ok).unwrap_or_else(default)?;
+                    let changed = setup::install_skill(&home, &path)?;
+                    emit(json, &serde_json::json!({ "path": path, "changed": changed }), || format!("{}: polis-memory skill {}", path.display(), if changed { "installed" } else { "unchanged" }));
+                    Ok(())
+                }
+                SkillCmd::Uninstall { path } => {
+                    let path = path.map(Ok).unwrap_or_else(default)?;
+                    let removed = setup::uninstall_skill(&path)?;
+                    emit(json, &serde_json::json!({ "path": path, "removed": removed }), || format!("{}: polis-memory skill {}", path.display(), if removed { "removed" } else { "not installed" }));
+                    Ok(())
+                }
+            }
+        }
+        Cmd::Service { cmd } => match cmd {
+            ServiceCmd::Install { polis, no_start } => {
+                home.ensure()?;
+                let r = service::install(&home, polis, no_start)?;
+                emit(json, &serde_json::to_value(&r).map_err(|e| e.to_string())?, || {
+                    format!("{} service {} · {}", r.manager, if r.started { "installed and started" } else { "written (not started)" }, r.definition.display())
+                });
+                Ok(())
+            }
+            ServiceCmd::Uninstall => {
+                let r = service::uninstall()?;
+                emit(json, &serde_json::to_value(&r).map_err(|e| e.to_string())?, || {
+                    format!("{} service removed{} · {}", r.manager, if r.stopped { " (stopped)" } else { "" }, r.definition.display())
+                });
+                Ok(())
+            }
+            ServiceCmd::Status => {
+                let definition = service::installed();
+                let daemon = backend::daemon_alive(&home);
+                emit(json, &serde_json::json!({ "definition": definition, "daemon": daemon }), || {
+                    format!(
+                        "service  {}\ndaemon   {}",
+                        definition.as_ref().map(|p| format!("installed · {}", p.display())).unwrap_or_else(|| "not installed (`polis service install`)".into()),
+                        daemon.as_deref().unwrap_or("not answering")
+                    )
+                });
+                Ok(())
+            }
+        },
         Cmd::Serve { listen, token_file, no_gardener, tick, org, tofu } => {
             let rt = runtime()?;
             rt.block_on(serve::run(&home, serve::ServeOptions { listen, token_file, no_gardener, tick_secs: tick, org, tofu }))
@@ -522,33 +699,89 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Cmd::Hook { cmd } => {
             let settings = |s: Option<PathBuf>| s.or_else(install::claude_settings_path).ok_or_else(|| "no settings path (set HOME or pass --settings)".to_string());
+            // Codex and Cursor: their own hook files, the same two hooks.
+            let other = |client: agents::HookClient, s: Option<PathBuf>| {
+                s.or_else(|| if client == agents::HookClient::Codex { agents::codex_hooks_path() } else { agents::cursor_hooks_path() })
+                    .ok_or_else(|| "no hooks path (set HOME or pass --settings)".to_string())
+            };
             match cmd {
-                HookCmd::Install { settings: s, polis } => {
-                    let path = settings(s)?;
-                    let spec = doctor::spec_for(&home, polis);
-                    let installed = spec.install_at(&path)?;
-                    emit(json, &serde_json::json!({ "settings": path, "installed": installed, "command": spec.command() }), || format!("{}: capture hook {} → {}", path.display(), if installed { "installed" } else { "NOT installed" }, spec.command()));
+                HookCmd::Install { client, settings: s, polis, .. } if client != agents::HookClient::Claude => {
+                    let path = other(client, s)?;
+                    let polis = polis.unwrap_or_else(home::current_exe);
+                    agents::install_at(client, &path, &polis)?;
+                    emit(json, &serde_json::json!({ "client": client.name(), "hooks": path, "installed": true }), || {
+                        format!(
+                            "{}: {} capture hooks installed (prompts and replies){}",
+                            path.display(),
+                            client.name(),
+                            if client == agents::HookClient::Codex { "\nCodex asks you to review new hooks: open `/hooks` in Codex and enable them." } else { "" }
+                        )
+                    });
                     Ok(())
                 }
-                HookCmd::Uninstall { settings: s } => {
+                HookCmd::Uninstall { client, settings: s } if client != agents::HookClient::Claude => {
+                    let path = other(client, s)?;
+                    agents::uninstall_at(client, &path)?;
+                    emit(json, &serde_json::json!({ "client": client.name(), "hooks": path, "installed": false }), || format!("{}: {} capture hooks removed", path.display(), client.name()));
+                    Ok(())
+                }
+                HookCmd::Status { client, settings: s } if client != agents::HookClient::Claude => {
+                    let path = other(client, s)?;
+                    let (installed, current) = agents::status_at(client, &path, &home::current_exe());
+                    emit(json, &serde_json::json!({ "client": client.name(), "hooks": path, "installed": installed, "current": current }), || {
+                        format!("{}: {} capture hooks {}", path.display(), client.name(), if !installed { "not installed" } else if current { "installed" } else { "installed (stale — run `polis hook install` again)" })
+                    });
+                    Ok(())
+                }
+                HookCmd::Install { settings: s, polis, no_replies, .. } => {
+                    let path = settings(s)?;
+                    let spec = doctor::spec_for(&home, polis.clone());
+                    let installed = spec.install_at(&path)?;
+                    let stop = doctor::stop_spec_for(polis);
+                    let replies = if no_replies { stop.uninstall_at(&path)? } else { stop.install_at(&path)? };
+                    emit(json, &serde_json::json!({ "settings": path, "installed": installed, "command": spec.command(), "replies": replies, "stopCommand": stop.command() }), || {
+                        format!(
+                            "{}: capture hook {} → {}\nreply capture (Stop hook) {}",
+                            path.display(),
+                            if installed { "installed" } else { "NOT installed" },
+                            spec.command(),
+                            if replies { format!("installed → {}", stop.command()) } else { "off".to_string() }
+                        )
+                    });
+                    Ok(())
+                }
+                HookCmd::Uninstall { settings: s, .. } => {
                     let path = settings(s)?;
                     let still = hook_spec(&home).uninstall_at(&path)?;
-                    emit(json, &serde_json::json!({ "settings": path, "installed": still }), || format!("{}: capture hook {}", path.display(), if still { "still present" } else { "removed" }));
+                    let stop_still = doctor::stop_spec_for(None).uninstall_at(&path)?;
+                    emit(json, &serde_json::json!({ "settings": path, "installed": still, "replies": stop_still }), || {
+                        format!("{}: capture hook {} · reply capture {}", path.display(), if still { "still present" } else { "removed" }, if stop_still { "still present" } else { "removed" })
+                    });
                     Ok(())
                 }
-                HookCmd::Status { settings: s } => {
+                HookCmd::Status { settings: s, .. } => {
                     let path = settings(s)?;
                     let spec = hook_spec(&home);
+                    let stop = doctor::stop_spec_for(None);
                     let (installed, current) = (spec.installed_at(&path), spec.current_at(&path));
-                    emit(json, &serde_json::json!({ "settings": path, "installed": installed, "current": current, "command": spec.command() }), || {
-                        format!("{}: {}{}\ncommand: {}", path.display(), if installed { "installed" } else { "not installed" }, if installed && !current { " (stale — run `polis hook install`)" } else { "" }, spec.command())
+                    let (replies, replies_current) = (stop.installed_at(&path), stop.current_at(&path));
+                    emit(json, &serde_json::json!({ "settings": path, "installed": installed, "current": current, "command": spec.command(), "replies": replies, "repliesCurrent": replies_current, "stopCommand": stop.command() }), || {
+                        format!(
+                            "{}: {}{}\ncommand: {}\nreply capture: {}{}",
+                            path.display(),
+                            if installed { "installed" } else { "not installed" },
+                            if installed && !current { " (stale — run `polis hook install`)" } else { "" },
+                            spec.command(),
+                            if replies { "installed" } else { "not installed" },
+                            if replies && !replies_current { " (stale — run `polis hook install`)" } else { "" }
+                        )
                     });
                     Ok(())
                 }
             }
         }
-        Cmd::Capture => {
-            capture(&home);
+        Cmd::Capture { event, client } => {
+            capture(&home, client, event);
             Ok(())
         }
         Cmd::Inspect { id, limit, seq, html, export } => {
@@ -626,7 +859,7 @@ fn run(cli: Cli) -> Result<(), String> {
                     let store = Arc::new(PolisStore::open(&db).map_err(|err| format!("open {}: {err}", db.display()))?);
                     let identity = crate::identity::Identity::load(&home.identity_dir(), home.device_name())?.map(Arc::new);
                     Arc::new(
-                        crate::PolisHandle::new(store, backend::agent_for(), Arc::new(polis_core::host::NoHost), Arc::new(polis_llm::NoopSink))
+                        crate::PolisHandle::new(store, backend::agent_for_home(&home), Arc::new(polis_core::host::NoHost), Arc::new(polis_llm::NoopSink))
                             .with_identity(identity)
                             .with_embedder(Some(e)),
                     )
@@ -972,23 +1205,67 @@ fn open(home: &Home, remote: Option<String>) -> Result<Arc<dyn MemoryApi>, Strin
     backend::open(home, &backend)
 }
 
-/// The hook's whole life: never block prompt submission. Every branch ends
-/// in exit 0; anything printed to stdout is the daemon's own hook answer
-/// (`hookSpecificOutput`), which the harness hands the model as context.
-fn capture(home: &Home) {
+/// The hooks' whole life: never block the agent. Every branch ends in exit
+/// 0; anything printed to stdout is for the agent (Claude Code: the daemon's
+/// `hookSpecificOutput`, which the model reads as context; Cursor: its
+/// required `{"continue": true}`).
+fn capture(home: &Home, client: agents::HookClient, event: CaptureEvent) {
+    use agents::HookClient;
     use std::io::Read;
+    let mut raw = String::new();
+    let payload = std::io::stdin()
+        .read_to_string(&mut raw)
+        .ok()
+        .and_then(|_| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    match (client, event) {
+        (_, CaptureEvent::Prompt) => {
+            let answer = payload.as_ref().and_then(|p| capture_prompt_payload(home, &agents::normalize_prompt(client, p)));
+            match client {
+                // Only Claude Code reads hidden context from this hook.
+                HookClient::Claude => {
+                    if let Some(answer) = answer {
+                        print!("{answer}");
+                    }
+                }
+                HookClient::Cursor => print!("{}", serde_json::json!({ "continue": true })),
+                HookClient::Codex => {}
+            }
+        }
+        (HookClient::Claude, CaptureEvent::Stop) => {
+            if let Some(p) = &payload {
+                if let Err(e) = capture_stop_payload(home, p) {
+                    tracing::warn!(error = %e, "capture --event stop: the turns are read again next time");
+                }
+            }
+        }
+        (HookClient::Codex, CaptureEvent::Stop) | (HookClient::Cursor, CaptureEvent::Response) => {
+            if let Some((session, cwd, text)) = payload.as_ref().and_then(|p| agents::reply_of(client, p)) {
+                let item = polis_core::api::IngestItem {
+                    body: text.chars().take(crate::transcript::MAX_TURN_CHARS).collect(),
+                    ts: None,
+                    role: Some("assistant".into()),
+                    session: Some(session.clone()),
+                    run: Some(session),
+                    project: cwd.clone(),
+                };
+                if let Err(e) = ingest_assistant(home, cwd, vec![vec![item]], client.name()) {
+                    tracing::warn!(error = %e, "capture: reply not recorded");
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Record one normalized prompt payload (`prompt`, `session_id`, `cwd`) and
+/// return the hook answer to relay, if any: through the daemon when one is
+/// up, else in this process.
+pub fn capture_prompt_payload(home: &Home, payload: &serde_json::Value) -> Option<serde_json::Value> {
     let started = std::time::Instant::now();
     let budget = Duration::from_millis(1000);
-    let mut raw = String::new();
-    if std::io::stdin().read_to_string(&mut raw).is_err() || raw.trim().is_empty() {
-        return;
-    }
-    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return;
-    };
-    let prompt = polis_server::ingest_prompt_text(&payload);
+    let prompt = polis_server::ingest_prompt_text(payload);
     if prompt.is_empty() {
-        return;
+        return None;
     }
     let session = payload.get("session_id").and_then(serde_json::Value::as_str).map(str::to_string);
     let cwd = payload.get("cwd").and_then(serde_json::Value::as_str).map(str::to_string);
@@ -998,31 +1275,119 @@ fn capture(home: &Home) {
     if let Some(info) = home.read_serve() {
         let remaining = budget.saturating_sub(started.elapsed()).max(Duration::from_millis(150));
         let api = polis_mcp::remote::RemoteApi::new(info.base_url(), home.read_token()).with_timeout(remaining);
-        match api.capture_raw(&payload) {
-            Ok(body) => {
-                if body.get("hookSpecificOutput").is_some() {
-                    print!("{body}");
-                }
-                return;
-            }
+        match api.capture_raw(payload) {
+            Ok(body) => return body.get("hookSpecificOutput").is_some().then_some(body),
             Err(e) => tracing::debug!(error = %e, "daemon capture failed; recording locally"),
         }
     }
     // No daemon (or it did not answer in time): the store, here.
     let db = home.db_path();
     if !db.exists() {
-        tracing::warn!(db = %db.display(), "capture: no store — run `polis init`");
-        return;
+        tracing::warn!(db = %db.display(), "capture: no store — run `polis setup`");
+        return None;
     }
-    match backend::open(home, &Backend::Local) {
-        Ok(api) => {
-            let req = CaptureRequest { body: prompt, origin: Origin::External, surface: "external".into(), session, project: cwd };
-            if let Err(e) = api.capture(&req) {
-                tracing::warn!(error = %e, "capture: local record failed");
-            }
+    let arrived = polis_core::ledger::now_millis();
+    let handle = match backend::open_local(home) {
+        Ok(handle) => handle,
+        Err(e) => {
+            tracing::warn!(error = %e, "capture: could not open the store");
+            return None;
         }
-        Err(e) => tracing::warn!(error = %e, "capture: could not open the store"),
+    };
+    let req = CaptureRequest { body: prompt.clone(), origin: Origin::External, surface: "external".into(), session: session.clone(), project: cwd.clone() };
+    if let Err(e) = handle.capture(&req) {
+        tracing::warn!(error = %e, "capture: local record failed");
     }
+    // The daemon's `annotate`, answered here when there is no daemon.
+    if !home.inject_enabled() {
+        return None;
+    }
+    let site = crate::inject::PromptSite { session: session.as_deref().filter(|s| !s.is_empty()), project: cwd.as_deref(), before: Some(arrived) };
+    crate::inject::answer_prompt(&handle, &prompt, &site, &Default::default())
+}
+
+/// Store assistant items (in request-sized batches) as the named agent,
+/// through the daemon when one is up, else in this process.
+fn ingest_assistant(home: &Home, cwd: Option<String>, batches: Vec<Vec<polis_core::api::IngestItem>>, agent: &str) -> Result<(), String> {
+    if batches.iter().all(Vec::is_empty) {
+        return Ok(());
+    }
+    let api: Arc<dyn MemoryApi> = match home.read_serve() {
+        Some(info) => Arc::new(polis_mcp::remote::RemoteApi::new(info.base_url(), home.read_token()).with_timeout(Duration::from_secs(5))),
+        None => backend::open_local(home)?,
+    };
+    let agent = if agent == "claude" { "claude-code" } else { agent };
+    let scope = Scope { agent: Some(agent.into()), project: cwd, ..Scope::default() };
+    for items in batches.into_iter().filter(|b| !b.is_empty()) {
+        api.ingest(&polis_core::api::IngestRequest { items, scope: scope.clone() }).map_err(|e| format!("ingest: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Read at most this much new transcript per Stop fire; the rest is read on
+/// the next one.
+const STOP_READ_LIMIT: u64 = 4 * 1024 * 1024;
+/// Keep each ingest request well under the server's 2 MB body limit.
+const STOP_BATCH_BYTES: usize = 512 * 1024;
+
+/// Where a session's transcript was last read up to.
+fn transcript_offset_path(home: &Home, session: &str) -> PathBuf {
+    home.root.join("transcripts").join(format!("{}.offset", short_hash(session)))
+}
+
+/// Claude Code's Stop hook: the assistant turns written since the last
+/// fire, from the transcript the payload names, recorded as `role=assistant`
+/// (scrubbed, and minus echoes of injected memory, by `ingest`). Returns how
+/// many turns were sent; the transcript offset moves only once every batch
+/// was stored, so a failed fire is read again next time.
+pub fn capture_stop_payload(home: &Home, payload: &serde_json::Value) -> Result<usize, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let field = |k: &str| payload.get(k).and_then(serde_json::Value::as_str).map(str::to_string).filter(|s| !s.is_empty());
+    let (Some(session), Some(path)) = (field("session_id"), field("transcript_path")) else { return Ok(0) };
+    let cwd = field("cwd");
+    let offset_path = transcript_offset_path(home, &session);
+    let mut offset = std::fs::read_to_string(&offset_path).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+    let mut file = std::fs::File::open(&path).map_err(|e| format!("open {path}: {e}"))?;
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if offset > len {
+        offset = 0; // the transcript was replaced; read it again (ingest is idempotent)
+    }
+    let mut chunk = Vec::new();
+    file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    file.take(STOP_READ_LIMIT).read_to_end(&mut chunk).map_err(|e| e.to_string())?;
+    let complete = crate::transcript::complete_prefix(&chunk);
+    if complete == 0 {
+        return Ok(0);
+    }
+    let text = String::from_utf8_lossy(&chunk[..complete]);
+    let items: Vec<polis_core::api::IngestItem> = crate::transcript::assistant_turns(&text, cwd.as_deref())
+        .into_iter()
+        .map(|t| polis_core::api::IngestItem {
+            body: t.body,
+            ts: t.ts,
+            role: Some("assistant".into()),
+            session: Some(session.clone()),
+            run: Some(session.clone()),
+            project: cwd.clone(),
+        })
+        .collect();
+    let sent = items.len();
+    let mut batches: Vec<Vec<polis_core::api::IngestItem>> = vec![Vec::new()];
+    let mut size = 0usize;
+    for item in items {
+        if size + item.body.len() > STOP_BATCH_BYTES && !batches.last().is_some_and(Vec::is_empty) {
+            batches.push(Vec::new());
+            size = 0;
+        }
+        size += item.body.len();
+        batches.last_mut().expect("one batch").push(item);
+    }
+    ingest_assistant(home, cwd, batches, "claude")?;
+    if let Some(parent) = offset_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    home::write_private(&offset_path, (offset + complete as u64).to_string().as_bytes())?;
+    Ok(sent)
 }
 
 fn short_hash(s: &str) -> String {
@@ -1068,4 +1433,60 @@ fn render_sync(r: &crate::sync::SyncReport) -> String {
         s.push_str(&format!("ERROR {}: {e}\n", if c.len() == 64 { polis_core::identity::fingerprint(c) } else { c.clone() }));
     }
     s.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    fn temp_home(tag: &str) -> Home {
+        let root = std::env::temp_dir().join(format!("polis-stop-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        PolisStore::open(&root.join("polis.db")).unwrap();
+        Home { root }
+    }
+
+    fn turn(user: &str, reply: &str) -> String {
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"user","message":{"role":"user","content":user}}),
+            serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":reply}]},"timestamp":"2026-10-07T05:29:01.000Z"})
+        )
+    }
+
+    fn assistant_bodies(home: &Home) -> Vec<String> {
+        let store = PolisStore::open(&home.db_path()).unwrap();
+        let conn = store.conn();
+        let mut stmt = conn.prepare("SELECT body FROM prompts WHERE role = 'assistant' ORDER BY id").unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<Vec<String>>>().unwrap()
+    }
+
+    /// Each fire records only what the transcript gained since the last
+    /// one; a replayed fire records nothing; a replaced transcript is read
+    /// again without duplicating what was stored.
+    #[test]
+    fn stop_capture_reads_each_turn_once_and_scrubs_it() {
+        let home = temp_home("once");
+        let transcript = home.root.join("t.jsonl");
+        std::fs::write(&transcript, turn("which port?", "Use 7677 for the standalone daemon.")).unwrap();
+        let payload = serde_json::json!({"session_id":"s1","transcript_path":transcript,"cwd":"/repo","hook_event_name":"Stop"});
+        assert_eq!(capture_stop_payload(&home, &payload).unwrap(), 1);
+        assert_eq!(capture_stop_payload(&home, &payload).unwrap(), 0, "nothing new since the offset");
+
+        let mut more = std::fs::read_to_string(&transcript).unwrap();
+        more.push_str(&turn("and the key?", "Set OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOpQrStUvWx0123 in your shell."));
+        std::fs::write(&transcript, &more).unwrap();
+        assert_eq!(capture_stop_payload(&home, &payload).unwrap(), 1);
+
+        let bodies = assistant_bodies(&home);
+        assert_eq!(bodies, vec!["Use 7677 for the standalone daemon.".to_string(), "Set OPENAI_API_KEY=[redacted:openai_key] in your shell.".to_string()]);
+
+        // A shorter (replaced) transcript restarts from the top; ingest's
+        // idempotency keeps the store unchanged.
+        std::fs::write(&transcript, turn("which port?", "Use 7677 for the standalone daemon.")).unwrap();
+        assert_eq!(capture_stop_payload(&home, &payload).unwrap(), 1);
+        assert_eq!(assistant_bodies(&home).len(), 2);
+        let _ = std::fs::remove_dir_all(&home.root);
+    }
 }

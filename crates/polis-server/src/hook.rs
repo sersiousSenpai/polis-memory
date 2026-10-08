@@ -263,6 +263,114 @@ impl CaptureHookSpec {
     }
 }
 
+/// The `Stop` hook that records the assistant's reply turns: the `polis`
+/// binary's `capture --event stop`, which reads the payload's
+/// `transcript_path` itself (the daemon never opens a path a request names).
+/// Kept beside, not inside, [`CaptureHookSpec`]: a host's pinned
+/// UserPromptSubmit command must not change because this one exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopHookSpec {
+    pub binary: std::path::PathBuf,
+    pub timeout_secs: u64,
+}
+
+impl StopHookSpec {
+    /// The trailing tokens that mark the command as ours.
+    pub const SUBCOMMAND: &'static str = "capture --event stop";
+    const EVENT: &'static str = "Stop";
+
+    pub fn new(binary: impl Into<std::path::PathBuf>) -> Self {
+        Self { binary: binary.into(), timeout_secs: 15 }
+    }
+
+    pub fn command(&self) -> String {
+        format!("\"{}\" {}", self.binary.display(), Self::SUBCOMMAND)
+    }
+
+    /// A `polis` binary's stop capture, at any path.
+    pub fn command_is_ours(command: &str) -> bool {
+        let trimmed = command.trim_end();
+        trimmed.ends_with(&format!("\" {}", Self::SUBCOMMAND)) && trimmed.contains("polis")
+    }
+
+    fn entry_is_ours(entry: &Value) -> bool {
+        entry.get("hooks").and_then(|v| v.as_array()).is_some_and(|hooks| {
+            hooks.iter().any(|h| h.get("command").and_then(|v| v.as_str()).is_some_and(Self::command_is_ours))
+        })
+    }
+
+    fn read(path: &Path) -> Option<Value> {
+        serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+    }
+
+    fn commands(path: &Path) -> Vec<String> {
+        let Some(json) = Self::read(path) else { return Vec::new() };
+        json.pointer("/hooks/Stop")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|e| Self::entry_is_ours(e))
+            .filter_map(|e| e.get("hooks").and_then(|h| h.as_array()).cloned())
+            .flatten()
+            .filter_map(|h| h.get("command").and_then(|c| c.as_str()).map(str::to_string))
+            .collect()
+    }
+
+    pub fn installed_at(&self, path: &Path) -> bool {
+        !Self::commands(path).is_empty()
+    }
+
+    pub fn current_at(&self, path: &Path) -> bool {
+        Self::commands(path).contains(&self.command())
+    }
+
+    /// Install (or refresh) the stop hook, preserving every other hook.
+    pub fn install_at(&self, path: &Path) -> Result<bool, String> {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let mut root = match fs::read_to_string(path) {
+            Ok(content) if !content.trim().is_empty() => serde_json::from_str::<Value>(&content)
+                .map_err(|e| format!("existing settings.json is not valid JSON: {e}"))?,
+            _ => json!({}),
+        };
+        let obj = root.as_object_mut().ok_or_else(|| "settings.json root is not a JSON object".to_string())?;
+        let hooks = obj.entry("hooks".to_string()).or_insert_with(|| json!({}));
+        let hooks = hooks.as_object_mut().ok_or_else(|| "hooks field is not a JSON object".to_string())?;
+        let stop = hooks.entry(Self::EVENT.to_string()).or_insert_with(|| json!([]));
+        let stop = stop.as_array_mut().ok_or_else(|| "hooks.Stop is not a JSON array".to_string())?;
+        let ours = json!([{ "type": "command", "command": self.command(), "timeout": self.timeout_secs }]);
+        match stop.iter_mut().find(|e| Self::entry_is_ours(e)) {
+            Some(entry) => entry["hooks"] = ours,
+            None => stop.push(json!({ "hooks": ours })),
+        }
+        let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+        fs::write(path, format!("{serialized}\n")).map_err(|e| e.to_string())?;
+        Ok(self.installed_at(path))
+    }
+
+    /// Remove only our stop entry, dropping containers left empty.
+    pub fn uninstall_at(&self, path: &Path) -> Result<bool, String> {
+        let Some(mut root) = Self::read(path) else { return Ok(false) };
+        if let Some(arr) = root.pointer_mut("/hooks/Stop").and_then(|v| v.as_array_mut()) {
+            arr.retain(|e| !Self::entry_is_ours(e));
+        }
+        if root.pointer("/hooks/Stop").and_then(|v| v.as_array()).is_some_and(|a| a.is_empty()) {
+            if let Some(hooks) = root.pointer_mut("/hooks").and_then(|v| v.as_object_mut()) {
+                hooks.remove(Self::EVENT);
+            }
+        }
+        if root.pointer("/hooks").and_then(|v| v.as_object()).is_some_and(|o| o.is_empty()) {
+            if let Some(obj) = root.as_object_mut() {
+                obj.remove("hooks");
+            }
+        }
+        let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+        fs::write(path, format!("{serialized}\n")).map_err(|e| e.to_string())?;
+        Ok(self.installed_at(path))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +426,32 @@ mod tests {
         assert!(!curl.current_at(&path));
         assert!(!spec.uninstall_at(&path).unwrap());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_stop_hook_installs_beside_the_capture_hook_and_leaves_foreign_hooks() {
+        let path = tmppath();
+        fs::write(&path, r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]},"model":"opus"}"#).unwrap();
+        let capture = CaptureHookSpec::new("http://127.0.0.1:7677/v1/prompts/ingest").with_binary("/opt/polis/bin/polis");
+        let stop = StopHookSpec::new("/opt/polis/bin/polis");
+        assert_eq!(stop.command(), "\"/opt/polis/bin/polis\" capture --event stop");
+        assert!(!CaptureHookSpec::command_is_capture(&stop.command(), &capture.ingest_url), "the prompt hook never mistakes the stop hook for itself");
+        assert!(!StopHookSpec::command_is_ours(&capture.command()));
+        assert!(capture.install_at(&path).unwrap());
+        assert!(stop.install_at(&path).unwrap());
+        assert!(stop.current_at(&path));
+        // A moved binary is still ours, and a refresh rewrites it in place.
+        let moved = StopHookSpec::new("/usr/local/bin/polis");
+        assert!(moved.installed_at(&path) && !moved.current_at(&path));
+        assert!(moved.install_at(&path).unwrap());
+        let json: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["hooks"]["Stop"].as_array().unwrap().len(), 2, "one foreign entry, one of ours");
+        assert_eq!(json["model"], "opus");
+        assert!(!moved.uninstall_at(&path).unwrap());
+        let json: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["hooks"]["Stop"][0]["hooks"][0]["command"], "say done");
+        assert!(capture.installed_at(&path), "removing the stop hook leaves the prompt hook");
+        let _ = fs::remove_file(&path);
     }
 
     #[test]

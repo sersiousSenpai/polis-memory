@@ -43,9 +43,47 @@ impl IdleSignal for Activity {
     }
 }
 
-impl IngestObserver for Activity {
+/// The daemon's capture-route observer: every recorded prompt marks the
+/// daemon active, and with `inject = "on"` each prompt is answered with the
+/// memory that clears the injection floor (`crate::inject`).
+pub struct DaemonIngest {
+    pub activity: Arc<Activity>,
+    pub inject: Option<Arc<PolisHandle>>,
+    pub inject_cfg: crate::inject::InjectConfig,
+    /// When each in-flight fire arrived, by session: stamped before the
+    /// prompt is recorded (`intercept`), read when it is answered.
+    pub arrived: std::sync::Mutex<std::collections::HashMap<String, i64>>,
+}
+
+impl DaemonIngest {
+    pub fn new(activity: Arc<Activity>, inject: Option<Arc<PolisHandle>>) -> Self {
+        Self { activity, inject, inject_cfg: Default::default(), arrived: Default::default() }
+    }
+}
+
+impl IngestObserver for DaemonIngest {
+    /// Never answers instead of recording; only notes when the fire arrived.
+    fn intercept(&self, cx: &IngestContext<'_>) -> Option<serde_json::Value> {
+        if self.inject.is_some() {
+            let mut arrived = self.arrived.lock().unwrap_or_else(|e| e.into_inner());
+            arrived.insert(cx.session_id.unwrap_or_default().to_string(), now_millis());
+        }
+        None
+    }
+
     fn on_recorded(&self, _cx: &IngestContext<'_>, _seq: Option<i64>) {
-        self.touch();
+        self.activity.touch();
+    }
+
+    fn annotate(&self, cx: &IngestContext<'_>) -> Option<serde_json::Value> {
+        let handle = self.inject.as_ref()?;
+        let before = self.arrived.lock().unwrap_or_else(|e| e.into_inner()).remove(cx.session_id.unwrap_or_default());
+        // A labelled agent spawn is machine text: nothing to answer.
+        if cx.agent_seat.is_some() {
+            return None;
+        }
+        let site = crate::inject::PromptSite { session: cx.session_id, project: cx.cwd, before };
+        crate::inject::answer_prompt(handle, cx.prompt, &site, &self.inject_cfg)
     }
 }
 
@@ -148,9 +186,10 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
     // CLI on PATH, else none) and this platform's on-device embedder.
     tracing::info!(model = %super::backend::ensure_default_model(home), "default embedding model");
     let handle = Arc::new(
-        PolisHandle::new(store.clone(), super::backend::agent_for(), Arc::new(NoHost), Arc::new(crate::usage::LocalUsageSink(store.clone())))
+        PolisHandle::new(store.clone(), super::backend::agent_for_home(home), Arc::new(NoHost), Arc::new(crate::usage::LocalUsageSink(store.clone())))
             .with_identity(identity)
-            .with_embedder(super::backend::embedder_for(home)),
+            .with_embedder(super::backend::embedder_for(home))
+            .with_scrub(home.scrub_enabled()),
     );
     tracing::info!(assets = super::backend::request_apple_assets_if_allowed(), "apple contextual embedding assets");
     let api: Arc<dyn MemoryApi> = handle.clone();
@@ -176,7 +215,10 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
         Some(n) => n.clone(),
         None => Arc::new(polis_core::sync::NoSyncRelay),
     };
-    let state = PolisState { api: api.clone(), ingest: activity.clone(), events: Arc::new(LogEvents), sync: relay };
+    let inject = home.inject_enabled();
+    tracing::info!(inject, "prompt-time memory injection");
+    let ingest = Arc::new(DaemonIngest::new(activity.clone(), inject.then(|| handle.clone())));
+    let state = PolisState { api: api.clone(), ingest, events: Arc::new(LogEvents), sync: relay };
 
     // Startup backup — verified, pruned.
     let backups = home.backups_dir();
@@ -218,12 +260,13 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
     let gardener_task = lock.is_some().then(|| {
         let handle = handle.clone();
         let activity = activity.clone();
-        let cfg = GardenerConfig { backup_dir: Some(backups.clone()), backup_every_ms: policy.every_ms, backup_keep: policy.keep,
-            embed_every_ms: i64::MAX, ..GardenerConfig::default() };
+        // Backups run on their own blocking worker below, not inside the
+        // async tick: a whole-file copy must not occupy a runtime worker.
+        let cfg = GardenerConfig { backup_dir: None, embed_every_ms: i64::MAX, ..GardenerConfig::default() };
         let tick = Duration::from_secs(opts.tick_secs.max(1));
         let org_node = org_node.clone();
         tokio::spawn(async move {
-            let mut state = GardenerState { last_backup_ms: Some(now_millis()), last_embed_ms: Some(now_millis()), ..Default::default() };
+            let mut state = GardenerState { last_embed_ms: Some(now_millis()), ..Default::default() };
             loop {
                 tokio::time::sleep(tick).await;
                 if let Some(identity) = handle.identity.as_ref() {
@@ -267,6 +310,30 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
             }
         })
     });
+    // The rotating snapshot, every `policy.every_ms` after the startup one.
+    // The copy reads through its own connection (`snapshot_to`), so neither
+    // the store's lock nor a runtime worker is held while it runs.
+    let backup_task = lock.is_some().then(|| {
+        let store = store.clone();
+        let backups = backups.clone();
+        let ownership = lock.clone();
+        tokio::spawn(async move {
+            let every = Duration::from_millis(policy.every_ms.max(1) as u64);
+            loop {
+                tokio::time::sleep(every).await;
+                let (store, backups, owner) = (store.clone(), backups.clone(), ownership.clone());
+                let result = tokio::task::spawn_blocking(move || {
+                    let _owner = owner;
+                    backup::backup_verify_prune(&store, &backups, policy.keep)
+                }).await;
+                match result {
+                    Ok(Ok(r)) => tracing::info!(path = %r.path.display(), verified = r.verdict.ok, pruned = r.pruned, "daemon wrote a snapshot"),
+                    Ok(Err(e)) => tracing::warn!(error = %e, "daemon backup failed"),
+                    Err(e) => tracing::warn!(error = %e, "backup worker interrupted"),
+                }
+            }
+        })
+    });
     let filing_task = lock.is_some().then(|| {
         let handle = handle.clone();
         tokio::spawn(async move {
@@ -299,6 +366,7 @@ pub async fn run(home: &Home, opts: ServeOptions) -> Result<(), String> {
     }
     if let Some(t) = indexing_task { t.abort(); }
     if let Some(t) = filing_task { t.abort(); }
+    if let Some(t) = backup_task { t.abort(); }
     drop(lock);
     match backup::backup_verify_prune(&store, &backups, policy.keep) {
         Ok(r) => tracing::info!(path = %r.path.display(), verified = r.verdict.ok, "shutdown snapshot"),
@@ -325,11 +393,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    async fn post_capture(router: axum::Router, body: &str) -> serde_json::Value {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let request = format!("POST /v1/prompts/ingest HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer t\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut response)).await.unwrap().unwrap();
+        server.abort();
+        let response = String::from_utf8_lossy(&response).to_string();
+        let json = response.split("\r\n\r\n").nth(1).unwrap_or("");
+        serde_json::from_str(json).unwrap_or_else(|e| panic!("{e}: {response}"))
+    }
+
+    /// With injection on, the capture route answers a prompt with the
+    /// project's matching memory as hidden model context, records what it
+    /// injected for the session, and stays inside the block's budget; with it
+    /// off, the body is the receipt alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_capture_route_injects_matching_memory_only_when_enabled() {
+        use polis_core::api::{IngestItem, IngestRequest};
+        let handle = Arc::new(PolisHandle::new(Arc::new(PolisStore::open_in_memory().unwrap()), None, Arc::new(NoHost), Arc::new(NoopSink)));
+        // A project's worth of ordinary chores around one fact: a store of two
+        // items has no term statistics to tell a fact from a chore, and
+        // rightly injects nothing.
+        let project = Some("/work/bluebird".to_string());
+        let mut items: Vec<IngestItem> = ["run the tests for", "fix the typo in", "lint", "refactor", "write docs for"]
+            .iter()
+            .flat_map(|chore| ["the parser", "the router", "the CLI", "the logger", "the cache", "the queue", "main.rs", "the README"].map(move |m| format!("{chore} {m}")))
+            .map(|body| IngestItem { body, session: Some("chores".into()), project: project.clone(), ..Default::default() })
+            .collect();
+        items.push(IngestItem { body: "The Bluebird API port is 9090 after the March migration.".into(), session: Some("earlier".into()), project: project.clone(), ..Default::default() });
+        let scope = polis_core::api::Scope { project, ..Default::default() };
+        let fact = *handle.ingest(&IngestRequest { items, scope }).unwrap().recorded.last().unwrap();
+        let api: Arc<dyn MemoryApi> = handle.clone();
+        let auth = StandaloneAuth { token: Some("t".into()) };
+        let router = |inject: bool| {
+            let ingest = Arc::new(DaemonIngest::new(Arc::new(Activity::default()), inject.then(|| handle.clone())));
+            let state = PolisState { api: api.clone(), ingest, events: Arc::new(LogEvents), sync: Arc::new(polis_core::sync::NoSyncRelay) };
+            app(state, auth.clone())
+        };
+        let on = post_capture(router(true), r#"{"prompt":"what port does the Bluebird API listen on?","session_id":"now","cwd":"/work/bluebird"}"#).await;
+        assert!(on["seq"].as_i64().is_some(), "{on}");
+        let context = on["hookSpecificOutput"]["additionalContext"].as_str().expect("injected context");
+        assert_eq!(on["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
+        assert!(context.contains("9090") && context.contains(&format!("#{fact}")), "{context}");
+        assert!(context.len() <= crate::inject::DEFAULT_MAX_BYTES);
+        assert_eq!(handle.store.recent_injections(10).unwrap(), vec![("now".to_string(), fact, handle.store.recent_injections(1).unwrap()[0].2)]);
+
+        let off = post_capture(router(false), r#"{"prompt":"what port does the Bluebird API listen on now?","session_id":"later","cwd":"/work/bluebird"}"#).await;
+        assert!(off["seq"].as_i64().is_some() && off.get("hookSpecificOutput").is_none(), "{off}");
+        let elsewhere = post_capture(router(true), r#"{"prompt":"what port does the Bluebird API listen on today?","session_id":"x","cwd":"/work/heron"}"#).await;
+        assert!(elsewhere.get("hookSpecificOutput").is_none(), "another project's prompt gets nothing: {elsewhere}");
+    }
+
     #[tokio::test]
     async fn assembled_mcp_service_requires_the_http_bearer() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let api: Arc<dyn MemoryApi> = Arc::new(PolisHandle::new(Arc::new(PolisStore::open_in_memory().unwrap()), None, Arc::new(NoHost), Arc::new(NoopSink)));
-        let state = PolisState { api: api.clone(), ingest: Arc::new(Activity::default()), events: Arc::new(LogEvents), sync: Arc::new(polis_core::sync::NoSyncRelay) };
+        let ingest = Arc::new(DaemonIngest::new(Arc::new(Activity::default()), None));
+        let state = PolisState { api: api.clone(), ingest, events: Arc::new(LogEvents), sync: Arc::new(polis_core::sync::NoSyncRelay) };
         let auth = StandaloneAuth { token: Some("test-secret".into()) };
         let router = polis_server::standalone::guard(app(state, auth.clone()).nest_service("/mcp", polis_mcp::http_service(api)), auth);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
