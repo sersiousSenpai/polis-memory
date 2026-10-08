@@ -58,7 +58,8 @@ Everything since 0.1.0:
   their edited files, not tool payloads or subagent traffic. An assistant
   turn that restates injected memory is not recorded again.
 - Redact secrets at ingest, before hashing: provider keys, private keys,
-  JWTs, bearer tokens and long `KEY=`/`PASSWORD=` values. This covers
+  JWTs, bearer tokens, and long values assigned to key, secret, token or
+  password names. This covers
   capture, replies, `memory_ingest` and `memory_remember`. Counts by kind are
   kept; values never are. On in the `polis` binary (`scrub = "off"` disables
   it); off by default for library hosts, which opt in with
