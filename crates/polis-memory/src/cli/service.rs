@@ -219,7 +219,8 @@ mod tests {
         assert!(plist.contains("<key>POLIS_HOME</key><string>/Users/a b/.polis</string>"));
         assert!(plist.contains("<key>KeepAlive</key><true/>"));
         assert!(plist.contains("<key>PATH</key><string>/Users/a/.local/bin:/usr/bin</string>"), "the model CLIs resolve as in the shell");
-        assert!(plist.contains("/Users/a b/.polis/logs/serve.log"));
+        let log = home().root.join("logs").join("serve.log");
+        assert!(plist.contains(&log.display().to_string()), "the log sits in the home (any separator)");
         assert!(plist.contains(&format!("<key>Label</key><string>{LABEL}</string>")));
     }
 

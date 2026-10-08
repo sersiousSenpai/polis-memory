@@ -69,12 +69,16 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --locked
-      - run: cargo test --workspace --locked
+      # `eval_gate` holds p95 budgets, which only mean something when it runs
+      # alone: here it shares the runner with every other test in parallel
+      # (it has failed this way since 8056d48). The `eval` job below runs it
+      # in isolation and enforces the same budgets and recall floor.
+      - run: cargo test --workspace --locked -- --skip eval_gate
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Every feature but the ONNX runtime (`fastembed`), whose build
       # downloads a native library — it has its own Ubuntu check below.
       # `bundled-model` builds with placeholders here (no model directory).
-      - run: cargo test --workspace --features "${{ env.FEATURES_BUT_ORT }}" --locked
+      - run: cargo test --workspace --features "${{ env.FEATURES_BUT_ORT }}" --locked -- --skip eval_gate
       - run: cargo clippy --workspace --all-targets --features "${{ env.FEATURES_BUT_ORT }}" --locked -- -D warnings
 
   providers:
